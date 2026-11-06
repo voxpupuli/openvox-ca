@@ -78,6 +78,18 @@ below applies to it; what it sets and why 8141 rather than 8140 is in
 tarballs and container images ship no configuration file at all, so on those
 the settings below are yours to write.
 
+**A key openvox-ca does not recognise refuses startup**, at any depth, with its
+path and line:
+
+```text
+error: parsing config file /etc/openvox-ca/config.yaml: line 12: unknown key "encrypt_ca_kye" (openvox-ca refuses keys it does not recognise rather than ignore them: correct the spelling, or remove the key)
+```
+
+Ignoring it instead would leave the setting it was meant to be at its default,
+with nothing in the log to say so. The keys inside `labels` and `annotations`
+are data rather than settings, and take any name. A second YAML document after
+a `---` is refused for the same reason, since only the first would be read.
+
 **Example `/etc/openvox-ca/config.yaml`:**
 
 ```yaml
@@ -325,8 +337,19 @@ A database password needs the same care. Give it in `--sql-dsn-file`,
 > variable support because `OPENVOX_CA_DAEMON` is used internally as the daemon fork
 > signal.
 
-Boolean env vars accept any value accepted by `strconv.ParseBool`: `1`, `t`, `true`,
-`yes`, `on` (case-insensitive) to enable; `0`, `f`, `false`, `no`, `off` to disable.
+Boolean env vars accept `1`, `t`, `T`, `true`, `TRUE` or `True` to enable, and
+`0`, `f`, `F`, `false`, `FALSE` or `False` to disable: the values Go's
+`strconv.ParseBool` takes. Anything else, `yes` and `on` included, refuses
+startup with an error naming the variable, as does an integer variable set to
+something other than a whole number: ignored instead,
+`OPENVOX_CA_ENCRYPT_CA_KEY=yes` would leave the key unencrypted without a word.
+An empty variable is treated as unset.
+
+On Kubernetes, set `enableServiceLinks: false` on the pod (the Helm chart's
+default). Service links give the pod a variable for every Service in its
+namespace, named after the Service, and a Service called `openvox-ca` sets
+`OPENVOX_CA_PORT=tcp://<cluster IP>:8140`, which the server reads as its port
+and refuses.
 
 ## Serving certificate
 

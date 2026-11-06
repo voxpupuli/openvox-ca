@@ -28,25 +28,26 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"go.yaml.in/yaml/v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/certstore"
+	"github.com/voxpupuli/openvox-ca/internal/config"
 )
 
-// decode parses a `managed_certs:` document the way the server's own config
-// loader does, so these specs exercise the YAML keys an operator writes rather
-// than the Go fields behind them. A key that was renamed or mistyped fails
-// here, which a struct literal would not notice.
+// decode parses a `managed_certs:` document with the decoder the server's own
+// config loader uses, config.DecodeStrict, so these specs exercise the YAML
+// keys an operator writes rather than the Go fields behind them. A key that was
+// renamed or mistyped fails here, as it would at startup, which a struct
+// literal would not notice.
 func decode(doc string) certstore.Config {
 	GinkgoHelper()
 	var wrapper struct {
 		Certs certstore.Config `yaml:"managed_certs"`
 	}
-	Expect(yaml.Unmarshal([]byte(doc), &wrapper)).To(Succeed())
+	Expect(config.DecodeStrict([]byte(doc), &wrapper, "openvox-ca")).To(Succeed())
 	return wrapper.Certs
 }
 
@@ -54,7 +55,7 @@ func decodeErr(doc string) error {
 	var wrapper struct {
 		Certs certstore.Config `yaml:"managed_certs"`
 	}
-	return yaml.Unmarshal([]byte(doc), &wrapper)
+	return config.DecodeStrict([]byte(doc), &wrapper, "openvox-ca")
 }
 
 // minimal is the smallest entry that validates: a certname, one name, a renew
@@ -76,7 +77,7 @@ var _ = Describe("the managed_certs configuration", func() {
 	build := func(cfg certstore.Config) []ca.ManagedCert {
 		GinkgoHelper()
 		Expect(cfg.Validate()).To(Succeed())
-		managed, err := cfg.Build(certstore.Deps{
+		managed, err := certstore.Build(cfg, certstore.Deps{
 			CACerts: stubCA{pem: []byte("CA")},
 			Client:  fake.NewClientset(),
 		})
@@ -823,14 +824,14 @@ managed_certs:
     store: {files: {cert: /c.pem, key: /k.pem}}
 `)
 			Expect(cfg.NeedsKubernetes()).To(BeFalse())
-			_, err := cfg.Build(certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
+			_, err := certstore.Build(cfg, certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
 			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("says so when a Secret store has no client", func() {
 			cfg := decode(minimal)
 			Expect(cfg.NeedsKubernetes()).To(BeTrue())
-			_, err := cfg.Build(certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
+			_, err := certstore.Build(cfg, certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
 			Expect(err).To(MatchError(ContainSubstring("inside a pod")))
 		})
 
@@ -845,7 +846,7 @@ managed_certs:
 			Expect(cfg.NeedsDefaultNamespace()).To(BeTrue())
 			Expect(decode(minimal).NeedsDefaultNamespace()).To(BeFalse())
 
-			_, err := cfg.Build(certstore.Deps{
+			_, err := certstore.Build(cfg, certstore.Deps{
 				CACerts: stubCA{pem: []byte("CA")}, Client: fake.NewClientset(),
 			})
 			Expect(err).To(MatchError(ContainSubstring("could not be resolved")))
@@ -866,7 +867,7 @@ managed_certs:
 `)
 			Expect(cfg.Validate()).To(Succeed())
 			client := fake.NewClientset()
-			managed, err := cfg.Build(certstore.Deps{
+			managed, err := certstore.Build(cfg, certstore.Deps{
 				CACerts:          stubCA{pem: []byte("CA")},
 				Client:           client,
 				DefaultNamespace: "ca-system",
@@ -934,7 +935,7 @@ managed_certs:
 `)
 			Expect(cfg.Validate()).To(Succeed())
 			client := fake.NewClientset()
-			managed, err := cfg.Build(certstore.Deps{
+			managed, err := certstore.Build(cfg, certstore.Deps{
 				CACerts: stubCA{pem: []byte("CA")},
 				Client:  client,
 			})
@@ -961,7 +962,7 @@ managed_certs:
 `)
 			Expect(cfg.Validate()).To(Succeed())
 			client := fake.NewClientset()
-			managed, err := cfg.Build(certstore.Deps{
+			managed, err := certstore.Build(cfg, certstore.Deps{
 				CACerts:          stubCA{pem: []byte("CA")},
 				Client:           client,
 				DefaultNamespace: "ca-system",
@@ -1017,7 +1018,7 @@ managed_certs:
 `)
 			Expect(cfg.Validate()).To(Succeed())
 
-			managed, err := cfg.Build(certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
+			managed, err := certstore.Build(cfg, certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(managed[0].Save(context.Background(), []byte("CERT"), []byte("KEY"))).To(Succeed())
 
@@ -1035,7 +1036,7 @@ managed_certs:
 		// and a file-only deployment is the case a caller is likeliest to
 		// build a nil CACerts for.
 		It("says so when no CA certificate source is supplied", func() {
-			_, err := decode(minimal).Build(certstore.Deps{Client: fake.NewClientset()})
+			_, err := certstore.Build(decode(minimal), certstore.Deps{Client: fake.NewClientset()})
 			Expect(err).To(MatchError(ContainSubstring("CA certificate chain")))
 		})
 	})
@@ -1135,7 +1136,7 @@ managed_certs:
     renew_before: 720h
     store: {secret: {name: ca-tls}}
 `)
-			_, err := cfg.BuildIn(servingCert, certstore.Deps{
+			_, err := certstore.BuildIn(cfg, servingCert, certstore.Deps{
 				CACerts: stubCA{pem: []byte("CA")}, Client: fake.NewClientset(),
 			})
 			Expect(err).To(MatchError(ContainSubstring("serving_cert (ca.example.com)")))
@@ -1307,7 +1308,7 @@ managed_certs:
     usages: [codeSigning]
     store: {files: {cert: /c.pem, key: /k.pem}}
 `)
-			_, err := cfg.Build(certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
+			_, err := certstore.Build(cfg, certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
 
 			Expect(err).To(MatchError(ContainSubstring("managed_certs[0] (a.example.com)")))
 			Expect(err).To(MatchError(ContainSubstring("codeSigning")))
@@ -1333,7 +1334,7 @@ managed_certs:
 			var managed []ca.ManagedCert
 			var err error
 			Expect(func() {
-				managed, err = cfg.Build(certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
+				managed, err = certstore.Build(cfg, certstore.Deps{CACerts: stubCA{pem: []byte("CA")}})
 			}).NotTo(Panic(), "a caller that skipped Validate gets an error, not a panic")
 
 			Expect(err).To(MatchError(ContainSubstring("managed_certs[0] (a.example.com)")))
@@ -1358,7 +1359,7 @@ managed_certs:
 			// the two guards -- dormancy is decided before the dependency
 			// check, which is what lets a file-only or Kubernetes-free
 			// deployment start without supplying either.
-			managed, err := empty.Build(certstore.Deps{})
+			managed, err := certstore.Build(empty, certstore.Deps{})
 
 			Expect(err).NotTo(HaveOccurred())
 			Expect(managed).To(BeEmpty())
@@ -1386,7 +1387,7 @@ managed_certs:
 			present := certstore.Config{}
 
 			Expect(present.Enabled()).To(BeFalse())
-			managed, err := present.Build(certstore.Deps{})
+			managed, err := certstore.Build(present, certstore.Deps{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(managed).To(BeEmpty())
 		})

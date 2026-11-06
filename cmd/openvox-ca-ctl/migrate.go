@@ -26,30 +26,40 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/voxpupuli/openvox-ca/internal/config"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
-	"go.yaml.in/yaml/v3"
 )
 
-// migrateFileConfig is the subset of a openvox-ca server config file needed to
-// open a storage backend for migration: the backend selection and its
-// parameters (via the shared config.StorageConfig), plus cadir. cadir is the
+// migrateFileConfig is what migration takes from a server config file, copied
+// out of config.ServerConfig by loadMigrateConfig: the backend selection and
+// its parameters (the shared config.StorageConfig), plus cadir. cadir is the
 // backend root for the filesystem backend and, for remote backends, the local
 // directory the spec validator requires (migration never touches the
-// per-subject private keys kept there).
+// per-subject private keys kept there). It is not decoded into; see
+// loadMigrateConfig for why.
 type migrateFileConfig struct {
-	CADir                string `yaml:"cadir"`
-	config.StorageConfig `yaml:",inline"`
+	CADir string
+	config.StorageConfig
 }
 
 // loadMigrateConfig reads and parses one backend config file.
+//
+// The file is decoded against the server's whole schema, config.ServerConfig,
+// and not just the fields migrate uses: the docs promise these are ordinary
+// server config files, so every server setting has to be accepted, and a key
+// the server would refuse is refused here too. Decoding into the subset would
+// either reject legitimate files or, decoded leniently, let a misspelt
+// storage_backend send the copy to the filesystem backend in silence.
 func loadMigrateConfig(path string) (migrateFileConfig, error) {
 	var c migrateFileConfig
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return c, fmt.Errorf("reading %s: %w", path, err)
 	}
-	if err := yaml.Unmarshal(data, &c); err != nil {
+	var full config.ServerConfig
+	if err := config.DecodeStrict(data, &full, "openvox-ca-ctl migrate"); err != nil {
 		return c, fmt.Errorf("parsing %s: %w", path, err)
 	}
+	c.CADir = full.CADir
+	c.StorageConfig = full.StorageConfig
 	return c, nil
 }
 

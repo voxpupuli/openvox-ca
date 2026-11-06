@@ -29,7 +29,7 @@ verbosity: 1
 
 config:
   storage_backend: etcd
-  etcd_endpoints: https://etcd-0:2379,https://etcd-1:2379
+  etcd_endpoints: [https://etcd-0:2379, https://etcd-1:2379]
   etcd_tls_ca_file: /run/secrets/etcd/ca.crt
   ca_key_provider: openbao
   openbao:
@@ -48,10 +48,11 @@ config:
   #
   # Be clear about how far that goes: values.schema.json types `config` as a
   # bare object, and the block is emitted as an opaque config.yaml string, so
-  # nothing here validates a key name. `crlFile` for `crl_file` would render,
-  # lint and pass kubeconform while the server silently ignored it. The
-  # extraVolumes/extraVolumeMounts entries below ARE schema-checked, because
-  # they render into the pod spec. Only the server-side spelling is on trust.
+  # helm lint and kubeconform validate no key name in it. chart:validate does:
+  # it strict-decodes the config.yaml this renders against the server's
+  # schema, so `crlFile` for `crl_file` fails there as it would at startup.
+  # The extraVolumes/extraVolumeMounts entries below are schema-checked too,
+  # because they render into the pod spec.
   #
   # Each file gets a volume to itself: a subPath mount never receives updates,
   # which would freeze the CRLs while every metric went on reporting health.

@@ -20,6 +20,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -27,336 +28,17 @@ import (
 	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
-	"github.com/voxpupuli/openvox-ca/internal/certstore"
 	"github.com/voxpupuli/openvox-ca/internal/config"
-	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
-	"go.yaml.in/yaml/v3"
 )
 
 // serverConfig holds all configuration for the openvox-ca server.
 // Fields are populated from (lowest → highest priority):
 //
 //	built-in defaults → config file → env vars → CLI flags
-type serverConfig struct {
-	CADir             string `yaml:"cadir"`
-	AutosignConfig    string `yaml:"autosign_config"`
-	Host              string `yaml:"host"`
-	Port              int    `yaml:"port"`
-	Hostname          string `yaml:"hostname"`
-	Verbosity         int    `yaml:"verbosity"`
-	LogFile           string `yaml:"logfile"`
-	TLSCert           string `yaml:"tls_cert"`
-	TLSKey            string `yaml:"tls_key"`
-	PuppetServer      string `yaml:"puppet_server"`
-	PuppetServerFile  string `yaml:"puppet_server_file"`
-	NoPpCliAuth       bool   `yaml:"no_pp_cli_auth"`
-	NoTLSRequired     bool   `yaml:"no_tls_required"`
-	AllowPublicStatus bool   `yaml:"allow_public_status"`
-	OCSPUrl           string `yaml:"ocsp_url"`
-	CRLUrl            string `yaml:"crl_url"`
-
-	// CRLChainFile is a PEM bundle of upstream CRLs published alongside this
-	// CA's own, for agents doing full-chain revocation checking (Puppet's
-	// default). Re-read by the crl-chain-refresh job, so refreshing the file is
-	// how an operator keeps ancestor CRLs current — every CRL in it is
-	// signature-verified against the stored CA bundle before it is served.
-	// Empty disables the feature.
-	CRLChainFile string `yaml:"crl_chain_file"`
-
-	// CRLChainRefreshIntervalSec is how often that file is re-read and the
-	// published CRL rewritten if its upstream blocks changed. 0 = built-in
-	// default (1h). Gated on crl_chain_file alone: an operator publishing an
-	// upstream chain is not necessarily running any other periodic job.
-	CRLChainRefreshIntervalSec int `yaml:"crl_chain_refresh_interval_sec"`
-
-	// MetricsListen, when non-empty, enables the Prometheus exporter on the
-	// given address (e.g. "127.0.0.1:9140" or ":9140"). The exporter serves
-	// /metrics over plain HTTP on a separate listener from the Puppet API and is
-	// disabled by default because it reveals certificate subjects (node
-	// hostnames); restrict it to a trusted network or loopback.
-	MetricsListen string `yaml:"metrics_listen"`
-
-	// ShutdownTimeoutSec bounds the frontend's graceful HTTP-drain budget on
-	// SIGTERM: the time in-flight requests are given to complete before the
-	// listener is torn down. 0 selects the built-in default (defaultShutdownDrain).
-	// The launcher derives its own, slightly larger, hard-kill deadline from
-	// this value (drain + launcherShutdownHeadroom) so a child is never killed
-	// mid-drain. Operators raising this must also raise their orchestrator's
-	// termination grace period (Kubernetes terminationGracePeriodSeconds
-	// defaults to 30s) or the platform will SIGKILL the pod first.
-	ShutdownTimeoutSec int `yaml:"shutdown_timeout_sec"`
-
-	// The default deployment is a process tree -- a launcher supervising an
-	// isolated signer and a frontend -- and GOMEMLIMIT is a per-process knob, so
-	// the launcher divides one tree-wide budget between the three rather than
-	// letting each apply the whole of it. These three keys tune that division;
-	// none of them is needed for the defaults to be sensible.
-	//
-	// MemoryReserveLauncher and MemoryReserveSigner are the fixed shares the
-	// launcher and signer receive, as an integer with an optional IEC suffix,
-	// with or without the trailing B ("24MiB", "24Mi", "25165824"). That is
-	// deliberately wider than GOMEMLIMIT's own grammar, which requires the B;
-	// see parseConfiguredByteCount. The frontend takes the remainder,
-	// because in steady state it is the process whose footprint grows with the
-	// fleet. The signer's share is the one an operator can outgrow: its startup
-	// peak is fleet-proportional at roughly 420 bytes per certificate, and
-	// raising the container limit does not reach it. The share also carries the
-	// runtime's own footprint, so the usable headroom in the 24MiB default is
-	// nearer 16MiB: raise memory_reserve_signer beyond roughly 40,000
-	// certificates. Empty selects the built-in defaults.
-	MemoryReserveLauncher string `yaml:"memory_reserve_launcher"`
-	MemoryReserveSigner   string `yaml:"memory_reserve_signer"`
-
-	// MemoryBudgetPercent is how much of a cgroup memory ceiling the tree may
-	// claim when the budget is derived rather than stated. GOMEMLIMIT bounds Go
-	// runtime memory only -- the binary's resident text, kernel memory charged
-	// to the cgroup, and a memory-backed cadir all count against the same
-	// ceiling from outside it -- so claiming the whole of it would make the
-	// runtimes collect harder only once the cgroup was already at the wall.
-	// 0 selects the built-in default (defaultMemoryBudgetPercent); values
-	// outside 1-100 are ignored in favour of it. It does not apply to an
-	// explicit GOMEMLIMIT, which is taken at face value because the operator
-	// naming a number has already chosen their own headroom.
-	MemoryBudgetPercent int `yaml:"memory_budget_percent"`
-
-	// Key generation options (apply only when bootstrapping a new CA).
-	CAKeyAlgo   string `yaml:"ca_key_algo"`
-	CAKeySize   int    `yaml:"ca_key_size"`
-	LeafKeyAlgo string `yaml:"leaf_key_algo"`
-	LeafKeySize int    `yaml:"leaf_key_size"`
-
-	// CA certificate subject fields (apply only when bootstrapping a new CA).
-	CASubjectOrg      string `yaml:"ca_subject_org"`
-	CASubjectOU       string `yaml:"ca_subject_ou"`
-	CASubjectCountry  string `yaml:"ca_subject_country"`
-	CASubjectLocality string `yaml:"ca_subject_locality"`
-	CASubjectProvince string `yaml:"ca_subject_province"`
-
-	// Validity and path length options (apply only when bootstrapping a new CA,
-	// except LeafValidityDays and CRLValidityDays which apply on every
-	// signing/revocation operation).
-	CAPathLength     int `yaml:"ca_path_length"`     // -1=unconstrained (default), 0=leaf-only, N=N levels
-	CAValidityDays   int `yaml:"ca_validity_days"`   // 0 = built-in default (~5 years)
-	LeafValidityDays int `yaml:"leaf_validity_days"` // 0 = built-in default (~5 years)
-	CRLValidityDays  int `yaml:"crl_validity_days"`  // 0 = built-in default (30 days)
-	CSRRateLimit     int `yaml:"csr_rate_limit"`     // max CSR submissions per IP per minute; 0 disables, -1/unset = built-in default (60)
-
-	// CASigningConcurrency caps concurrent CA-key signatures across issuance,
-	// CRL re-signing and the OCSP responder together. Same three-state
-	// convention as CSRRateLimit: 0 disables the bound (unbounded signing),
-	// -1/unset takes the built-in default, positive values pass through.
-	//
-	// The default is a ceiling rather than a tuning — it exists to stop
-	// unbounded growth, not to match any particular signer. Deployments using
-	// an isolated signer over IPC or ca_key_provider: openbao should set this
-	// to what that signer can actually sustain, which openvox-ca has no way to
-	// discover.
-	CASigningConcurrency int `yaml:"ca_signing_concurrency"`
-
-	// Background CRL refresh keeps the CRL's NextUpdate from lapsing when no
-	// certificates are being revoked. Safe to run on every replica: the work is
-	// serialised on the shared CRL lock, so only one replica re-signs per cycle.
-	DisableCRLRefresh     bool `yaml:"disable_crl_refresh"`      // true = never auto-refresh the CRL
-	CRLRefreshIntervalSec int  `yaml:"crl_refresh_interval_sec"` // how often to check; 0 = built-in default (1h)
-	CRLRefreshBeforeSec   int  `yaml:"crl_refresh_before_sec"`   // re-sign when remaining validity < this; 0 = crl_validity/3
-
-	// CRLSyncIntervalSec is how often each replica re-reads the stored CRL into
-	// the copy its revocation checks answer from, and so bounds how long a
-	// certificate revoked on another replica keeps working here. Not covered by
-	// disable_crl_refresh, which governs re-signing rather than propagation.
-	CRLSyncIntervalSec int `yaml:"crl_sync_interval_sec"` // how often to reload the CRL; 0 = built-in default (60s)
-
-	// OCSPIndexSyncIntervalSec is how often each replica re-reads the inventory
-	// into the serial index its OCSP responder answers from, and so bounds how
-	// long that responder says `unknown` about a certificate signed on another
-	// replica. Separate from crl_sync_interval_sec because the two answer
-	// different questions at different costs: that one re-reads a single small
-	// CRL blob and bounds a certificate outliving its revocation, this one
-	// re-reads the whole inventory and bounds a correct certificate being
-	// reported as unrecognised.
-	OCSPIndexSyncIntervalSec int `yaml:"ocsp_index_sync_interval_sec"` // how often to reload the OCSP serial index; 0 = built-in default (5m)
-
-	// Background expired-certificate cleanup. Disabled by default: when enabled,
-	// a job periodically removes certificates that expired more than the
-	// retention grace period ago from the inventory and the CRL (and deletes
-	// their stored signed certificate). Safe to run on every replica: the work is
-	// serialised on the shared CRL lock, so only one replica prunes per cycle.
-	EnableExpiredCertCleanup      bool `yaml:"enable_expired_cert_cleanup"`       // true = run the cleanup job
-	ExpiredCertRetentionSec       int  `yaml:"expired_cert_retention_sec"`        // grace period after NotAfter before removal; 0 = built-in default (30d)
-	ExpiredCertCleanupIntervalSec int  `yaml:"expired_cert_cleanup_interval_sec"` // how often to run; 0 = built-in default (24h)
-
-	// CA key encryption at rest.
-	EncryptCAKey        bool   `yaml:"encrypt_ca_key"`         // encrypt the CA private key at rest (AES-256-GCM + Argon2id)
-	CAKeyPassphraseFile string `yaml:"ca_key_passphrase_file"` // path to file containing the CA key passphrase
-
-	// InsecureAllowWorldReadableKeys downgrades the startup refusal on
-	// world-accessible key material to a warning. Named for what it is: an
-	// operator reaching for this should see what they are turning off in the
-	// key itself.
-	InsecureAllowWorldReadableKeys bool `yaml:"insecure_allow_world_readable_keys"`
-
-	// InsecureAllowUnsafeAutosignPath runs the autosign executable even when
-	// an entry on its path could be replaced by someone other than root or
-	// the CA's own user, warning instead of refusing. Named, like the key
-	// opt-out above, for what it turns off.
-	InsecureAllowUnsafeAutosignPath bool `yaml:"insecure_allow_unsafe_autosign_path"`
-
-	// PromoteCNToSAN adds the CN as a DNS SAN when the CSR has no SANs (default: true).
-	PromoteCNToSAN bool `yaml:"promote_cn_to_san"`
-	// AllowSubjectAltNames lets a submitted CSR request Subject Alternative
-	// Names of its own (default: false, matching OpenVox Server's
-	// allow-subject-alt-names). When false, a CSR carrying any SAN other than a
-	// lone DNS entry equal to its own certname is refused at signing time. Does
-	// not affect either generate path (`openvox-ca generate --dns` or the
-	// admin-only `POST /generate/{subject}?dns=`), whose names come from an
-	// administrator rather than from an agent's CSR.
-	AllowSubjectAltNames bool `yaml:"allow_subject_alt_names"`
-	// AllowDuplicateCerts lets a submitted CSR replace a subject's pending CSR,
-	// or be queued alongside its signed or revoked certificate (default: false,
-	// matching OpenVox Server's allow-duplicate-certs). When false, such a
-	// submission is refused with a 400 until the subject is cleaned.
-	AllowDuplicateCerts bool `yaml:"allow_duplicate_certs"`
-	// PuppetDateTimeFormat formats JSON date/time fields using the original Puppet CA
-	// style ("2006-01-02T15:04:05MST") instead of RFC 3339 (default: false).
-	PuppetDateTimeFormat bool `yaml:"puppet_datetime_format"`
-	// SerialNumberFormat selects how certificate status responses encode
-	// serial_number: "number" (the default, OpenVox Server's JSON number) or
-	// "hex" (an uppercase colon-separated string, as openssl prints it).
-	// "hex" changes the field's JSON type, so it departs from OpenVox Server.
-	SerialNumberFormat string `yaml:"serial_number_format"`
-	// RevokeOnAutoRenew revokes the certificate replaced by the empty-body
-	// (no-CSR) /certificate_renewal auto-renewal path once its successor is
-	// signed and stored, so only the newest serial per subject stays valid
-	// (default: true). Set to false to match OpenVox Server's own Clojure CA,
-	// which leaves the replaced certificate valid until it naturally expires.
-	RevokeOnAutoRenew bool `yaml:"revoke_on_auto_renew"`
-
-	// SupersededCertRevokeAfterSec is how long a certificate a renewal has
-	// replaced stays valid before it is revoked, instead of being revoked
-	// inside the renewal call. Three states, per the CSRRateLimit convention:
-	//
-	//	 0  revoke immediately, inside the renewal — an explicit operator choice,
-	//	    and the behaviour of every release before this setting existed
-	//	>0  that duration
-	//	-1  unset: the built-in default (24h)
-	//
-	// The default grants an overlap window in which both the replaced and the
-	// replacement certificate verify, so relying parties can pick up the new
-	// one without a gap — which is what makes a certificate other parties are
-	// actively verifying safe to renew at all.
-	//
-	// It is also a deliberate weakening, and since it is the default it is one
-	// every deployment inherits on upgrade: for the length of the window the
-	// replaced certificate — and, on the CSR-based re-key path, the replaced
-	// private key — is still a credential this CA accepts. Set 0 to restore the
-	// previous behaviour. What keeps the window bounded rather than open-ended
-	// is ca.CA.refuseIfSuperseded, which stops a certificate inside its window
-	// renewing itself into a fresh full-lifetime successor.
-	//
-	// 24h is the same window the serving-certificate work settled on for the
-	// same question asked about a different subject. That work is not in this
-	// repository, so this deliberately does not name its setting: a comment
-	// pointing at a config key nobody can grep for is worse than no pointer.
-	//
-	// It governs both renewal paths. RevokeOnAutoRenew still decides whether
-	// the auto-renewal path retires its predecessor at all.
-	SupersededCertRevokeAfterSec int `yaml:"superseded_cert_revoke_after_sec"`
-	// SupersededCertSweepIntervalSec is how often the sweep that performs those
-	// delayed revocations runs; 0 = built-in default (15m). The interval is
-	// added to the effective delay in the worst case, so keep it well below
-	// superseded_cert_revoke_after_sec.
-	SupersededCertSweepIntervalSec int `yaml:"superseded_cert_sweep_interval_sec"`
-
-	// LeafBackdateSec is how far before the moment of issuance a leaf
-	// certificate's NotBefore is set, so a verifier whose clock is behind this
-	// one still accepts a certificate just signed; 0 = built-in default (5m).
-	//
-	// It is a clock-skew tolerance, not a margin for a broken fleet: an agent
-	// further out than this rejects a certificate the CA signed a moment ago as
-	// not yet valid, and keeps rejecting it until its clock is fixed. Raise it
-	// only where NTP cannot be relied on. It applies to every leaf this CA
-	// issues -- from a CSR, generated, renewed or managed -- and not to the
-	// CA's own certificate, which is backdated a fixed 24 hours at bootstrap.
-	LeafBackdateSec int `yaml:"leaf_backdate_sec"`
-
-	// ManagedCertIntervalSec is how often the managed-certificate reconcile
-	// loop walks its configured set; 0 = built-in default (15m). It only has to
-	// be short relative to the renew-before windows in force, and short enough
-	// that a store deleted out from under the CA is repaired while somebody is
-	// still looking.
-	ManagedCertIntervalSec int `yaml:"managed_cert_interval_sec"`
-
-	// KubernetesExport optionally publishes the CA certificate and/or CRL into
-	// one or more Kubernetes Secrets and ConfigMaps. Disabled when no targets are
-	// configured. File-only: the nested target list, labels, and annotations are
-	// impractical to express as flags/env. Validated at startup.
-	KubernetesExport k8sexport.Config `yaml:"kubernetes_export"`
-
-	// ManagedCerts optionally issues and renews certificates for OpenVox
-	// components into Kubernetes Secrets or local files, so that bringing up
-	// OpenVox Server, OpenVoxDB and OpenVoxView needs no hand-issued
-	// certificates and no hand-renewal later. Disabled when the list is empty.
-	//
-	// File-only, and for a stronger reason than kubernetes_export's: an entry
-	// is a nested structure with a list of names and a choice of store, which
-	// no flag or environment variable can express without inventing a second
-	// syntax for it. Validated at startup, where a mistyped certname or an
-	// impossible renewal window is refused as configuration rather than
-	// discovered as a certificate that never appears.
-	//
-	// SECURITY: a managed certificate for a certname listed in puppet_server is
-	// an admin credential, because it carries clientAuth and that listing is
-	// what grants authority. See internal/certstore's package documentation.
-	// NIST 800-53: AC-6 (Least Privilege)
-	ManagedCerts certstore.Config `yaml:"managed_certs"`
-
-	// ServingCert optionally makes the CA issue and renew the certificate its
-	// own listener presents, instead of being handed one through `tls_cert` /
-	// `tls_key`. Nil disables it, which is the default.
-	//
-	// A *certstore.Entry rather than a type of its own, deliberately: the
-	// certificate the CA serves is described by the same fields a component's
-	// is, lives in one of exactly the same two stores, and inherits the same
-	// CA-wide defaults. A second spelling of that block would be a second thing
-	// to keep in step with it, and the first divergence would be silent.
-	//
-	// What is not shared is the failure semantics, and that is this caller's
-	// half rather than the store's: the material must be readable before the
-	// listener binds and its absence is fatal, where a component store's
-	// absence is routine and self-heals on the next pass. See servingcert.go.
-	//
-	// A pointer so that `serving_cert: {}` is a configuration error -- a block
-	// naming no store -- rather than a silent no-op.
-	//
-	// SECURITY: the serving certificate carries clientAuth by default, like
-	// every other certificate this CA issues, so adding the CA's own certname
-	// to puppet_server makes it an admin credential. That combination is a
-	// normal shared-host deployment rather than a mistake, and it is reported
-	// at startup rather than left to be inferred.
-	// NIST 800-53: AC-6 (Least Privilege)
-	ServingCert *certstore.Entry `yaml:"serving_cert"`
-
-	// Storage backend selection and parameters. Embedded inline so the YAML
-	// keys (storage_backend, etcd_*, redis_*, sql_*, ca_cert_file, ca_key_file)
-	// remain at the top level. Shared with the operator CLI's migrate command
-	// via config.StorageConfig.
-	config.StorageConfig `yaml:",inline"`
-
-	// Foreign client trust domains (client_ca) and the revocation policy that
-	// applies to them. Absent by default: with no entry there is exactly one
-	// trust domain, it is ours, and authorisation is what it has always been.
-	config.ClientCAConfig `yaml:",inline"`
-
-	// CA key provider selection (ca_key_provider) and, when it selects
-	// "openbao", the nested "openbao" settings block. Embedded inline so
-	// ca_key_provider stays at the top level like StorageConfig's keys above.
-	// The type lives in the shared config package (config.CAKeyProviderConfig)
-	// so a future operator-CLI command can reuse it; today only the server
-	// consumes it. "file" (default, unset) preserves today's local-key
-	// behaviour; "openbao" delegates key custody and signing to an OpenBao
-	// Transit key (internal/signer/openbao).
-	config.CAKeyProviderConfig `yaml:",inline"`
-}
+//
+// The fields are config.ServerConfig's, which is where a new key goes; this
+// type exists to carry the server's own methods.
+type serverConfig config.ServerConfig
 
 // loadServerConfig applies built-in defaults, optionally loads a YAML config
 // file, then overlays environment variables. configFile may be "" to skip file
@@ -385,12 +67,17 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading config file %s: %w", configFile, err)
 		}
-		if err := yaml.Unmarshal(data, cfg); err != nil {
+		// Strict: an unknown key refuses startup rather than being dropped,
+		// so a misspelt setting cannot silently leave the real one at its
+		// default. See config.DecodeStrict.
+		if err := config.DecodeStrict(data, cfg, "openvox-ca"); err != nil {
 			return nil, fmt.Errorf("parsing config file %s: %w", configFile, err)
 		}
 	}
 
-	applyServerEnv(cfg)
+	if err := applyServerEnv(cfg); err != nil {
+		return nil, err
+	}
 
 	// A negative backdate would issue certificates that are not valid until the
 	// future -- every one of them refused by every verifier until the clock
@@ -736,8 +423,12 @@ func (c *serverConfig) supersededCertSweepInterval() time.Duration {
 	return defaultSupersededCertSweepInterval
 }
 
-// applyServerEnv overlays OPENVOX_CA_* environment variables onto cfg.
-func applyServerEnv(cfg *serverConfig) {
+// applyServerEnv overlays OPENVOX_CA_* environment variables onto cfg. A
+// boolean or integer variable whose value does not parse is an error naming it,
+// and every such variable is reported, not just the first, so a deployment
+// with several mistakes learns of them in one restart.
+func applyServerEnv(cfg *serverConfig) error {
+	var errs []error
 	if v := os.Getenv("OPENVOX_CA_CADIR"); v != "" {
 		cfg.CADir = v
 	}
@@ -747,19 +438,11 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_HOST"); v != "" {
 		cfg.Host = v
 	}
-	if v := os.Getenv("OPENVOX_CA_PORT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Port = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_PORT", &cfg.Port, nil))
 	if v := os.Getenv("OPENVOX_CA_HOSTNAME"); v != "" {
 		cfg.Hostname = v
 	}
-	if v := os.Getenv("OPENVOX_CA_VERBOSITY"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.Verbosity = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_VERBOSITY", &cfg.Verbosity, nil))
 	if v := os.Getenv("OPENVOX_CA_LOGFILE"); v != "" {
 		cfg.LogFile = v
 	}
@@ -772,40 +455,20 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_CRL_CHAIN_FILE"); v != "" {
 		cfg.CRLChainFile = v
 	}
-	if v := os.Getenv("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CRLChainRefreshIntervalSec = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", &cfg.CRLChainRefreshIntervalSec, config.Positive))
 	if v := os.Getenv("OPENVOX_CA_PUPPET_SERVER"); v != "" {
 		cfg.PuppetServer = v
 	}
 	if v := os.Getenv("OPENVOX_CA_PUPPET_SERVER_FILE"); v != "" {
 		cfg.PuppetServerFile = v
 	}
-	if v := os.Getenv("OPENVOX_CA_NO_PP_CLI_AUTH"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.NoPpCliAuth = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_NO_TLS_REQUIRED"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.NoTLSRequired = b
-		}
-	}
+	errs = append(errs, config.EnvBool("OPENVOX_CA_NO_PP_CLI_AUTH", &cfg.NoPpCliAuth))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_NO_TLS_REQUIRED", &cfg.NoTLSRequired))
 	if v := os.Getenv("OPENVOX_CA_CLIENT_REVOCATION_POLICY"); v != "" {
 		cfg.ClientRevocationPolicy = v
 	}
-	if v := os.Getenv("OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.ClientCRLRefreshIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ALLOW_PUBLIC_STATUS"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.AllowPublicStatus = b
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", &cfg.ClientCRLRefreshIntervalSec, config.Positive))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ALLOW_PUBLIC_STATUS", &cfg.AllowPublicStatus))
 	if v := os.Getenv("OPENVOX_CA_OCSP_URL"); v != "" {
 		cfg.OCSPUrl = v
 	}
@@ -815,38 +478,22 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_METRICS_LISTEN"); v != "" {
 		cfg.MetricsListen = v
 	}
-	if v := os.Getenv("OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.ShutdownTimeoutSec = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC", &cfg.ShutdownTimeoutSec, config.Positive))
 	if v := os.Getenv("OPENVOX_CA_MEMORY_RESERVE_LAUNCHER"); v != "" {
 		cfg.MemoryReserveLauncher = v
 	}
 	if v := os.Getenv("OPENVOX_CA_MEMORY_RESERVE_SIGNER"); v != "" {
 		cfg.MemoryReserveSigner = v
 	}
-	if v := os.Getenv("OPENVOX_CA_MEMORY_BUDGET_PERCENT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.MemoryBudgetPercent = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_MEMORY_BUDGET_PERCENT", &cfg.MemoryBudgetPercent, nil))
 	if v := os.Getenv("OPENVOX_CA_CA_KEY_ALGO"); v != "" {
 		cfg.CAKeyAlgo = v
 	}
-	if v := os.Getenv("OPENVOX_CA_CA_KEY_SIZE"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.CAKeySize = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CA_KEY_SIZE", &cfg.CAKeySize, nil))
 	if v := os.Getenv("OPENVOX_CA_LEAF_KEY_ALGO"); v != "" {
 		cfg.LeafKeyAlgo = v
 	}
-	if v := os.Getenv("OPENVOX_CA_LEAF_KEY_SIZE"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.LeafKeySize = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_LEAF_KEY_SIZE", &cfg.LeafKeySize, nil))
 	if v := os.Getenv("OPENVOX_CA_CA_SUBJECT_ORG"); v != "" {
 		cfg.CASubjectOrg = v
 	}
@@ -862,119 +509,31 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_CA_SUBJECT_PROVINCE"); v != "" {
 		cfg.CASubjectProvince = v
 	}
-	if v := os.Getenv("OPENVOX_CA_CA_PATH_LENGTH"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.CAPathLength = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CA_VALIDITY_DAYS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CAValidityDays = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_LEAF_VALIDITY_DAYS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.LeafValidityDays = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CRL_VALIDITY_DAYS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CRLValidityDays = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_DISABLE_CRL_REFRESH"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.DisableCRLRefresh = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CRLRefreshIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CRL_REFRESH_BEFORE_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CRLRefreshBeforeSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.CRLSyncIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.OCSPIndexSyncIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.EnableExpiredCertCleanup = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.ExpiredCertRetentionSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.ExpiredCertCleanupIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_CSR_RATE_LIMIT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.CSRRateLimit = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_SIGNING_CONCURRENCY"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.CASigningConcurrency = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ENCRYPT_CA_KEY"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.EncryptCAKey = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.InsecureAllowWorldReadableKeys = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.InsecureAllowUnsafeAutosignPath = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_PROMOTE_CN_TO_SAN"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.PromoteCNToSAN = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ALLOW_SUBJECT_ALT_NAMES"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.AllowSubjectAltNames = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ALLOW_DUPLICATE_CERTS"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.AllowDuplicateCerts = b
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_PUPPET_DATETIME_FORMAT"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.PuppetDateTimeFormat = b
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CA_PATH_LENGTH", &cfg.CAPathLength, nil))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CA_VALIDITY_DAYS", &cfg.CAValidityDays, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_LEAF_VALIDITY_DAYS", &cfg.LeafValidityDays, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_VALIDITY_DAYS", &cfg.CRLValidityDays, config.Positive))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_DISABLE_CRL_REFRESH", &cfg.DisableCRLRefresh))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC", &cfg.CRLRefreshIntervalSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_REFRESH_BEFORE_SEC", &cfg.CRLRefreshBeforeSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", &cfg.CRLSyncIntervalSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", &cfg.OCSPIndexSyncIntervalSec, config.Positive))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP", &cfg.EnableExpiredCertCleanup))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC", &cfg.ExpiredCertRetentionSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", &cfg.ExpiredCertCleanupIntervalSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CSR_RATE_LIMIT", &cfg.CSRRateLimit, nil))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SIGNING_CONCURRENCY", &cfg.CASigningConcurrency, nil))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ENCRYPT_CA_KEY", &cfg.EncryptCAKey))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", &cfg.InsecureAllowWorldReadableKeys))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", &cfg.InsecureAllowUnsafeAutosignPath))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_PROMOTE_CN_TO_SAN", &cfg.PromoteCNToSAN))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ALLOW_SUBJECT_ALT_NAMES", &cfg.AllowSubjectAltNames))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ALLOW_DUPLICATE_CERTS", &cfg.AllowDuplicateCerts))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_PUPPET_DATETIME_FORMAT", &cfg.PuppetDateTimeFormat))
 	if v := os.Getenv("OPENVOX_CA_SERIAL_NUMBER_FORMAT"); v != "" {
 		cfg.SerialNumberFormat = v
 	}
-	if v := os.Getenv("OPENVOX_CA_REVOKE_ON_AUTO_RENEW"); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.RevokeOnAutoRenew = b
-		}
-	}
+	errs = append(errs, config.EnvBool("OPENVOX_CA_REVOKE_ON_AUTO_RENEW", &cfg.RevokeOnAutoRenew))
 	// n >= 0, unlike every interval setting around it. Those treat 0 as "unset,
 	// use the built-in default", so refusing it costs nothing. Here 0 is the
 	// feature's off switch and a distinct, meaningful value: with a positive
@@ -983,45 +542,22 @@ func applyServerEnv(cfg *serverConfig) {
 	// one direction this must not fail in — the env channel is how a container
 	// or Helm deployment overrides a baked-in config.yaml, and it would be able
 	// to widen the weakening but never close it.
-	if v := os.Getenv("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC"); v != "" {
-		// Any integer, including negatives. supersededCertRevokeAfter already
-		// reads a negative as unset, so -1 — the value this setting documents
-		// as "unset" — has to reach it rather than being filtered out here. A
-		// bound of n >= 0 would silently drop exactly the documented way to say
-		// "go back to the default" when a config file has set a window.
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.SupersededCertRevokeAfterSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.SupersededCertSweepIntervalSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_LEAF_BACKDATE_SEC"); v != "" {
-		// Not gated on n > 0: a negative value has to reach validation to be
-		// refused, and discarding it here would leave the operator with the
-		// default and no error.
-		//
-		// A non-numeric value IS still discarded, by the err == nil guard that
-		// every numeric setting in this file uses. That is the file's
-		// convention rather than this setting's choice, and changing it means
-		// giving applyServerEnv an error return and altering what a dozen
-		// unrelated variables do with a typo -- a change to shared config
-		// handling, not to this one.
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.LeafBackdateSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC"); v != "" {
-		// Ungated for the same reason as the backdate above, and it used not to
-		// be: with `n > 0` here a negative value was discarded and the server
-		// started on the default, which is exactly the YAML-versus-environment
-		// asymmetry the refusal in loadServerConfig was added to end.
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.ManagedCertIntervalSec = n
-		}
-	}
+	// Any integer, including negatives. supersededCertRevokeAfter already
+	// reads a negative as unset, so -1 — the value this setting documents
+	// as "unset" — has to reach it rather than being filtered out here. A
+	// bound of n >= 0 would silently drop exactly the documented way to say
+	// "go back to the default" when a config file has set a window.
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", &cfg.SupersededCertRevokeAfterSec, nil))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC", &cfg.SupersededCertSweepIntervalSec, config.Positive))
+	// Not gated on n > 0: a negative value has to reach validation to be
+	// refused, and discarding it here would leave the operator with the
+	// default and no error. A non-numeric one is refused by EnvInt itself.
+	errs = append(errs, config.EnvInt("OPENVOX_CA_LEAF_BACKDATE_SEC", &cfg.LeafBackdateSec, nil))
+	// Ungated for the same reason as the backdate above, and it used not to
+	// be: with `n > 0` here a negative value was discarded and the server
+	// started on the default, which is exactly the YAML-versus-environment
+	// asymmetry the refusal in loadServerConfig was added to end.
+	errs = append(errs, config.EnvInt("OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC", &cfg.ManagedCertIntervalSec, nil))
 	if v := os.Getenv("OPENVOX_CA_KEY_PASSPHRASE_FILE"); v != "" {
 		cfg.CAKeyPassphraseFile = v
 	}
@@ -1040,16 +576,8 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_ETCD_PASSWORD"); v != "" {
 		cfg.EtcdPassword = v
 	}
-	if v := os.Getenv("OPENVOX_CA_ETCD_DIAL_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.EtcdDialTimeoutSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_ETCD_REQUEST_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.EtcdRequestTimeoutSec = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_ETCD_DIAL_TIMEOUT_SEC", &cfg.EtcdDialTimeoutSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_ETCD_REQUEST_TIMEOUT_SEC", &cfg.EtcdRequestTimeoutSec, config.Positive))
 	if v := os.Getenv("OPENVOX_CA_ETCD_TLS_CA_FILE"); v != "" {
 		cfg.EtcdTLSCAFile = v
 	}
@@ -1074,11 +602,7 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_REDIS_SENTINEL_PASSWORD"); v != "" {
 		cfg.RedisSentinelPassword = v
 	}
-	if v := os.Getenv("OPENVOX_CA_REDIS_DB"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			cfg.RedisDB = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_REDIS_DB", &cfg.RedisDB, config.NonNegative))
 	if v := os.Getenv("OPENVOX_CA_REDIS_USERNAME"); v != "" {
 		cfg.RedisUsername = v
 	}
@@ -1088,21 +612,9 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_REDIS_KEY_PREFIX"); v != "" {
 		cfg.RedisKeyPrefix = v
 	}
-	if v := os.Getenv("OPENVOX_CA_REDIS_DIAL_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.RedisDialTimeoutSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_REDIS_REQUEST_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.RedisRequestTimeoutSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_REDIS_LOCK_TTL_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.RedisLockTTLSec = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_REDIS_DIAL_TIMEOUT_SEC", &cfg.RedisDialTimeoutSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_REDIS_REQUEST_TIMEOUT_SEC", &cfg.RedisRequestTimeoutSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_REDIS_LOCK_TTL_SEC", &cfg.RedisLockTTLSec, config.Positive))
 	if v := os.Getenv("OPENVOX_CA_REDIS_TLS_CA_FILE"); v != "" {
 		cfg.RedisTLSCAFile = v
 	}
@@ -1118,26 +630,10 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_SQL_DSN_FILE"); v != "" {
 		cfg.SQLDSNFile = v
 	}
-	if v := os.Getenv("OPENVOX_CA_SQL_REQUEST_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.SQLRequestTimeoutSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_SQL_MIGRATION_TIMEOUT_SEC"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.SQLMigrationTimeoutSec = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_SQL_MAX_OPEN_CONNS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.SQLMaxOpenConns = n
-		}
-	}
-	if v := os.Getenv("OPENVOX_CA_SQL_MAX_IDLE_CONNS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.SQLMaxIdleConns = n
-		}
-	}
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SQL_REQUEST_TIMEOUT_SEC", &cfg.SQLRequestTimeoutSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SQL_MIGRATION_TIMEOUT_SEC", &cfg.SQLMigrationTimeoutSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SQL_MAX_OPEN_CONNS", &cfg.SQLMaxOpenConns, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_SQL_MAX_IDLE_CONNS", &cfg.SQLMaxIdleConns, config.Positive))
 	if v := os.Getenv("OPENVOX_CA_SQL_TLS_CA_FILE"); v != "" {
 		cfg.SQLTLSCAFile = v
 	}
@@ -1201,6 +697,7 @@ func applyServerEnv(cfg *serverConfig) {
 	if v := os.Getenv("OPENVOX_CA_OPENBAO_KUBERNETES_JWT_FILE"); v != "" {
 		cfg.OpenBao.KubernetesJWTFile = v
 	}
+	return errors.Join(errs...)
 }
 
 // splitAndTrim splits s on sep, trims whitespace around each element, and

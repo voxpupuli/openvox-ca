@@ -89,6 +89,10 @@ verbose:     false
 | `--insecure` | `OPENVOX_CA_CTL_INSECURE` |
 | `--verbose` | `OPENVOX_CA_CTL_VERBOSE` |
 
+As with the server, a key `ctl.yaml` does not recognise is refused, naming the
+key and its line, and so is a boolean variable set to anything other than `1`,
+`t`, `T`, `true`, `TRUE`, `True` or their `0`/`f`/`false` counterparts.
+
 ## Subcommands
 
 ```bash

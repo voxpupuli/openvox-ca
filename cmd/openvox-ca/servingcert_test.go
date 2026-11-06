@@ -1152,6 +1152,10 @@ var _ = Describe("the serving certificate's admin-credential warning", func() {
 // docs/configuration.md decodes at all: a renamed or mistyped tag would
 // silently disable the feature with the whole suite green.
 var _ = Describe("decoding a serving_cert block", func() {
+	// What the file says, not what the host exports: an ambient malformed
+	// OPENVOX_CA_* variable would otherwise refuse the load.
+	BeforeEach(func() { clearServerEnv() })
+
 	It("decodes the shape the documentation publishes", func() {
 		cfg, err := loadServerConfig(writeTempConfig(`
 hostname: ca.example.com

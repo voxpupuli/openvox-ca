@@ -34,6 +34,10 @@ import (
 // unbounded signing to everyone who never set the key, which is the exposure
 // this bound exists to close.
 var _ = Describe("CA signing-concurrency resolution", func() {
+	// Each layer alone: an ambient OPENVOX_CA_* variable would overlay the
+	// file, and a malformed one now refuses the load outright.
+	BeforeEach(func() { clearServerEnv() })
+
 	Describe("resolveSigningConcurrency", func() {
 		It("uses the built-in default when unset (sentinel -1)", func() {
 			Expect(resolveSigningConcurrency(-1)).

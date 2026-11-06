@@ -221,6 +221,15 @@ verbose: true
 			_, err := loadCtlConfig(cfgFile)
 			Expect(err).To(HaveOccurred(), "expected error for invalid YAML, got nil")
 		})
+
+		It("refuses a misspelt key, naming it and its line", func() {
+			cfgFile := writeTempCtlConfig("server_url: https://ca:8140\ninsecrue: true\n")
+			_, err := loadCtlConfig(cfgFile)
+			Expect(err).To(MatchError(And(
+				ContainSubstring(cfgFile),
+				ContainSubstring(`line 2: unknown key "insecrue"`),
+				ContainSubstring("openvox-ca-ctl refuses keys it does not recognise"))))
+		})
 	})
 })
 
@@ -232,7 +241,7 @@ var _ = Describe("applyCtlEnv", func() {
 			clearCtlEnv()
 			setCtlEnv(envKey, envVal)
 			cfg := &ctlConfig{}
-			applyCtlEnv(cfg)
+			Expect(applyCtlEnv(cfg)).To(Succeed())
 			Expect(check(cfg)).To(BeTrue(),
 				"%s not applied from %s=%s", desc, envKey, envVal)
 		},
@@ -262,15 +271,16 @@ var _ = Describe("applyCtlEnv", func() {
 			"Insecure=1"),
 	)
 
-	// a malformed VERBOSE value is silently ignored.
-	It("silently ignores a malformed VERBOSE value", func() {
+	// A value strconv.ParseBool does not accept is refused, naming the
+	// variable, rather than dropped (#436).
+	It("refuses a malformed VERBOSE value, naming the variable", func() {
 		clearCtlEnv()
 		setCtlEnv("OPENVOX_CA_CTL_VERBOSE", "maybe")
 
-		cfg := &ctlConfig{}
-		applyCtlEnv(cfg)
-
-		Expect(cfg.Verbose).To(BeFalse(), "Verbose changed on bad input: want false")
+		Expect(applyCtlEnv(&ctlConfig{})).To(MatchError(And(
+			ContainSubstring("OPENVOX_CA_CTL_VERBOSE"),
+			ContainSubstring(`"maybe"`),
+			ContainSubstring("not a boolean"))))
 	})
 
 	// OPENVOX_CA_CTL_INSECURE=false does not set Insecure.
@@ -279,19 +289,25 @@ var _ = Describe("applyCtlEnv", func() {
 		setCtlEnv("OPENVOX_CA_CTL_INSECURE", "false")
 
 		cfg := &ctlConfig{}
-		applyCtlEnv(cfg)
+		Expect(applyCtlEnv(cfg)).To(Succeed())
 
 		Expect(cfg.Insecure).To(BeFalse(), "Insecure = true; want false when env is 'false'")
 	})
 
-	// a malformed INSECURE value is silently ignored.
-	It("silently ignores a malformed INSECURE value", func() {
+	// The security-relevant one: INSECURE turns off verification of the
+	// server's certificate. "on" or "yes" were dropped before, which failed
+	// closed, but "off" or "no" were dropped too, leaving a config file's
+	// `insecure: true` in force when the environment meant to turn it off.
+	It("refuses a malformed INSECURE value rather than keeping the file's", func() {
 		clearCtlEnv()
-		setCtlEnv("OPENVOX_CA_CTL_INSECURE", "maybe")
+		cfgFile := writeTempCtlConfig("insecure: true\n")
+		setCtlEnv("OPENVOX_CA_CTL_INSECURE", "off")
 
-		cfg := &ctlConfig{}
-		applyCtlEnv(cfg)
-
-		Expect(cfg.Insecure).To(BeFalse(), "Insecure changed on bad input: want false")
+		cfg, err := loadCtlConfig(cfgFile)
+		Expect(err).To(MatchError(And(
+			ContainSubstring("OPENVOX_CA_CTL_INSECURE"),
+			ContainSubstring(`"off"`),
+			ContainSubstring("set it to true or false"))))
+		Expect(cfg).To(BeNil())
 	})
 })

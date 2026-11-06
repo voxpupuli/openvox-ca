@@ -33,6 +33,7 @@ import (
 
 var _ = Describe("applyServerEnv SQL settings", func() {
 	It("applies all SQL-related env vars", func() {
+		clearServerEnv()
 		setEnv("OPENVOX_CA_STORAGE_BACKEND", "sqlite")
 		setEnv("OPENVOX_CA_SQL_DSN", "file:/var/lib/openvox-ca/ca.db")
 		setEnv("OPENVOX_CA_SQL_REQUEST_TIMEOUT_SEC", "15")
@@ -42,7 +43,7 @@ var _ = Describe("applyServerEnv SQL settings", func() {
 		setEnv("OPENVOX_CA_SQL_DSN_FILE", "/run/secrets/sql-dsn")
 
 		cfg := &serverConfig{}
-		applyServerEnv(cfg)
+		Expect(applyServerEnv(cfg)).To(Succeed())
 
 		Expect(cfg.StorageBackend).To(Equal("sqlite"), "StorageBackend = %q, want sqlite", cfg.StorageBackend)
 		Expect(cfg.SQLDSN).To(Equal("file:/var/lib/openvox-ca/ca.db"), "SQLDSN = %q", cfg.SQLDSN)

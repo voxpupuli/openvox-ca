@@ -29,6 +29,10 @@ import (
 // contract across every input layer (flag, env, file). The field is sentinelled
 // to -1 ("unset") so an explicit 0 is never silently rewritten to the default.
 var _ = Describe("CSR rate-limit resolution", func() {
+	// Each layer alone: an ambient OPENVOX_CA_* variable would overlay the
+	// file, and a malformed one now refuses the load outright.
+	BeforeEach(func() { clearServerEnv() })
+
 	Describe("resolveCSRRateLimit", func() {
 		It("uses the built-in default when unset (sentinel -1)", func() {
 			Expect(resolveCSRRateLimit(-1)).To(Equal(defaultCSRRateLimit))
@@ -92,7 +96,7 @@ var _ = Describe("CSR rate-limit resolution", func() {
 		It("applies an explicit 0 from the environment (disable)", func() {
 			setEnvTemp("0")
 			cfg := &serverConfig{CSRRateLimit: -1}
-			applyServerEnv(cfg)
+			Expect(applyServerEnv(cfg)).To(Succeed())
 			Expect(cfg.CSRRateLimit).To(Equal(0))
 			Expect(resolveCSRRateLimit(cfg.CSRRateLimit)).To(Equal(0))
 		})

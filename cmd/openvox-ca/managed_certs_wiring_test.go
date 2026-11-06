@@ -61,6 +61,9 @@ var _ = Describe("managed_certs wiring", func() {
 
 	loadCfg := func(body string) *serverConfig {
 		GinkgoHelper()
+		// The file alone: an ambient malformed OPENVOX_CA_* variable would
+		// otherwise refuse the load.
+		clearServerEnv()
 		path := filepath.Join(GinkgoT().TempDir(), "openvox-ca.yaml")
 		Expect(os.WriteFile(path, []byte(body), 0o600)).To(Succeed())
 		cfg, err := loadServerConfig(path)

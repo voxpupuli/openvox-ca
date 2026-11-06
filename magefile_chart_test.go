@@ -126,6 +126,22 @@ var _ = Describe("inlineCredentialKeys", func() {
 		Expect(keys).To(Equal([]string{"etcd_password", "redis_password", "redis_sentinel_password", "sql_dsn"}))
 	})
 
+	// The packages inlineCredentialSources leaves out on purpose. Their
+	// credential-shaped tags are pinned to the one known false positive, so a
+	// real credential added there fails here, where the reason is plain,
+	// instead of rendering into the ConfigMap in clear text unnoticed.
+	It("finds nothing credential-shaped in the blocks it does not scan, but the known one", func() {
+		found, err := inlineCredentialKeysIn(".", []string{
+			"internal/certstore/certconfig/*.go",
+			"internal/k8sexport/exportconfig/*.go",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		// store.secret names a Kubernetes Secret; it holds no credential.
+		Expect(found).To(Equal([]string{"secret"}), "a credential-shaped key outside "+
+			"inlineCredentialSources needs a refusal in openvox-ca.validate and a reject case "+
+			"by hand, since chart:test cannot see it; then add it here")
+	})
+
 	Context("in a tree of its own", func() {
 		var root string
 
@@ -139,37 +155,37 @@ var _ = Describe("inlineCredentialKeys", func() {
 			root = GinkgoT().TempDir()
 		})
 
-		It("reads both sources, sorted, skipping path keys and test files", func() {
+		It("reads its source, sorted, skipping path keys and test files", func() {
 			write("internal/config/a.go", "type A struct {\n\tP string `yaml:\"zed_password\"`\n\tF string `yaml:\"approle_secret_id_file\"`\n\tN int `yaml:\"port\"`\n}\n")
 			write("internal/config/a_test.go", "type T struct {\n\tS string `yaml:\"fixture_secret\"`\n}\n")
-			write("cmd/openvox-ca/config.go", "type C struct {\n\tD string `yaml:\"sql_dsn\"`\n\tT string `yaml:\"api_token,omitempty\"`\n\tK string `yaml:\"ca_key_passphrase\"`\n\tR string `yaml:\"registry_credential\"`\n\tS string `yaml:\"client_secret\"`\n}\n")
+			write("internal/config/b.go", "type B struct {\n\tD string `yaml:\"sql_dsn\"`\n\tT string `yaml:\"api_token,omitempty\"`\n\tK string `yaml:\"ca_key_passphrase\"`\n\tR string `yaml:\"registry_credential\"`\n\tS string `yaml:\"client_secret\"`\n}\n")
 
 			Expect(inlineCredentialKeys(root)).To(Equal([]string{"api_token", "ca_key_passphrase", "client_secret", "registry_credential", "sql_dsn", "zed_password"}))
 		})
 
 		It("refuses a tree where it finds no credential key", func() {
 			write("internal/config/a.go", "type A struct {\n\tN int `yaml:\"port\"`\n}\n")
-			write("cmd/openvox-ca/config.go", "type C struct {\n\tH string `yaml:\"host\"`\n}\n")
 
 			_, err := inlineCredentialKeys(root)
 			Expect(err).To(MatchError(ContainSubstring("found no inline-credential config keys")))
 		})
 
-		It("refuses a tree where one of its sources has gone", func() {
-			write("internal/config/a.go", "type A struct {\n\tP string `yaml:\"zed_password\"`\n}\n")
+		It("refuses a tree where its source has gone", func() {
+			write("cmd/openvox-ca/config.go", "type C struct {\n\tP string `yaml:\"zed_password\"`\n}\n")
 
 			_, err := inlineCredentialKeys(root)
-			Expect(err).To(MatchError(ContainSubstring("cmd/openvox-ca/config.go matches no file")))
+			Expect(err).To(MatchError(ContainSubstring("internal/config/*.go matches no file")))
 		})
 
 		It("refuses a source it cannot read rather than skipping it", func() {
 			write("internal/config/a.go", "type A struct {\n\tP string `yaml:\"zed_password\"`\n}\n")
-			Expect(os.MkdirAll(filepath.Join(root, "cmd/openvox-ca/config.go"), 0o755)).To(Succeed())
+			Expect(os.MkdirAll(filepath.Join(root, "internal/config/unreadable.go"), 0o755)).To(Succeed())
 
 			_, err := inlineCredentialKeys(root)
 			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("config.go"))
+			Expect(err.Error()).To(ContainSubstring("unreadable.go"))
 		})
+
 	})
 })
 
