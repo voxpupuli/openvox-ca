@@ -196,6 +196,81 @@ var _ = Describe("the serve command with a self-provisioned serving certificate"
 	})
 })
 
+// The two "leaves nothing it started running" specs above assert an absence,
+// which a helper that never matches would satisfy, and serveCommandGoroutines
+// parses runtime.Stack text, which a toolchain may change. These pin it from
+// the other side.
+var _ = Describe("serveCommandGoroutines", func() {
+	It("reports a group goroutine that is still running its function", func() {
+		g := newGoroutineGroup(context.Background())
+		release := make(chan struct{})
+		entered := make(chan struct{})
+		g.Go(func(context.Context) { blockUntilReleased(entered, release) })
+		DeferCleanup(func() {
+			close(release)
+			g.Stop()
+		})
+		Eventually(entered).Should(BeClosed())
+
+		Expect(serveCommandGoroutines()).To(ContainElement(ContainSubstring(serveCommandPkg+"blockUntilReleased(")),
+			"a goroutine blocked in the function it was given was not counted as running, so the "+
+				"specs that expect none would pass whatever the serve command left behind")
+	})
+
+	// Only the parsing is exercised here. The window it tolerates, between a
+	// goroutine's deferred wg.Done and its exit, cannot be held open from a
+	// spec without changing goroutineGroup, so these stacks are written out in
+	// the shapes the runtime prints them.
+	DescribeTable("returnedFromGroupWork",
+		func(frames string, returned bool) {
+			Expect(returnedFromGroupWork("goroutine 42 [runnable]:\n" + frames)).To(Equal(returned))
+		},
+		Entry("is true for the closure alone, past its deferred Done (#556)",
+			serveCommandPkg+"(*goroutineGroup).Go.func1()\n"+
+				"\t/src/cmd/openvox-ca/goroutine_group.go:56 +0x9c\n"+
+				"created by "+serveCommandPkg+"(*goroutineGroup).Go in goroutine 1\n"+
+				"\t/src/cmd/openvox-ca/goroutine_group.go:53 +0x8c",
+			true),
+		Entry("is true inside Done itself",
+			"sync.(*WaitGroup).Add(0xc000123450, 0xffffffffffffffff)\n"+
+				"\t/go/src/sync/waitgroup.go:118 +0x1a8\n"+
+				"sync.(*WaitGroup).Done(...)\n"+
+				"\t/go/src/sync/waitgroup.go:156\n"+
+				serveCommandPkg+"(*goroutineGroup).Go.func1()\n"+
+				"\t/src/cmd/openvox-ca/goroutine_group.go:56 +0x9c\n"+
+				"created by "+serveCommandPkg+"(*goroutineGroup).Go in goroutine 1\n"+
+				"\t/src/cmd/openvox-ca/goroutine_group.go:53 +0x8c",
+			true),
+		Entry("is false with the function's own frame above the closure",
+			"runtime.gopark(0x0?, 0x0?, 0x0?, 0x0?, 0x0?)\n"+
+				"\t/go/src/runtime/proc.go:435 +0xc8\n"+
+				"runtime.chanrecv1(0x0?, 0x0?)\n"+
+				"\t/go/src/runtime/chan.go:506 +0x18\n"+
+				serveCommandPkg+"newRootCmd.func1.4({0x1, 0x2})\n"+
+				"\t/src/cmd/openvox-ca/main.go:1449 +0x40\n"+
+				serveCommandPkg+"(*goroutineGroup).Go.func1()\n"+
+				"\t/src/cmd/openvox-ca/goroutine_group.go:55 +0x5c\n"+
+				"created by "+serveCommandPkg+"(*goroutineGroup).Go in goroutine 1\n"+
+				"\t/src/cmd/openvox-ca/goroutine_group.go:53 +0x8c",
+			false),
+		Entry("is false for a goroutine RunE started without the group",
+			"runtime.gopark(0x0?, 0x0?, 0x0?, 0x0?, 0x0?)\n"+
+				"\t/go/src/runtime/proc.go:435 +0xc8\n"+
+				serveCommandPkg+"newRootCmd.func1.4()\n"+
+				"\t/src/cmd/openvox-ca/main.go:1449 +0x40\n"+
+				"created by "+serveCommandPkg+"newRootCmd.func1 in goroutine 1\n"+
+				"\t/src/cmd/openvox-ca/main.go:1448 +0x1d4",
+			false),
+	)
+})
+
+// blockUntilReleased closes entered and waits on release. It is a named
+// function so that its frame can be found in a stack.
+func blockUntilReleased(entered chan<- struct{}, release <-chan struct{}) {
+	close(entered)
+	<-release
+}
+
 // serveConfig writes a config file for the serve command. withServing adds a
 // serving_cert issued for "localhost", which is the name getOverTLS verifies.
 // puppet_server names admin.example.com as the admin allow list.
@@ -409,8 +484,11 @@ const serveCommandPkg = "github.com/voxpupuli/openvox-ca/cmd/openvox-ca."
 //
 // A goroutine that has been started but has not yet run looks the same, with
 // only the closure on its stack. Stop's Wait cannot return past one of those,
-// so it matters only when nothing waits at all, and there it is the goroutines
-// already running their functions that fail the spec.
+// so it matters only when nothing waits at all. There the specs catch the
+// defect only if some goroutine has entered its function by the snapshot,
+// which on a single CPU it often has not, so they are not what guards against
+// a dropped Stop. "defers stopping the group after every other teardown it
+// defers", in goroutine_group_test.go, pins that by the shape of RunE.
 func returnedFromGroupWork(stack string) bool {
 	frames := strings.Split(stack, "\n")[1:] // after "goroutine N [state]:"
 	for _, frame := range frames {
