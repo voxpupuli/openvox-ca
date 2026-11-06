@@ -197,6 +197,13 @@ type ServerConfig struct {
 	// opt-out above, for what it turns off.
 	InsecureAllowUnsafeAutosignPath bool `yaml:"insecure_allow_unsafe_autosign_path"`
 
+	// InsecureAllowPlainHTTPGenerate lets POST /generate return private keys
+	// when the server itself has no TLS, for a loopback-only bootstrap or a
+	// TLS-terminating proxy in front. Without TLS there is no client
+	// authentication either, so the key goes to whoever asks. It has no effect
+	// when TLS is configured.
+	InsecureAllowPlainHTTPGenerate bool `yaml:"insecure_allow_plain_http_generate"`
+
 	// PromoteCNToSAN adds the CN as a DNS SAN when the CSR has no SANs (default: true).
 	PromoteCNToSAN bool `yaml:"promote_cn_to_san"`
 	// AllowSubjectAltNames lets a submitted CSR request Subject Alternative

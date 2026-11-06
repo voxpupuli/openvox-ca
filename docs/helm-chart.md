@@ -291,6 +291,11 @@ With `no_tls_required` the chart also switches the health probes to HTTP, since
 the kubelet has to speak whatever the server speaks. Set `httpGet.scheme` on a
 probe explicitly to override that.
 
+`POST /generate` refuses under `no_tls_required`, as it does wherever the
+server has no TLS of its own, unless `config.insecure_allow_plain_http_generate`
+is also set — see [server-side key generation without
+TLS](configuration.md#server-side-key-generation-without-tls).
+
 **The check only runs when the chart can see the whole configuration.**
 `existingConfigMap`, `args`, `envFrom` and a `--config` in `extraArgs` each put
 settings somewhere the chart does not read — someone else's ConfigMap, a replaced

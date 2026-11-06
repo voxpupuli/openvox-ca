@@ -526,6 +526,7 @@ func applyServerEnv(cfg *serverConfig) error {
 	errs = append(errs, config.EnvBool("OPENVOX_CA_ENCRYPT_CA_KEY", &cfg.EncryptCAKey))
 	errs = append(errs, config.EnvBool("OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", &cfg.InsecureAllowWorldReadableKeys))
 	errs = append(errs, config.EnvBool("OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", &cfg.InsecureAllowUnsafeAutosignPath))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_INSECURE_ALLOW_PLAIN_HTTP_GENERATE", &cfg.InsecureAllowPlainHTTPGenerate))
 	errs = append(errs, config.EnvBool("OPENVOX_CA_PROMOTE_CN_TO_SAN", &cfg.PromoteCNToSAN))
 	errs = append(errs, config.EnvBool("OPENVOX_CA_ALLOW_SUBJECT_ALT_NAMES", &cfg.AllowSubjectAltNames))
 	errs = append(errs, config.EnvBool("OPENVOX_CA_ALLOW_DUPLICATE_CERTS", &cfg.AllowDuplicateCerts))

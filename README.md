@@ -304,7 +304,7 @@ certificate:
 
 ```bash
 # Stop any CA already listening on 8140 first, or this one cannot bind.
-./bin/openvox-ca --tls-cert= --tls-key= \
+./bin/openvox-ca --tls-cert= --tls-key= --insecure-allow-plain-http-generate \
   --cadir /etc/puppetlabs/puppet/ssl/ca --host 127.0.0.1 --hostname puppet.example.com &
 PCA_PID=$!
 
@@ -328,6 +328,8 @@ and `tls_key`, their environment equivalents, or `serving_cert` — and that
 includes `POST /generate/<subject>`, which hands back a
 signed certificate and its private key. `--host 127.0.0.1` is required rather
 than advisable, and the `kill` above is part of the procedure, not tidying.
+`--insecure-allow-plain-http-generate` is what lets that route answer at all
+without TLS; keep it to this one start.
 
 `--server-url` is needed because it defaults to HTTPS while that server speaks
 plain HTTP, and the empty `--tls-cert=`/`--tls-key=` keep the start from
