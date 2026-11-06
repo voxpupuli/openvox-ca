@@ -138,7 +138,10 @@ validation builds will still work (they don't push).
    success**, by job name, and set each one's source to **GitHub Actions**, so
    that no other app or token can satisfy it by posting a status of the same
    name. The names must match `requiredCheckAggregates` in
-   `magefile.go`, which `mage dev:check` holds the workflows to. Neither
+   `magefile.go`, which `mage dev:check` holds the workflows to, and the
+   release tag gate's list in
+   [`verify-release-tag`](../../.github/actions/verify-release-tag/action.yml),
+   which `mage test:magefile` holds to the same variable. Neither
    workflow can see the other's jobs, so leaving one out lets a PR merge with
    that workflow red, which is how #454 merged with its Alpine builds failing.
 

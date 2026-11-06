@@ -4,12 +4,14 @@ description: >
   chart workflows. Verifies that the tag equals "v" + the internal/version
   Version constant (so a release can only be published once the version-bump
   change has landed on the tagged commit), that the Helm chart's version and
-  appVersion match it, and that the tagged commit has a passing
-  "CI success" check run and is reachable from the default branch (so a
-  commit that never went green on main cannot be released). Requires the
-  repository to be checked out and the calling workflow to grant both
-  checks: read (for the check-run lookup) and contents: read (the compare
-  API reads repository contents).
+  appVersion match it, and that the tagged commit has a passing check run
+  for each aggregate main's ruleset requires ("CI success" and "Container
+  images success") from a push to the default branch, and is reachable from
+  it (so a commit that never went green on main cannot be released, a merged
+  PR's head included). Requires the repository to be checked out and the
+  calling workflow to grant checks: read (for the check-run lookup),
+  actions: read (for the workflow runs that tie them to a push) and
+  contents: read (the compare API reads repository contents).
 
 runs:
   using: composite
@@ -55,7 +57,7 @@ runs:
         fi
         echo "Chart version and appVersion match $TAG"
 
-    - name: Verify tagged commit passed CI on the default branch
+    - name: Verify tagged commit passed the required checks on the default branch
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -65,31 +67,77 @@ runs:
         # .lefthook/pre-push/verify-tags.sh).
         sha="$(git rev-parse 'HEAD^{commit}')"
 
-        # --slurp combines the paginated pages into one array before --jq
-        # runs; without it gh applies the filter per page, so a commit with
-        # >100 check runs would yield multi-line output here, the integer
-        # test below would error with status 2, and the if-condition would
-        # swallow that as false — the gate would fail open. The explicit
-        # integer guard keeps it failing closed even if the output shape
-        # ever regresses.
-        passed="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs" --paginate --slurp \
-          --jq '[.[].check_runs[] | select(.name == "CI success" and .conclusion == "success")] | length')"
-        case "$passed" in
-          ''|*[!0-9]*)
-            echo "::error::Check-run count query returned non-numeric output: '$passed'"
-            exit 1
-            ;;
-        esac
-        if [ "$passed" -lt 1 ]; then
-          echo "::error::Commit $sha has no passing 'CI success' check run. Tag a commit that has gone green on main (and wait for CI to finish before tagging)."
+        # The checks main's ruleset requires, by name. Kept in step with
+        # requiredCheckAggregates in magefile.go by a spec that runs this
+        # step ("the release tag gate", magefile_release_gate_test.go): it
+        # fails if this list omits an aggregate or names one that is not
+        # there.
+        required=("CI success" "Container images success")
+
+        base="$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)"
+
+        # Only main's own push runs count. A merged PR's head commit is an
+        # ancestor of main and carries passing runs from the PR, but main
+        # never built that tree; the tag's own runs are this gate's, still in
+        # progress. So collect the check suites of this commit's push runs on
+        # the default branch, in this repository rather than a fork. Check
+        # suites carry neither the event nor the head repository, which is why
+        # this reads workflow runs.
+        #
+        # --paginate applies --jq to each page separately, so both queries
+        # emit one line per item rather than a count; gh refuses --slurp
+        # together with --jq, so there is no filter over the whole list.
+        if ! runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$sha&event=push&branch=$base" --paginate \
+          --jq '.workflow_runs[] | select(.event == "push" and .head_repository.id == .repository.id) | "\(.check_suite_id)\t\(.head_branch)"')"; then
+          echo "::error::Could not list the workflow runs of commit $sha"
           exit 1
         fi
-        echo "Commit $sha has a passing 'CI success' check run"
+        main_suites=""
+        while IFS=$'\t' read -r suite branch; do
+          if [ -n "$suite" ] && [ "$branch" = "$base" ]; then
+            main_suites+="$suite"$'\n'
+          fi
+        done <<<"$runs"
+        if [ -z "$main_suites" ]; then
+          echo "::error::Commit $sha has no workflow run from a push to $base: $base never built it, so it is most likely a merged PR's head. Tag the merge commit on $base instead (normally the tip of origin/$base)."
+          exit 1
+        fi
 
-        # A green PR head also carries a passing "CI success" check run, so
-        # additionally require the commit to be reachable from the default
-        # branch — otherwise a never-merged commit could be released.
-        base="$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)"
+        # Each passing check run, as its check suite and name. filter=all
+        # returns every attempt rather than the latest of each name, so a
+        # failed re-run of main's workflow cannot hide the attempt that
+        # passed. Only GitHub Actions' runs count, as main's ruleset pins each
+        # check's source to it: another app could post a check run of the same
+        # name.
+        if ! checks="$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?filter=all" --paginate \
+          --jq '.check_runs[] | select(.conclusion == "success" and .app.slug == "github-actions") | "\(.check_suite.id)\t\(.name)"')"; then
+          echo "::error::Could not list the check runs of commit $sha"
+          exit 1
+        fi
+        # Here-strings, not pipes: under pipefail, grep -q exiting on the
+        # first match can fail printf with SIGPIPE and read as a miss.
+        passing=""
+        while IFS=$'\t' read -r suite name; do
+          if [ -n "$suite" ] && grep -Fxq -- "$suite" <<<"$main_suites"; then
+            passing+="$name"$'\n'
+          fi
+        done <<<"$checks"
+        missing=0
+        for check in "${required[@]}"; do
+          if grep -Fxq -- "$check" <<<"$passing"; then
+            echo "Commit $sha has a passing '$check' check run from a push to $base"
+          else
+            echo "::error::Commit $sha has no passing '$check' check run from a push to $base. If that run is still in progress, re-run this workflow once it passes; the tag can stay. If it failed or was cancelled, tag a commit on $base whose required checks all passed."
+            missing=1
+          fi
+        done
+        if [ "$missing" -ne 0 ]; then
+          exit 1
+        fi
+
+        # A push run on the default branch implies the commit was once its
+        # tip; requiring it to be reachable still refuses one that a force
+        # push has since removed.
         status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$base...$sha" --jq .status)"
         case "$status" in
           identical|behind)

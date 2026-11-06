@@ -17,6 +17,7 @@ on:
 permissions:
   contents: read
   checks: read  # verify-release-tag reads the tagged commit's check runs
+  actions: read  # ... and the workflow runs that tie them to a push to main
 
 jobs:
   # -- Gate: tag matches the source version, tagged commit went green ---------

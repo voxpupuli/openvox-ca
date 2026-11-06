@@ -18,6 +18,8 @@ guide is the human-friendly entry point; where the two overlap, AGENTS.md wins.
 - git (any supported version — the magefile suite's fixtures isolate themselves
   from your own git config by redirecting `HOME` as well as setting
   `GIT_CONFIG_GLOBAL`, so they do not depend on the 2.32+ variables alone)
+- [jq](https://jqlang.org/), which the magefile suite (`mage test:magefile`,
+  and the pre-push hook that runs it) uses to stand in for `gh api --jq`
 - [Mage](https://magefile.org/), the build tool this repo uses instead of Make:
   `go install github.com/magefile/mage@latest` (or run targets with
   `go run mage.go <Target>`)
