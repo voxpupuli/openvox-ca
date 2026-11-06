@@ -148,6 +148,10 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
   `container-images.yml`, which `ci.yml` cannot see). `mage dev:check` keeps
   each one's `needs` covering its whole workflow, so a job you add to either
   file must be added to its aggregate.
+- Every `actions/checkout` step in a workflow sets `persist-credentials: false`,
+  which `mage dev:check` enforces. Nothing in CI pushes with the checkout's
+  token; a job that comes to need it changes `verifyCheckoutCredentials`, with
+  its reason, rather than leaving the input out.
 - A pull request that touches `.github/` or `charts/` automatically requests
   review from the code owners listed in
   [`.github/CODEOWNERS`](.github/CODEOWNERS).

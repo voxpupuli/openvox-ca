@@ -10168,6 +10168,113 @@ var _ = Describe("verifyTagWorkflowsCold", func() {
 	})
 })
 
+var _ = Describe("verifyCheckoutCredentials", func() {
+	// Against the repository's real workflows (this also runs as part of
+	// `mage dev:check`).
+	It("finds every real checkout dropping its credentials", func() {
+		Expect(verifyCheckoutCredentials()).To(Succeed())
+	})
+
+	const dropped = "      - uses: actions/checkout@abc\n        with:\n          persist-credentials: false\n"
+	workflow := func(steps string) []byte {
+		return []byte("on: pull_request\njobs:\n  build:\n    steps:\n" + steps)
+	}
+
+	// The baseline the must-fail specs below perturb.
+	It("accepts a checkout that sets persist-credentials: false", func() {
+		Expect(verifyCheckoutCredentialsIn(map[string][]byte{"ci.yml": workflow(dropped)})).To(Succeed())
+	})
+
+	// The case the guard exists for: checkout defaults to persisting, so the
+	// step that says nothing is the one that looks harmless.
+	It("rejects a checkout with the input omitted", func() {
+		Expect(verifyCheckoutCredentialsIn(map[string][]byte{
+			"ci.yml": workflow("      - uses: actions/checkout@abc\n"),
+		})).To(MatchError(ContainSubstring(
+			`ci.yml job "build" step 1 (actions/checkout) has no ` + "`persist-credentials:` input")))
+	})
+
+	It("rejects a checkout with other inputs but not this one", func() {
+		Expect(verifyCheckoutCredentialsIn(map[string][]byte{
+			"ci.yml": workflow("      - uses: actions/checkout@abc\n        with:\n          fetch-depth: 0\n"),
+		})).To(MatchError(ContainSubstring("has no `persist-credentials:` input")))
+	})
+
+	// Any value but the literal false is refused: checkout reads True as
+	// true, and an expression can evaluate to true.
+	DescribeTable("rejects any persist-credentials value but false",
+		func(value string) {
+			Expect(verifyCheckoutCredentialsIn(map[string][]byte{
+				"ci.yml": workflow("      - uses: actions/checkout@abc\n        with:\n" +
+					"          persist-credentials: " + value + "\n"),
+			})).To(MatchError(ContainSubstring(
+				`ci.yml job "build" step 1 (actions/checkout) sets ` + "`persist-credentials: " + value + "`")))
+		},
+		Entry("true", "true"),
+		Entry("True", "True"),
+		Entry("an expression", "${{ inputs.persist }}"),
+	)
+
+	It("matches the action name case-insensitively, as GitHub resolves it", func() {
+		Expect(verifyCheckoutCredentialsIn(map[string][]byte{
+			"ci.yml": workflow("      - uses: Actions/Checkout@abc\n"),
+		})).To(MatchError(ContainSubstring("(Actions/Checkout) has no `persist-credentials:` input")))
+	})
+
+	It("accepts the input spelled in another case", func() {
+		Expect(verifyCheckoutCredentialsIn(map[string][]byte{
+			"ci.yml": workflow("      - uses: actions/checkout@abc\n        with:\n          Persist-Credentials: false\n"),
+		})).To(Succeed())
+	})
+
+	// Two spellings of one input are one input to the runner, so a false
+	// spelling beside a true one must not read as false.
+	It("rejects the input set twice under different cases", func() {
+		Expect(verifyCheckoutCredentialsIn(map[string][]byte{
+			"ci.yml": workflow("      - uses: actions/checkout@abc\n        with:\n" +
+				"          persist-credentials: false\n          Persist-Credentials: true\n"),
+		})).To(MatchError(ContainSubstring("sets `persist-credentials:` more than once")))
+	})
+
+	// The violation sits in the job and file that sort last, behind clean
+	// ones, so a check that stopped at the first job, file or violation would
+	// miss it.
+	It("reports every violation in every job of every workflow", func() {
+		err := verifyCheckoutCredentialsIn(map[string][]byte{
+			"a.yml": workflow(dropped),
+			"z.yml": []byte("on: push\njobs:\n" +
+				"  aaa:\n    steps:\n" + dropped +
+				"  zzz:\n    steps:\n" + dropped +
+				"      - uses: actions/checkout@abc\n" +
+				"      - uses: actions/checkout@abc\n" +
+				"        with:\n          persist-credentials: true\n"),
+		})
+		Expect(err).To(MatchError(ContainSubstring(`z.yml job "zzz" step 2 (actions/checkout) has no`)))
+		Expect(err).To(MatchError(ContainSubstring(`z.yml job "zzz" step 3 (actions/checkout) sets`)))
+	})
+
+	It("ignores steps that are not actions/checkout", func() {
+		Expect(verifyCheckoutCredentialsIn(map[string][]byte{
+			"ci.yml": workflow(dropped + "      - uses: actions/setup-go@abc\n      - run: true\n"),
+		})).To(Succeed())
+	})
+
+	It("reports a malformed workflow against its file name", func() {
+		Expect(verifyCheckoutCredentialsIn(map[string][]byte{
+			"ci.yml":     workflow(dropped),
+			"broken.yml": []byte("jobs: [\n"),
+		})).To(MatchError(HavePrefix("broken.yml: ")))
+	})
+
+	// The floor: a set with no checkout at all, which a parsing regression
+	// would also produce, must not pass.
+	It("refuses a set with no checkout step at all", func() {
+		Expect(verifyCheckoutCredentialsIn(map[string][]byte{
+			"ci.yml": workflow("      - uses: actions/setup-go@abc\n"),
+		})).To(MatchError(ContainSubstring("no actions/checkout step was found")))
+	})
+})
+
 var _ = Describe("verifyAggregateJobs", func() {
 	// Against the real ci.yml and container-images.yml (this also runs as part
 	// of `mage dev:check`).
