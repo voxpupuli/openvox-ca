@@ -18,6 +18,7 @@
 package config_test
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 
@@ -159,6 +160,23 @@ var _ = Describe("StorageConfig.ToBackendSpec on the filesystem backend", func()
 			RedisAddrs:    []string{"redis:6379"},
 		}.ToBackendSpec(localDir)
 		Expect(err).To(MatchError(ContainSubstring("(etcd_endpoints, redis_addrs, sql_dsn_file)")))
+	})
+
+	// The server names each setting's environment variable as well, since it
+	// reads them from there too; migrate reads files only and does not.
+	It("returns a BackendSettingsError a caller can name the variables with", func() {
+		_, err := config.StorageConfig{
+			SQLDSN:     "postgres://ca@db/ca",
+			RedisAddrs: []string{"redis:6379"},
+		}.ToBackendSpec(localDir)
+
+		var bse *config.BackendSettingsError
+		Expect(errors.As(err, &bse)).To(BeTrue())
+		Expect(bse.Keys).To(Equal([]string{"redis_addrs", "sql_dsn"}))
+		Expect(err.Error()).NotTo(ContainSubstring("OPENVOX_CA_"), "no prefix unless a caller sets one")
+
+		bse.EnvPrefix = "OPENVOX_CA_"
+		Expect(bse.Error()).To(ContainSubstring("(redis_addrs or OPENVOX_CA_REDIS_ADDRS, sql_dsn or OPENVOX_CA_SQL_DSN)"))
 	})
 
 	It("accepts the settings every backend reads", func() {

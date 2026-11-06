@@ -58,6 +58,14 @@ var _ = Describe("migrate given another backend's settings but no storage_backen
 		)))
 	})
 
+	// migrate reads its config files and nothing else, so naming a variable
+	// would send the operator to the wrong place.
+	It("names the setting by its config-file key alone", func() {
+		writeFile(srcCfg, "cadir: "+srcDir+"\nsql_dsn: postgres://ca@db/ca\n")
+
+		Expect(migrate()).To(MatchError(Not(ContainSubstring("OPENVOX_CA_"))))
+	})
+
 	It("refuses the destination, and writes nothing to its cadir", func() {
 		writeFile(dstCfg, "cadir: "+dstDir+"\nsql_dsn_file: /run/secrets/dsn\n")
 

@@ -191,15 +191,43 @@ func (c StorageConfig) refuseFilesystemWithBackendSettings() error {
 	if len(set) == 0 {
 		return nil
 	}
+	return &BackendSettingsError{StorageBackend: c.StorageBackend, Keys: set}
+}
+
+// BackendSettingsError is the refusal ToBackendSpec returns for a filesystem
+// backend given settings only another backend reads.
+//
+// It names each setting by its config-file key. A caller whose configuration
+// also reads the environment sets EnvPrefix, so that the message names each
+// setting's variable too: an operator whose DSN arrives as OPENVOX_CA_SQL_DSN
+// finds no sql_dsn to remove in the config file.
+type BackendSettingsError struct {
+	// StorageBackend is storage_backend as configured, empty when unset.
+	StorageBackend string
+	// Keys are the settings found, by config-file key, in declaration order.
+	Keys []string
+	// EnvPrefix, when set, names each key's environment variable as well:
+	// EnvPrefix followed by the key in upper case.
+	EnvPrefix string
+}
+
+func (e *BackendSettingsError) Error() string {
 	selected := "storage_backend is not set, so the filesystem backend is selected"
-	if c.StorageBackend != "" {
+	if e.StorageBackend != "" {
 		// Quoted: it may have come from the environment.
-		selected = fmt.Sprintf("storage_backend is %q, the filesystem backend", c.StorageBackend)
+		selected = fmt.Sprintf("storage_backend is %q, the filesystem backend", e.StorageBackend)
 	}
-	return fmt.Errorf("%s, but settings only another backend reads are set (%s): "+
+	names := make([]string, len(e.Keys))
+	for i, key := range e.Keys {
+		names[i] = key
+		if e.EnvPrefix != "" {
+			names[i] += " or " + e.EnvPrefix + strings.ToUpper(key)
+		}
+	}
+	return fmt.Sprintf("%s, but settings only another backend reads are set (%s): "+
 		"the filesystem backend would ignore them and use the store under cadir, "+
 		"so set storage_backend to the backend they configure, or remove them",
-		selected, strings.Join(set, ", "))
+		selected, strings.Join(names, ", "))
 }
 
 // backendSettingsSet returns, in declaration order, the keys of the settings

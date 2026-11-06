@@ -430,8 +430,9 @@ configuration, and `openvox-ca-ctl migrate` refuses such a config file on
 either side. Without the refusal, a configuration that sets a DSN but has
 lost its `storage_backend` would start on whatever is under `cadir`. Where
 `cadir` is not persistent that is an empty store, and its empty CRL would accept
-every revoked certificate. The error names the settings it found: set
-`storage_backend` to the backend they configure, or remove them.
+every revoked certificate. The error names the settings it found, and from the
+server their environment variables too: set `storage_backend` to the backend
+they configure, or remove them.
 
 ### Sharing the cadir with OpenVox Server
 
