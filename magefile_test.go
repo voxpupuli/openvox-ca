@@ -5859,12 +5859,11 @@ var _ = Describe("the packages' maintainer scripts", func() {
 		// branch is reachable on a host that has no systemd. Without it the
 		// scripts correctly do nothing here and the "acts on a removal" half
 		// of the table below could not be asserted at all.
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(append(os.Environ(), debHostPins()...),
 			"PATH="+stubBin+":/usr/bin:/bin",
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
 			"OPENVOX_CA_STATEDIR="+stateDir,
 		)
-		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		res := firstBootResult{ok: true, output: string(out)}
 		if err != nil {
@@ -6014,12 +6013,11 @@ var _ = Describe("the packages' maintainer scripts", func() {
 	It("applies the preset even where systemd is not running", func() {
 		absent := filepath.Join(GinkgoT().TempDir(), "no-such-runtime")
 		cmd := exec.Command("/bin/sh", "packaging/scripts/postinstall", "1")
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(append(os.Environ(), debHostPins()...),
 			"PATH="+stubBin,
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+absent,
 			"OPENVOX_CA_STATEDIR="+stateDir,
 		)
-		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), "postinstall failed: %s", out)
 		calls, readErr := os.ReadFile(log)
@@ -6080,12 +6078,11 @@ var _ = Describe("the packages' maintainer scripts", func() {
 		// SSLDIR and CONFIG are left at their defaults: they do not exist
 		// here, so those guards skip and what remains under test is the
 		// enable.
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(append(os.Environ(), debHostPins()...),
 			"PATH="+stubBin,
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+absent,
 			"OPENVOX_CA_STATEDIR="+stateDir,
 		)
-		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), "postinstall failed: %s", out)
 
@@ -6128,12 +6125,11 @@ var _ = Describe("the packages' maintainer scripts", func() {
 		Expect(os.WriteFile(blocked, []byte("in the way\n"), 0o644)).To(Succeed())
 
 		cmd := exec.Command("/bin/sh", "packaging/scripts/postinstall", "configure")
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(append(os.Environ(), debHostPins()...),
 			"PATH="+stubBin,
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
 			"OPENVOX_CA_STATEDIR="+blocked,
 		)
-		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), "a marker that cannot be written must not fail the install: %s", out)
 
@@ -6353,11 +6349,10 @@ var _ = Describe("the packages' maintainer scripts", func() {
 	It("postremove does nothing at all where systemd is not running", func() {
 		absent := filepath.Join(GinkgoT().TempDir(), "no-such-runtime")
 		cmd := exec.Command("/bin/sh", "packaging/scripts/postremove", "0")
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(append(os.Environ(), debHostPins()...),
 			"PATH="+stubBin,
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+absent,
 		)
-		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), "postremove failed: %s", out)
 		Expect(log).NotTo(BeAnExistingFile(), "postremove called something")
@@ -6799,8 +6794,14 @@ esac
 // host -- CI's runner is one -- a runner without this sources the real
 // /usr/share/debconf/confmodule, talks to the host's debconf database and
 // reaches its ucf. A path that does not exist makes every host take the
-// no-debconf branch; the drop-in roots are scratch so the host's own units
-// cannot change what the scripts decide.
+// no-debconf branch; the rest are scratch so nothing on the host -- its own
+// units, a CA already in its ssl tree, its config.yaml -- can change what the
+// scripts decide. Every path seam the deb's scripts read is here, and a spec
+// below fails when one is added without it.
+//
+// Put these BEFORE a runner's own settings, never after: exec keeps the last
+// of two values for one name, so pins appended last would overwrite a
+// runner's deliberate SSLDIR or CONFIG.
 func debHostPins() []string {
 	GinkgoHelper()
 	pin := GinkgoT().TempDir()
@@ -6811,8 +6812,38 @@ func debHostPins() []string {
 		"OPENVOX_CA_VENDOR_UNIT_ROOT=" + filepath.Join(pin, "usr-lib-systemd"),
 		"OPENVOX_CA_LEGACY_UNIT_ROOT=" + filepath.Join(pin, "lib-systemd"),
 		"OPENVOX_CA_SERVER_CADIR=" + filepath.Join(pin, "puppetserver-ca"),
+		"OPENVOX_CA_SSLDIR=" + filepath.Join(pin, "ssl"),
+		"OPENVOX_CA_CONFIG=" + filepath.Join(pin, "config.yaml"),
+		"OPENVOX_CA_STATEDIR=" + filepath.Join(pin, "state"),
+		"OPENVOX_CA_SYSTEMD_RUNTIME=" + filepath.Join(pin, "no-systemd"),
+		"OPENVOX_CA_PUPPET_CONF=" + filepath.Join(pin, "puppet.conf"),
 	}
 }
+
+var _ = Describe("debHostPins", func() {
+	// The third time a runner reached the host would have been the third
+	// finding (openvox-ca#558): a seam added to a deb script and not pinned
+	// here reads the developer's or CI's real path, and a spec then passes or
+	// fails by host. So the list is checked against the scripts, not trusted.
+	It("pins every path seam the deb's maintainer scripts read", func() {
+		pinned := map[string]bool{}
+		for _, kv := range debHostPins() {
+			pinned[strings.SplitN(kv, "=", 2)[0]] = true
+		}
+		seam := regexp.MustCompile(`\$\{(OPENVOX_CA_[A-Z_]+):-/`)
+		var found int
+		for _, script := range []string{"postinstall", "postremove", "preremove", "debian-config"} {
+			body, err := os.ReadFile(filepath.Join("packaging/scripts", script))
+			Expect(err).NotTo(HaveOccurred())
+			for _, m := range seam.FindAllStringSubmatch(string(body), -1) {
+				found++
+				Expect(pinned).To(HaveKey(m[1]), "%s reads %s from a host path that debHostPins does not pin", script, m[1])
+			}
+		}
+		// A floor, so a pattern that stopped matching cannot pass vacuously.
+		Expect(found).To(BeNumerically(">=", 11))
+	})
+})
 
 // debconfStub writes a stand-in for /usr/share/debconf/confmodule into dir and
 // returns its path. It keeps each question's value and seen flag as files
@@ -8940,7 +8971,7 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 		// Every external command postinstall calls is stubbed below, so this
 		// exercises the script's branching on any platform rather than the
 		// host's idea of which tools exist.
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(append(os.Environ(), debHostPins()...),
 			"PATH="+stubBin,
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+systemdRuntime,
 			"OPENVOX_CA_SSLDIR="+sslDir,
@@ -8948,7 +8979,6 @@ var _ = Describe("postinstall's ownership and permission hardening", func() {
 			"OPENVOX_CA_STATEDIR="+stateDir,
 			"OPENVOX_CA_SSL_OWNER="+sslOwner,
 		)
-		cmd.Env = append(cmd.Env, debHostPins()...)
 		out, err := cmd.CombinedOutput()
 		res := firstBootResult{ok: true, output: string(out)}
 		if err != nil {
