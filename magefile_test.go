@@ -7183,6 +7183,19 @@ var _ = Describe("the deb's postinstall", func() {
 			Entry("a quoted puppet_server_file in config.yaml", func() {
 				Expect(os.WriteFile(config, []byte("\"puppet_server_file\": /etc/openvox-ca/admins\n"), 0o640)).To(Succeed())
 			}),
+			// YAML the server reads that no key-at-line-start match sees.
+			Entry("puppet_server in a flow mapping in config.yaml", func() {
+				Expect(os.WriteFile(config, []byte("{port: 8141, puppet_server: admin.example.com}\n"), 0o640)).To(Succeed())
+			}),
+			Entry("an explicit puppet_server key in config.yaml", func() {
+				Expect(os.WriteFile(config, []byte("? puppet_server\n: admin.example.com\n"), 0o640)).To(Succeed())
+			}),
+			Entry("a config.yaml it cannot read", func() {
+				if os.Geteuid() == 0 {
+					Skip("root reads a mode-0 file regardless")
+				}
+				Expect(os.WriteFile(config, []byte("port: 8141\n"), 0o000)).To(Succeed())
+			}),
 			Entry("the list in a service drop-in", func() {
 				dropIn("openvox-ca.service", "Environment=OPENVOX_CA_PUPPET_SERVER=a,b")
 			}),

@@ -261,10 +261,14 @@ fi
 # The same rule as EL's record-environment for what is left out, kept in step
 # with it by hand: a value the operator has already chosen.
 # OPENVOX_CA_CERTNAME when a drop-in for the oneshot mentions it;
-# OPENVOX_CA_PUPPET_SERVER when config.yaml sets puppet_server or
-# puppet_server_file, or a drop-in for the service mentions the list, its file
-# or its configuration file. Re-checked at every configure, so an operator who
-# later moves the list into config.yaml sees the line go on the next upgrade.
+# OPENVOX_CA_PUPPET_SERVER when config.yaml mentions puppet_server or
+# puppet_server_file outside a comment, or cannot be read, or a drop-in for the
+# service mentions the list, its file or its configuration file. Mentions, not
+# parsed keys, here as there: the server's YAML parser accepts a flow mapping
+# or an explicit `? key` that no key-at-line-start match would see, and a miss
+# renders a list over the operator's. Re-checked at every configure, so an
+# operator who later moves the list into config.yaml sees the line go on the
+# next upgrade.
 
 # dropins_mention succeeds when any drop-in systemd would apply to the unit
 # mentions any of the named variables outside a comment: the unit's own <unit>.d,
@@ -323,8 +327,11 @@ render_default_file() {
 			record_certname=no
 		fi
 		record_admin=yes
-		if [ -f "$CONFIG" ] &&
-			grep -Eq "^[[:space:]]*['\"]?(puppet_server|puppet_server_file)['\"]?[[:space:]]*:" "$CONFIG" 2>/dev/null; then
+		if [ -e "$CONFIG" ] && [ ! -r "$CONFIG" ]; then
+			record_admin=no
+		elif [ -f "$CONFIG" ] &&
+			sed -e '/^[[:space:]]*#/d' "$CONFIG" |
+			grep -Eq '(^|[^A-Za-z0-9_])puppet_server(_file)?([^A-Za-z0-9_]|$)'; then
 			record_admin=no
 		elif dropins_mention openvox-ca.service \
 			OPENVOX_CA_PUPPET_SERVER OPENVOX_CA_PUPPET_SERVER_FILE OPENVOX_CA_CONFIG; then
