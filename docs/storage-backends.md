@@ -421,6 +421,19 @@ storage_backend: filesystem   # optional; this is the default
 cadir: /etc/puppetlabs/puppet/ssl/ca
 ```
 
+The server refuses to start on the filesystem backend while any setting only
+another backend reads is set: an `etcd_*`, `redis_*` or `sql_*` key, or its
+environment variable or flag. That holds whether `storage_backend` is left out
+or set to `filesystem`. The offline `openvox-ca` subcommands (`csr`,
+`generate`, `import-ca-cert` and `rebuild-inventory-hmac`) refuse the same
+configuration, and `openvox-ca-ctl migrate` refuses such a config file on
+either side. Without the refusal, a configuration that sets a DSN but has
+lost its `storage_backend` would start on whatever is under `cadir`. Where
+`cadir` is not persistent that is an empty store, and its empty CRL would accept
+every revoked certificate. The error names the settings it found, and from the
+server their environment variables too: set `storage_backend` to the backend
+they configure, or remove them.
+
 ### Sharing the cadir with OpenVox Server
 
 A cadir works with either openvox-ca or OpenVox Server's own CA, as it stands.
