@@ -1710,43 +1710,36 @@ var automergeActionRE = regexp.MustCompile(`(?i)auto-?merge`)
 // requiredMageTargets are targets something outside this repository's Go code
 // depends on by name, and which nothing in Go would notice the loss of.
 //
-// build:packages is listed BEFORE its caller exists. Nothing in this tree runs
-// it: release.yml here has three jobs (verify, build, release) and no
-// packaging job. The job that calls it -- once, in the packaging job #266 adds
-// to release.yml -- arrives with #266, which was held until this target existed. So
-// this entry is deliberately early rather than describing the tree you are
-// reading, and a grep through release.yml is not evidence that it is unused.
+// build:packages was listed here before any workflow called it, while the
+// packaging job #266 added to release.yml was held for this target to exist.
+// Both workflows that run it now -- release.yml's packaging job and
+// packages.yml's build job -- arrived later.
 //
-// The count is stated because it was got wrong: `git grep -c` reports 2 for
-// that file, and the second line is a comment describing the target rather
-// than a second invocation. It counts matching lines, not occurrences.
-//
-// docs/development/releasing.md DOES describe packages, as of the commit that
-// made the build reproducible -- what it does not have is a release job that
-// builds them, which is the thing this entry stands in for.
-//
-// What it is worth once that caller lands: a workflow names a target as a
-// string, so deleting or renaming the target would compile cleanly, pass every
-// test, and fail at tag time -- after the tag is pushed, and while
-// container-images.yml and helm-chart.yml publish their images regardless,
-// including the mutable latest tags. Recovery is deleting GHCR package
-// versions, not re-tagging.
+// What it is worth: a workflow names a target as a string, so deleting or
+// renaming it compiles cleanly. Before packages.yml that also passed every test
+// and failed at tag time, after the tag was pushed and while
+// container-images.yml and helm-chart.yml published their images regardless.
+// packages.yml now runs the target on every pull request, so a deletion, or a
+// rename that missed a workflow, fails there first. What is left for this list
+// is the rename whose workflow callers were all updated: CI passes, and every
+// `mage build:packages` written down outside this repository is dead.
 //
 // This list is the machine-checked half of that dependency; the loop over the
 // workflows below is the other half, and neither subsumes the other. The
 // workflow scan catches a target a workflow calls and the magefile does not
-// have -- but it can only see callers that exist, which today is why the scan
-// alone would not notice build:packages disappearing. This catches that, and
-// it also catches the target being renamed and its caller updated to match,
-// which the scan would call correct while every `mage build:packages` written
-// down outside this repository had silently stopped working.
+// have -- but it can only see callers that exist. This catches the target
+// disappearing however many callers it has, and it also catches the target
+// being renamed and its callers updated to match, which the scan would call
+// correct while every `mage build:packages` written down outside this
+// repository had silently stopped working.
 var requiredMageTargets = []string{"build:packages", "build:unit"}
 
 // Why each entry is here, since the comment above argues the case for only one
 // of them:
 //
-//   - build:packages is called by release.yml once #266 lands, and by the
-//     recipes in README.md, CONTRIBUTING.md and docs/systemd.md.
+//   - build:packages is called by release.yml and packages.yml, by
+//     test/packages/build-upgrade.sh, and by the recipes in CONTRIBUTING.md,
+//     docs/systemd.md and docs/development/testing.md.
 //   - build:unit is called by no workflow. It is named by CONTRIBUTING.md's
 //     from-source recipe, AGENTS.md's command table and the from-source
 //     paragraph of docs/systemd.md as the way to get an installable unit

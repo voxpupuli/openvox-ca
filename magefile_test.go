@@ -8216,7 +8216,8 @@ var _ = Describe("Build.Packages", func() {
 // The stubs stand in for the CA, not for the script: openvox-ca-ctl `setup`
 // creates the files a bootstrapped cadir has, and `generate` writes the
 // credential it is asked for. What is under test is the script's own
-// behaviour, which is what the packages ship and what no CI leg installs.
+// behaviour, branch by branch, which the Packages legs (#254) cannot reach:
+// they run it once per scenario, against the real CA under systemd.
 func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) firstBootResult {
 	cmd := exec.Command("sh", firstBootScriptPath)
 	cmd.Env = append(os.Environ(),
