@@ -2762,6 +2762,87 @@ func verifyColdTagStepsIn(name string, doc tagCacheWorkflowDoc) (int, error) {
 	return setupGoSteps, errors.Join(errs...)
 }
 
+// verifyCheckoutCredentials asserts that every actions/checkout step in every
+// workflow sets `persist-credentials: false`. Wired into dev:check with its own
+// banner.
+//
+// checkout defaults it to true, which leaves the job's GITHUB_TOKEN configured
+// for git for every later step -- a third-party action, or anything a build or
+// test shells out to -- to read. Nothing in this
+// repository's workflows uses it: no job pushes, fetches or clones through git
+// after its checkout, and every step that calls the API (verify-release-tag,
+// the auto-merge and release jobs) is handed a token explicitly. So the default
+// is exposure with no use, most of all in the jobs holding packages: write.
+// And it is the default: a new checkout step that says nothing gets it, which
+// is why this is a check rather than a one-off sweep (openvox-ca#451).
+//
+// A job that does come to need it -- one that pushes a commit or a tag with
+// the checkout's token -- changes this guard deliberately, with its reason,
+// rather than being quietly exempt.
+//
+// Scope: steps written in the workflow files. A composite action under
+// .github/actions is not opened; none of them checks out today.
+func verifyCheckoutCredentials() error {
+	sources, err := readWorkflowSources(filepath.Join(".github", "workflows"))
+	if err != nil {
+		return err
+	}
+	return verifyCheckoutCredentialsIn(sources)
+}
+
+// verifyCheckoutCredentialsIn is verifyCheckoutCredentials over caller-supplied
+// workflow contents. Every violation is reported, not only the first.
+//
+// It has a floor of one checkout step across the set: without it, a parsing
+// regression that found no steps would pass.
+func verifyCheckoutCredentialsIn(sources map[string][]byte) error {
+	var errs []error
+	checkouts := 0
+	for _, name := range slices.Sorted(maps.Keys(sources)) {
+		var doc tagCacheWorkflowDoc
+		if err := yaml.Unmarshal(sources[name], &doc); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		for _, job := range slices.Sorted(maps.Keys(doc.Jobs)) {
+			for i, s := range doc.Jobs[job].Steps {
+				if actionPath(s.Uses) != "actions/checkout" {
+					continue
+				}
+				checkouts++
+				uses, _, _ := strings.Cut(s.Uses, "@")
+				where := fmt.Sprintf("%s job %q step %d (%s)", name, job, i+1, uses)
+				inputs, repeated := foldInputs(s.With)
+				persist, ok := inputs["persist-credentials"]
+				switch {
+				case repeated["persist-credentials"]:
+					errs = append(errs, fmt.Errorf("%s sets `persist-credentials:` more than once under "+
+						"different cases, and the runner reads them as one input, so this check cannot "+
+						"tell which value checkout sees; keep a single `persist-credentials: false`", where))
+				case !ok:
+					errs = append(errs, fmt.Errorf("%s has no `persist-credentials:` input, and checkout "+
+						"defaults it to true, leaving the job's token in the git config for every later "+
+						"step; set `persist-credentials: false`", where))
+				case persist.Value != "false":
+					// Literal false only: an expression could evaluate to
+					// true, and this cannot evaluate it.
+					errs = append(errs, fmt.Errorf("%s sets `persist-credentials: %s`; set it to false, "+
+						"or, if a later step really pushes with the checkout's token, change "+
+						"verifyCheckoutCredentials to say which and why", where, persist.Value))
+				}
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	if checkouts == 0 {
+		return errors.New("no actions/checkout step was found in any workflow, so the checkout " +
+			"credential check checked nothing; fix the parsing rather than deleting the check")
+	}
+	return nil
+}
+
 // requiredCheckAggregate is a fan-in job that main's ruleset requires by name.
 type requiredCheckAggregate struct {
 	workflow string // file name under .github/workflows
@@ -3199,9 +3280,9 @@ func pushCanFireOnTag(on yaml.Node) (bool, error) {
 }
 
 // tagCacheWorkflowDoc is the slice of a workflow document
-// verifyTagWorkflowsCold reads. `on:` is kept as a raw node because GitHub
-// accepts it as a string, a list or a map, and workflowGuardDoc's map would
-// refuse the first two.
+// verifyTagWorkflowsCold reads; verifyCheckoutCredentials reads its steps too.
+// `on:` is kept as a raw node because GitHub accepts it as a string, a list or
+// a map, and workflowGuardDoc's map would refuse the first two.
 type tagCacheWorkflowDoc struct {
 	On   yaml.Node `yaml:"on"`
 	Jobs map[string]struct {
@@ -9407,6 +9488,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking tag-triggered workflows restore no cache...")
 	if err := verifyTagWorkflowsCold(); err != nil {
+		return err
+	}
+	fmt.Println("Checking every checkout drops its credentials...")
+	if err := verifyCheckoutCredentials(); err != nil {
 		return err
 	}
 	fmt.Println("Checking the provisioning TTL against the CA's own default...")

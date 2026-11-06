@@ -35,6 +35,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -63,6 +65,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -93,23 +97,90 @@ jobs:
           - docker/puppet/Dockerfile.client
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Run hadolint
         uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: ${{ matrix.dockerfile }}
 
+  # -- Image build context -----------------------------------------------------
+  # .dockerignore may exclude only paths git does not track, and must keep .git.
+  # The image builder runs `go build` in the checkout it is sent, and the
+  # toolchain stamps vcs.revision and vcs.modified from it, which --version
+  # prints. A tracked file excluded from the context reads there as deleted and
+  # marks every binary dirty; an excluded .git loses the stamp altogether.
+  # Neither breaks a build, so nothing else would notice.
+  #
+  # So this builds the alpine Dockerfile's builder stage from this checkout, as
+  # container-images.yml does, and reads the stamp back out of both binaries.
+  # The matching is BuildKit's own, so the check cannot disagree with the
+  # builder about what .dockerignore excludes, as a reimplementation could. One
+  # Dockerfile is enough: both read the same .dockerignore. While it has the
+  # build settings in hand it also pins -trimpath, which the Dockerfiles share
+  # with the release tarballs. CI only ever takes the passing branch; the
+  # mutations that exercise the others are in docs/development/testing.md,
+  # "Image build context check".
+  image-context:
+    name: Image build context
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the alpine image's builder stage
+        run: docker build --target builder -f Dockerfile.alpine -t openvox-ca-builder .
+      - name: Check both binaries carry this commit's stamp, clean, and -trimpath
+        run: |
+          set -euo pipefail
+          want="$(git rev-parse HEAD)"
+          failed=0
+          for bin in /openvox-ca /openvox-ca-ctl; do
+            info="$(docker run --rm openvox-ca-builder go version -m "$bin")"
+            if ! grep -qx "[[:space:]]*build[[:space:]]*vcs.revision=${want}" <<< "$info"; then
+              echo "::error::$bin is not stamped with vcs.revision=${want}; is .git excluded from the build context?"
+              failed=1
+            elif ! grep -qx "[[:space:]]*build[[:space:]]*vcs.modified=false" <<< "$info"; then
+              echo "::error::$bin is not stamped vcs.modified=false; .dockerignore excludes a tracked file"
+              failed=1
+            fi
+            if ! grep -qx "[[:space:]]*build[[:space:]]*-trimpath=true" <<< "$info"; then
+              echo "::error::$bin is not built with -trimpath; Dockerfile.alpine's go build lines must pass it"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "--- build info"
+            docker run --rm openvox-ca-builder go version -m /openvox-ca | grep -E 'vcs\.|trimpath|^/'
+            echo "--- git status in the builder"
+            docker run --rm openvox-ca-builder git -C /src status --porcelain || true
+            exit 1
+          fi
+          echo "both binaries stamped vcs.revision=${want}, vcs.modified=false, built with -trimpath"
+
   # -- Markdown lint (markdownlint-cli2) ---------------------------------------
   # Lints every Markdown document against .markdownlint-cli2.yaml. Like
   # hadolint, markdownlint-cli2 fails the build on violations (though it can fix
   # most of them locally with `markdownlint-cli2 --fix`). Node is preinstalled
-  # on GitHub-hosted runners, so npx runs the pinned version with no setup step.
+  # on GitHub-hosted runners, so this needs no setup step.
+  #
+  # Installed with `npm ci` from .github/markdownlint/package-lock.json, which
+  # pins markdownlint-cli2 and every package it pulls in by integrity hash.
+  # The `npx --yes markdownlint-cli2@<version>` this replaced pinned only the
+  # top package's version, and resolved the rest afresh on every run. None of
+  # them needs an install script, so none runs. Renovate bumps the version in
+  # package.json and regenerates the lockfile in the same PR.
   markdownlint:
     name: Markdown lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install markdownlint-cli2
+        run: npm ci --prefix .github/markdownlint --ignore-scripts --no-audit --no-fund
       - name: Run markdownlint-cli2
-        run: npx --yes markdownlint-cli2@0.23.1
+        run: .github/markdownlint/node_modules/.bin/markdownlint-cli2
 
   # -- Shell lint (shellcheck) -------------------------------------------------
   # Lints the package maintainer scripts. They are the one part of this
@@ -146,6 +217,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install shellcheck
         env:
           SHELLCHECK_VERSION: v0.11.0
@@ -182,6 +255,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -252,6 +327,8 @@ jobs:
           - v4.3.1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -286,6 +363,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -364,6 +443,8 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -426,6 +507,8 @@ jobs:
             mage_target: test:puppetFIPS
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -448,6 +531,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -474,6 +559,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -494,6 +581,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -513,6 +602,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -532,6 +623,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -549,6 +642,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -569,6 +664,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -595,6 +692,8 @@ jobs:
             mage_target: test:integComposeFIPS
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -623,6 +722,7 @@ jobs:
       - check
       - vulncheck
       - hadolint
+      - image-context
       - markdownlint
       - shellcheck
       - mixin
