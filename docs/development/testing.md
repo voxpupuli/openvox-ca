@@ -240,6 +240,35 @@ These are deliberately not a CI job: each mutation is a full image build, and
 the failure they guard against is introduced by editing the assertion itself —
 which is exactly when this procedure is required.
 
+## Image build context check
+
+CI's *Image build context* job builds `Dockerfile.alpine`'s builder stage from
+the checkout and reads the build settings back out of both binaries with
+`go version -m`. It fails unless each carries `vcs.revision` equal to the
+checked-out commit, `vcs.modified=false` and `-trimpath=true`. The first two
+hold only while [`.dockerignore`](../../.dockerignore) excludes nothing git
+tracks and keeps `.git`; the third pins the `-trimpath` the Dockerfiles share
+with the release tarballs.
+
+Like the guards above, CI only takes its passing branch. To re-verify a failing
+one, apply the mutation in a fresh `git clone` of the tree and **commit it
+there**. An uncommitted edit is itself a modified tracked file, so it fails on
+`vcs.modified` whatever it changed. A worktree will not do either: its `.git`
+is a file pointing outside the build context. Then run the job's two steps in
+the clone, or build the stage and read the settings by hand:
+
+```bash
+docker build --target builder -f Dockerfile.alpine -t openvox-ca-builder .
+docker run --rm openvox-ca-builder go version -m /openvox-ca | grep -E 'vcs\.|trimpath'
+
+# 1. Exclude a tracked path: append `docs/` to .dockerignore and commit.
+#    -- expect "is not stamped vcs.modified=false; .dockerignore excludes a tracked file"
+# 2. Exclude the repository: append `.git` to .dockerignore and commit.
+#    -- expect "is not stamped with vcs.revision=<sha>; is .git excluded from the build context?"
+# 3. Drop -trimpath from both go build lines in Dockerfile.alpine and commit.
+#    -- expect "is not built with -trimpath"
+```
+
 ## Fixture image command contract
 
 `test/Dockerfile.run` builds the image the integration suites run *inside*. It is

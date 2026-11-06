@@ -104,6 +104,60 @@ jobs:
         with:
           dockerfile: ${{ matrix.dockerfile }}
 
+  # -- Image build context -----------------------------------------------------
+  # .dockerignore may exclude only paths git does not track, and must keep .git.
+  # The image builder runs `go build` in the checkout it is sent, and the
+  # toolchain stamps vcs.revision and vcs.modified from it, which --version
+  # prints. A tracked file excluded from the context reads there as deleted and
+  # marks every binary dirty; an excluded .git loses the stamp altogether.
+  # Neither breaks a build, so nothing else would notice.
+  #
+  # So this builds the alpine Dockerfile's builder stage from this checkout, as
+  # container-images.yml does, and reads the stamp back out of both binaries.
+  # The matching is BuildKit's own, so the check cannot disagree with the
+  # builder about what .dockerignore excludes, as a reimplementation could. One
+  # Dockerfile is enough: both read the same .dockerignore. While it has the
+  # build settings in hand it also pins -trimpath, which the Dockerfiles share
+  # with the release tarballs. CI only ever takes the passing branch; the
+  # mutations that exercise the others are in docs/development/testing.md,
+  # "Image build context check".
+  image-context:
+    name: Image build context
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the alpine image's builder stage
+        run: docker build --target builder -f Dockerfile.alpine -t openvox-ca-builder .
+      - name: Check both binaries carry this commit's stamp, clean, and -trimpath
+        run: |
+          set -euo pipefail
+          want="$(git rev-parse HEAD)"
+          failed=0
+          for bin in /openvox-ca /openvox-ca-ctl; do
+            info="$(docker run --rm openvox-ca-builder go version -m "$bin")"
+            if ! grep -qx "[[:space:]]*build[[:space:]]*vcs.revision=${want}" <<< "$info"; then
+              echo "::error::$bin is not stamped with vcs.revision=${want}; is .git excluded from the build context?"
+              failed=1
+            elif ! grep -qx "[[:space:]]*build[[:space:]]*vcs.modified=false" <<< "$info"; then
+              echo "::error::$bin is not stamped vcs.modified=false; .dockerignore excludes a tracked file"
+              failed=1
+            fi
+            if ! grep -qx "[[:space:]]*build[[:space:]]*-trimpath=true" <<< "$info"; then
+              echo "::error::$bin is not built with -trimpath; Dockerfile.alpine's go build lines must pass it"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "--- build info"
+            docker run --rm openvox-ca-builder go version -m /openvox-ca | grep -E 'vcs\.|trimpath|^/'
+            echo "--- git status in the builder"
+            docker run --rm openvox-ca-builder git -C /src status --porcelain || true
+            exit 1
+          fi
+          echo "both binaries stamped vcs.revision=${want}, vcs.modified=false, built with -trimpath"
+
   # -- Markdown lint (markdownlint-cli2) ---------------------------------------
   # Lints every Markdown document against .markdownlint-cli2.yaml. Like
   # hadolint, markdownlint-cli2 fails the build on violations (though it can fix
@@ -668,6 +722,7 @@ jobs:
       - check
       - vulncheck
       - hadolint
+      - image-context
       - markdownlint
       - shellcheck
       - mixin

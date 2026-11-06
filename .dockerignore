@@ -16,6 +16,9 @@
 # .gitignore, which is in the context, and everything excluded here is ignored
 # there too. An untracked file named in neither still marks the build dirty.
 #
+# CI's "Image build context" job checks the stamp on every pull request; see
+# docs/development/testing.md, "Image build context check".
+#
 # Unlike .gitignore, a pattern here is anchored at the context root, so the
 # ones that should match at any depth say **/.
 
