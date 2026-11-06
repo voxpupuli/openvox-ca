@@ -241,6 +241,32 @@ var _ = Describe("serveCommandGoroutines", func() {
 				"created by "+serveCommandPkg+"(*goroutineGroup).Go in goroutine 1\n"+
 				"\t/src/cmd/openvox-ca/goroutine_group.go:53 +0x8c",
 			true),
+		Entry("is true while Done wakes Wait",
+			"runtime.semrelease1(0xc000123458, 0x0, 0x0)\n"+
+				"\t/go/src/runtime/sema.go:257 +0x1b8\n"+
+				"sync.runtime_Semrelease(0x0?, 0x0?, 0x0?)\n"+
+				"\t/go/src/runtime/sema.go:93 +0x24\n"+
+				"sync.(*WaitGroup).Add(0xc000123450, 0xffffffffffffffff)\n"+
+				"\t/go/src/sync/waitgroup.go:141 +0x2a4\n"+
+				"sync.(*WaitGroup).Done(...)\n"+
+				"\t/go/src/sync/waitgroup.go:156\n"+
+				serveCommandPkg+"(*goroutineGroup).Go.func1()\n"+
+				"\t/src/cmd/openvox-ca/goroutine_group.go:56 +0x9c\n"+
+				"created by "+serveCommandPkg+"(*goroutineGroup).Go in goroutine 1\n"+
+				"\t/src/cmd/openvox-ca/goroutine_group.go:53 +0x8c",
+			true),
+		Entry("is true in the race detector's deferred call from Done",
+			"internal/race.Enable(...)\n"+
+				"\t/go/src/internal/race/race.go:33\n"+
+				"sync.(*WaitGroup).Add(0xc000123450, 0xffffffffffffffff)\n"+
+				"\t/go/src/sync/waitgroup.go:143 +0x2c0\n"+
+				"sync.(*WaitGroup).Done(...)\n"+
+				"\t/go/src/sync/waitgroup.go:156\n"+
+				serveCommandPkg+"(*goroutineGroup).Go.func1()\n"+
+				"\t/src/cmd/openvox-ca/goroutine_group.go:56 +0x9c\n"+
+				"created by "+serveCommandPkg+"(*goroutineGroup).Go in goroutine 1\n"+
+				"\t/src/cmd/openvox-ca/goroutine_group.go:53 +0x8c",
+			true),
 		Entry("is false with the function's own frame above the closure",
 			"runtime.gopark(0x0?, 0x0?, 0x0?, 0x0?, 0x0?)\n"+
 				"\t/go/src/runtime/proc.go:435 +0xc8\n"+
