@@ -32,6 +32,9 @@ Thumbs.db
 # Mage build cache
 .mage/
 
+# The pinned markdownlint-cli2 install (.github/markdownlint)
+node_modules/
+
 # Claude Code session data
 .claude/
 docs/superpowers/

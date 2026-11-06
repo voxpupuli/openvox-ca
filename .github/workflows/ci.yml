@@ -108,7 +108,14 @@ jobs:
   # Lints every Markdown document against .markdownlint-cli2.yaml. Like
   # hadolint, markdownlint-cli2 fails the build on violations (though it can fix
   # most of them locally with `markdownlint-cli2 --fix`). Node is preinstalled
-  # on GitHub-hosted runners, so npx runs the pinned version with no setup step.
+  # on GitHub-hosted runners, so this needs no setup step.
+  #
+  # Installed with `npm ci` from .github/markdownlint/package-lock.json, which
+  # pins markdownlint-cli2 and every package it pulls in by integrity hash.
+  # The `npx --yes markdownlint-cli2@<version>` this replaced pinned only the
+  # top package's version, and resolved the rest afresh on every run. None of
+  # them needs an install script, so none runs. Renovate bumps the version in
+  # package.json and regenerates the lockfile in the same PR.
   markdownlint:
     name: Markdown lint
     runs-on: ubuntu-latest
@@ -116,8 +123,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install markdownlint-cli2
+        run: npm ci --prefix .github/markdownlint --ignore-scripts --no-audit --no-fund
       - name: Run markdownlint-cli2
-        run: npx --yes markdownlint-cli2@0.23.1
+        run: .github/markdownlint/node_modules/.bin/markdownlint-cli2
 
   # -- Shell lint (shellcheck) -------------------------------------------------
   # Lints the package maintainer scripts. They are the one part of this

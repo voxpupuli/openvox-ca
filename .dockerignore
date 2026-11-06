@@ -39,6 +39,7 @@ coverage.html
 .test-output/
 tmp/
 .mage/
+**/node_modules/
 
 # Editor and OS clutter, mirroring .gitignore.
 **/.DS_Store

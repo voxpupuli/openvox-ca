@@ -101,10 +101,13 @@ tests, and the per-backend integration suites — is documented in
 Markdown documentation is linted with
 [markdownlint-cli2](https://github.com/DavidAnson/markdownlint-cli2) against
 [`.markdownlint-cli2.yaml`](.markdownlint-cli2.yaml). Run it (and auto-fix most
-issues) before pushing doc changes:
+issues) before pushing doc changes. CI installs the version, and every package
+it depends on, from the lockfile in [`.github/markdownlint/`](.github/markdownlint/);
+to run exactly that:
 
 ```bash
-markdownlint-cli2 --fix
+npm ci --prefix .github/markdownlint --ignore-scripts
+.github/markdownlint/node_modules/.bin/markdownlint-cli2 --fix
 ```
 
 The packages' maintainer scripts are linted with
