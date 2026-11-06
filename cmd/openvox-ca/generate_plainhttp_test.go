@@ -18,7 +18,6 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -27,7 +26,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -123,7 +121,7 @@ var _ = Describe("the serve command's POST /generate", func() {
 		// on without no_tls_required, and neither enters the decision any more:
 		// the table above holds the off-loopback case.
 		It("refuses to return a private key", func() {
-			addr := startServeArgs(config(false))
+			addr := startServe(config(false))
 
 			status, body := postGenerate(plainClient(), "http://"+addr, "node.example.com")
 			Expect(status).To(Equal(http.StatusForbidden),
@@ -136,10 +134,26 @@ var _ = Describe("the serve command's POST /generate", func() {
 				"the remedy belongs in the log, where the operator reads it")
 		})
 
+		// The case the issue named. no_tls_required used to exempt /generate
+		// from the refusal; it lifts only the refusal to start, and the bind
+		// is loopback here only because a spec should not listen on a real
+		// interface.
+		It("refuses under no_tls_required too", func() {
+			path := config(false)
+			appendConfig(path, "no_tls_required: true\n")
+			addr := startServe(path)
+
+			status, body := postGenerate(plainClient(), "http://"+addr, "node.example.com")
+			Expect(status).To(Equal(http.StatusForbidden),
+				"no_tls_required let a private key out over plain HTTP; body: %s", body)
+			Expect(body).To(ContainSubstring("private key delivery requires TLS"))
+			Expect(body).NotTo(ContainSubstring("PRIVATE KEY"))
+		})
+
 		// Through the flag rather than the file, which pins the flag's overlay
 		// as well; the file and the environment are pinned in config_test.go.
 		It("returns one when --insecure-allow-plain-http-generate is set, and warns at startup", func() {
-			addr := startServeArgs(config(false), "--insecure-allow-plain-http-generate")
+			addr := startServe(config(false), "--insecure-allow-plain-http-generate")
 
 			Expect(serverLog()).To(ContainSubstring(
 				"INSECURE: insecure_allow_plain_http_generate is set and TLS is not configured"))
@@ -154,7 +168,7 @@ var _ = Describe("the serve command's POST /generate", func() {
 		It("returns a private key to an admin without the setting", func() {
 			// Minted before the server starts, which then holds the store.
 			admin := mintClientCert(caDir, "admin.example.com")
-			addr := startServeArgs(config(true))
+			addr := startServe(config(true))
 
 			status, body := postGenerate(tlsClient(caRoots(caDir), admin), "https://"+addr, "node.example.com")
 			Expect(status).To(Equal(http.StatusOK), "body: %s", body)
@@ -165,52 +179,13 @@ var _ = Describe("the serve command's POST /generate", func() {
 		It("warns at startup that the setting has no effect", func() {
 			path := config(true)
 			appendConfig(path, "insecure_allow_plain_http_generate: true\n")
-			startServeArgs(path)
+			startServe(path)
 
 			Expect(serverLog()).To(ContainSubstring(
 				"insecure_allow_plain_http_generate is set but has no effect while TLS is configured"))
 		})
 	})
 })
-
-// startServeArgs is startServe with extra command-line arguments.
-func startServeArgs(configPath string, extra ...string) string {
-	GinkgoHelper()
-	rec := startNotifyRecorder(nil)
-
-	addr, err := readConfigAddr(configPath)
-	Expect(err).NotTo(HaveOccurred())
-
-	cmd := newRootCmd()
-	cmd.SetOut(GinkgoWriter)
-	cmd.SetErr(GinkgoWriter)
-	cmd.SetArgs(append([]string{"--config", configPath, "--single-process"}, extra...))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- cmd.ExecuteContext(ctx) }()
-	DeferCleanup(func() {
-		cancel()
-		Eventually(done, "60s").Should(Receive(),
-			"the serve command did not stop when its context was cancelled")
-	})
-
-	deadline := time.After(60 * time.Second)
-	for {
-		select {
-		case msg, ok := <-rec.msgs:
-			if ok && strings.Contains(msg, "READY=1") {
-				return addr
-			}
-		case err := <-done:
-			// Put back for the cleanup, which waits on it.
-			done <- err
-			Fail(fmt.Sprintf("the serve command exited before it was ready: %v", err))
-		case <-deadline:
-			Fail("the serve command did not report READY=1 within 60s")
-		}
-	}
-}
 
 func plainClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}

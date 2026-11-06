@@ -314,10 +314,14 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 	// It used to hold main.go to a count of reads of the predicate's local as
 	// well. The count fails on a refactor that keeps behaviour, and passes when
 	// a deleted gate is masked by any unrelated read, so the behavioural specs
-	// replaced it. Three reads are now pinned by neither: the puppet_server
-	// warning, srv.PlainHTTP and the status line. None of them opens anything
-	// -- srv.PlainHTTP only withholds /generate's private keys, so losing its
-	// read fails closed -- which is why they were not worth the count.
+	// replaced it. Two reads are now pinned by neither: the puppet_server
+	// warning and the status line. Neither opens anything, which is why they
+	// were not worth the count.
+	//
+	// srv.PlainHTTP's read is pinned by generate_plainhttp_test.go, from both
+	// sides. Losing the read alone fails closed, refusing /generate even with
+	// TLS. Losing the whole assignment fails open: the field is then false
+	// without TLS, and /generate hands private keys to any caller.
 	It("reads the TLS predicate rather than tls_cert/tls_key directly", func() {
 		var predicateReads, rawReads int
 		ast.Inspect(file, func(n ast.Node) bool {
