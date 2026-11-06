@@ -362,10 +362,12 @@ func drainNotifications(rec *notifyRecorder) []string {
 }
 
 // serveCommandGoroutines returns the stack of every goroutine the serve
-// command's RunE started. Before #546 those were created by RunE itself, a
-// closure named newRootCmd.func…; now they are created by goroutineGroup.Go.
-// Either name in a stack, as a frame or as its creator, counts. The package is
-// named by its import path in a test binary, not as "main".
+// command's RunE started and that is still running. Before #546 those were
+// created by RunE itself, a closure named newRootCmd.func…; now they are
+// created by goroutineGroup.Go. Either name in a stack, as a frame or as its
+// creator, counts. The package is named by its import path in a test binary,
+// not as "main". A goroutine that has already returned from its work is not
+// counted, though it is still in the snapshot: see returnedFromGroupWork.
 func serveCommandGoroutines() []string {
 	buf := make([]byte, 1<<20)
 	for {
@@ -376,15 +378,55 @@ func serveCommandGoroutines() []string {
 		}
 		buf = make([]byte, 2*len(buf))
 	}
-	const pkg = "github.com/voxpupuli/openvox-ca/cmd/openvox-ca."
 	var found []string
 	for _, stack := range strings.Split(string(buf), "\n\n") {
-		if strings.Contains(stack, pkg+"newRootCmd.") ||
-			strings.Contains(stack, pkg+"(*goroutineGroup).") {
+		if (strings.Contains(stack, serveCommandPkg+"newRootCmd.") ||
+			strings.Contains(stack, serveCommandPkg+"(*goroutineGroup).")) &&
+			!returnedFromGroupWork(stack) {
 			found = append(found, stack)
 		}
 	}
 	return found
+}
+
+// serveCommandPkg prefixes this package's functions in a stack.
+const serveCommandPkg = "github.com/voxpupuli/openvox-ca/cmd/openvox-ca."
+
+// returnedFromGroupWork reports whether stack is a goroutine started by
+// goroutineGroup.Go that has already returned from the function it was given.
+//
+// Stop's Wait returns once every such goroutine has run its deferred wg.Done,
+// but the goroutine itself exits an instant later, and a snapshot can catch it
+// in between (#556). Its stack then shows goroutineGroup.Go's own closure with
+// nothing above it but the runtime and sync frames of Done and of exiting. A
+// goroutine still running its function has that function's frames above the
+// closure, however it is blocked.
+//
+// Polling would not do in place of this. The command cancels its own context
+// as it returns (signal.NotifyContext's stop), so a goroutine nothing waited
+// for still finishes soon afterwards, and a poll would wait for it: dropping
+// the deferred Stop, which is the #546 defect, would then pass.
+//
+// A goroutine that has been started but has not yet run looks the same, with
+// only the closure on its stack. Stop's Wait cannot return past one of those,
+// so it matters only when nothing waits at all, and there it is the goroutines
+// already running their functions that fail the spec.
+func returnedFromGroupWork(stack string) bool {
+	frames := strings.Split(stack, "\n")[1:] // after "goroutine N [state]:"
+	for _, frame := range frames {
+		switch {
+		case strings.HasPrefix(frame, "\t"):
+			// A frame's file and line, after its function.
+		case strings.HasPrefix(frame, serveCommandPkg+"(*goroutineGroup).Go.func1("):
+			return true
+		case strings.HasPrefix(frame, "runtime."),
+			strings.HasPrefix(frame, "sync."),
+			strings.HasPrefix(frame, "internal/"):
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // readConfigAddr reads back the host and port a config file names, so
