@@ -7,6 +7,10 @@
 # review-signing-path (cosign, Syft, actions/attest), since all of them are
 # used only under .github/.
 #
+# The rest of the release tooling -- magefile.go, packaging/ and the
+# Dockerfiles -- is deliberately not listed; the maintainers scoped this file
+# to .github/ and charts/ when it was added for #449.
+#
 # An owner without write access to the repository is disregarded.
 
 /.github/ @bootc @trevor-vaughan

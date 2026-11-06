@@ -145,6 +145,9 @@ See [`AGENTS.md`](AGENTS.md) for the details. The essentials:
   `container-images.yml`, which `ci.yml` cannot see). `mage dev:check` keeps
   each one's `needs` covering its whole workflow, so a job you add to either
   file must be added to its aggregate.
+- A pull request that touches `.github/` or `charts/` automatically requests
+  review from the code owners listed in
+  [`.github/CODEOWNERS`](.github/CODEOWNERS).
 - Every Go file carries a GPL-2.0-or-later header, and a **new** one leads with
   your own copyright line, above Vox Pupuli's:
 
