@@ -394,8 +394,10 @@ but reads as the unset default and is refused as filesystem; set
 
 To run more than one replica, move the state into a shared backend — see
 [storage backends](storage-backends.md) — and turn persistence off, because
-`cadir` then holds nothing durable. Worth knowing before you scale out: a
-revocation reaches the other replicas within `crl_sync_interval_sec` (60s by
+`cadir` then holds nothing durable. A release that sets the backend's settings
+but not `storage_backend` is refused at startup rather than run on that empty
+`cadir`. Worth knowing before you scale out: a revocation reaches the other
+replicas within `crl_sync_interval_sec` (60s by
 default) rather than instantly, since each answers revocation checks from its own
 copy of the CRL — see
 [revocation across replicas](configuration.md#revocation-across-replicas).
