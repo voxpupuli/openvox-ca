@@ -32,7 +32,8 @@ import (
 )
 
 // "CA private key encrypted at rest" is logged after a key has been written
-// encrypted, by each path that writes one. The import path's specs are in
+// encrypted by bootstrap, csr --create-key or import; openvox-ca-ctl migrate
+// reports the same on stdout instead. The import path's specs are in
 // caimportkey_test.go; these cover the two paths that create a key.
 var _ = Describe("Logging a CA key created encrypted", func() {
 	const line = "CA private key encrypted at rest"

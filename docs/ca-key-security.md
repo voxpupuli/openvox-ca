@@ -324,8 +324,31 @@ has an `ENCRYPTED PRIVATE KEY` header but a different format, and is refused:
 decrypt it first (`openssl pkey -in key.enc.pem -out key.pem`) and import the
 plaintext key with `--encrypt-ca-key`.
 
-On other backends, `migrate` copies the stored key byte for byte, so the
-remaining options are:
+On any backend, `openvox-ca-ctl migrate` encrypts the key on its way into a
+new store: set `encrypt_ca_key` and `ca_key_passphrase_file` in
+`--dest-config`, and the copy is written encrypted under that passphrase. The
+same works between two stores of the same backend kind, so a database CA can
+be encrypted by migrating it into a fresh database and pointing the server at
+that. `migrate` keeps an encrypted key encrypted whatever the destination
+sets. It decrypts it with the source's passphrase (`ca_key_passphrase_file` in
+`--source-config`) and encrypts it again under the destination's, which makes
+it the way to change the passphrase too. It refuses, before writing anything,
+when either end has no passphrase it needs. Both ends fall back to
+`OPENVOX_CA_KEY_PASSPHRASE` when their file names none, so with only the
+variable set they share one passphrase. `migrate` reads `encrypt_ca_key` and
+`ca_key_passphrase_file` from the files themselves, not from the
+`OPENVOX_CA_ENCRYPT_CA_KEY` or `OPENVOX_CA_KEY_PASSPHRASE_FILE` variables,
+which could not tell the two ends apart. It honours `ca_key_file` at both ends,
+so it is also the route for a `filesystem` CA whose key `ca_key_file` keeps
+outside the cadir, where `import` does not reach.
+
+`migrate` copies and never deletes, so the source store still holds the key as
+it was, in plaintext if it was plaintext. Once the server is running on the
+destination, remove the key from the source, or the whole source store;
+[removing an orphaned CA key](storage-backends.md#removing-an-orphaned-ca-key)
+shows where it lives on each backend.
+
+The other options are:
 
 1. Keep the plaintext key and unset `encrypt_ca_key`. That stops the warning
    and changes nothing else.

@@ -203,8 +203,8 @@ func (c *CA) LoadOrCreateCAKey(ctx context.Context, create bool) (crypto.Signer,
 // applying at-rest encryption when EncryptCAKey is set.
 //
 // Used by both paths that create a CA key, bootstrapCA and csr --create-key,
-// and a thin wrapper over encodeCAKey, which import shares; see there for why
-// there is one encoder.
+// and a thin wrapper over encodeCAKey, which import and migrate share; see
+// there for why there is one encoder.
 func (c *CA) marshalCAKeyForStorage(key crypto.Signer) ([]byte, error) {
 	return encodeCAKey(key, c.EncryptCAKey, c.KeyPassphrase, c.Storage.CADir(), needEncryptConfigured)
 }

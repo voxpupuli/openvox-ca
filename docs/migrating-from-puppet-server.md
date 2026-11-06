@@ -402,7 +402,14 @@ every time — `mktemp -d` — because `migrate` copies and never deletes: anyth
 left from a previous run is pushed back into the live backend on the return leg,
 including signed certificates that have since been cleaned, which reappear with
 no inventory row and are then invisible to the expiry cleanup. Remove the
-directory afterwards; it holds a plaintext copy of the CA key.
+directory afterwards; it holds a copy of the CA key.
+
+Under `encrypt_ca_key` the key stays encrypted all the way round, and every leg
+needs the passphrase: give `scratch.yaml` and `backup.yaml` the same
+`ca_key_passphrase_file` as `live.yaml`, and pass it to `import` as
+`--ca-key-passphrase-file` (or set `OPENVOX_CA_KEY_PASSPHRASE` for all four
+commands). `migrate` refuses an end that has none rather than write the key
+decrypted.
 
 ```bash
 # A fresh, empty directory every time, as above. Write its path into
@@ -413,6 +420,9 @@ SCRATCH=$(mktemp -d)
 openvox-ca-ctl migrate --source-config live.yaml --dest-config scratch.yaml
 
 # --cert-bundle and --private-key are the copies the first leg just wrote there.
+# Under encrypt_ca_key the copied key is encrypted: add
+# --ca-key-passphrase-file <the file live.yaml names>, unless
+# OPENVOX_CA_KEY_PASSPHRASE is set.
 openvox-ca-ctl import --cadir "$SCRATCH" \
   --cert-bundle "$SCRATCH/ca_crt.pem" \
   --private-key "$SCRATCH/ca_key.pem" \
@@ -430,7 +440,7 @@ openvox-ca-ctl migrate --source-config live.yaml --dest-config backup.yaml
 
 openvox-ca-ctl migrate --source-config scratch.yaml --dest-config live.yaml --force
 
-# The scratch copy holds the CA key in plaintext.
+# The scratch copy holds a copy of the CA key.
 rm -rf "$SCRATCH"
 ```
 

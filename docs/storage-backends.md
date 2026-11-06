@@ -1343,8 +1343,9 @@ openvox-ca-ctl migrate \
   --dest-config   /etc/openvox-ca/filesystem.yaml
 ```
 
-Each config file needs only the storage fields (plus `cadir`); for example a
-minimal SQLite target:
+Each config file needs only the storage fields (plus `cadir`), and
+`encrypt_ca_key` and `ca_key_passphrase_file` where the CA key is encrypted or
+is to be (see the notes below); for example a minimal SQLite target:
 
 ```yaml
 # sqlite.yaml
@@ -1398,6 +1399,19 @@ Notes:
   with no HMAC key gives the destination none either, unless it already had
   one, so its first start then logs `No inventory HMAC found on an established
   CA` at `WARN`, once, as it establishes the value.
+- **The CA key is written as `--dest-config` says.** With `encrypt_ca_key`
+  set there, it is encrypted under the destination's `ca_key_passphrase_file`
+  (or `OPENVOX_CA_KEY_PASSPHRASE`). An encrypted source key is decrypted with
+  the source's passphrase and encrypted again under the destination's, whether
+  or not the destination sets `encrypt_ca_key`: `migrate` never writes a
+  decrypted copy. Without the passphrase either end needs, it refuses before
+  writing anything. A plaintext source key is written in plaintext when the
+  destination does not set `encrypt_ca_key`, and with `--force` that includes
+  over an encrypted key already in the destination: `migrate` does not refuse
+  it, as `import` does, and says nothing. Set `encrypt_ca_key` in
+  `--dest-config` to keep that destination's key encrypted. See [backward
+  compatibility](ca-key-security.md#backward-compatibility) for encrypting an
+  existing key this way.
 - **Re-runnable.** The copy is idempotent per item; an interrupted run can be
   repeated (with `--force` if a partial CA already landed).
 - Use `--verbose` to log each item as it is copied.

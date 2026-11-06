@@ -257,7 +257,11 @@ openvox-ca-ctl import \
 # filesystem, sqlite, postgres, mysql, etcd, redis/valkey). Each backend is
 # described by a normal openvox-ca config file. Refuses a non-empty destination
 # unless --force, and a source whose inventory does not verify against its
-# integrity value unless --allow-unverified-source.
+# integrity value unless --allow-unverified-source. The CA key is written as the
+# destination's encrypt_ca_key and ca_key_passphrase_file say. An encrypted key
+# is decrypted with the source's passphrase and re-encrypted under the
+# destination's, never written decrypted, and migrate refuses without the
+# passphrase each end needs.
 openvox-ca-ctl migrate \
   --source-config /etc/openvox-ca/filesystem.yaml \
   --dest-config   /etc/openvox-ca/postgres.yaml

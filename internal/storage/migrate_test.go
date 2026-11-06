@@ -434,3 +434,98 @@ var _ = Describe("MigrateRoundTripsLocalFileLayout", func() {
 		}
 	})
 })
+
+// MigrateOptions.CAKey (#516) is how openvox-ca-ctl migrate encrypts or
+// re-encrypts the CA key for the destination. The encoding is internal/ca's;
+// these pin where Migrate calls it and what a refusal leaves behind.
+var _ = Describe("MigrateRewritesTheCAKeyThroughItsHook", func() {
+	var (
+		ctx    context.Context
+		src    *FilesystemBackend
+		dstDir string
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		src = NewFilesystemBackend(GinkgoT().TempDir())
+		dstDir = filepath.Join(GinkgoT().TempDir(), "dst")
+	})
+
+	It("stores what the hook returns, given what the source stores", func() {
+		seedCA(src)
+		var given []byte
+
+		dst := NewFilesystemBackend(dstDir)
+		_, err := Migrate(ctx, src, dst, MigrateOptions{CAKey: func(k []byte) ([]byte, error) {
+			given = k
+			return []byte("rewritten-key"), nil
+		}})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(given).To(Equal([]byte("ca-key-pem")))
+		got, err := dst.Get(ctx, KeyCAKey)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal([]byte("rewritten-key")))
+	})
+
+	It("refuses before it touches the destination when the hook refuses", func() {
+		seedCA(src)
+
+		_, err := Migrate(ctx, src, NewFilesystemBackend(dstDir), MigrateOptions{
+			CAKey: func([]byte) ([]byte, error) { return nil, fmt.Errorf("no passphrase") },
+		})
+
+		Expect(err).To(MatchError(ContainSubstring("preparing the CA key for the destination: no passphrase")))
+		Expect(dstDir).NotTo(BeAnExistingFile(),
+			"not even created: a refusal at the key's turn would leave the certificate beside no key")
+	})
+
+	// A read of the source key that fails for any reason but absence must
+	// refuse, not be taken for "no key": the copy below reads the key again,
+	// and if that second read succeeds it writes the key the hook never saw,
+	// in plaintext where the destination asked for encryption.
+	It("refuses when the source key cannot be read, before touching the destination", func() {
+		seedCA(src)
+		flaky := &caKeyFlakyBackend{FilesystemBackend: src, failures: 1}
+
+		_, err := Migrate(ctx, flaky, NewFilesystemBackend(dstDir), MigrateOptions{
+			CAKey: func([]byte) ([]byte, error) {
+				Fail("called with a key that could not be read")
+				return nil, nil
+			},
+		})
+
+		Expect(err).To(MatchError(ContainSubstring(fmt.Sprintf("reading %q from source", KeyCAKey))))
+		Expect(dstDir).NotTo(BeAnExistingFile(), "nothing was copied")
+	})
+
+	It("does not call the hook when the source holds no CA key", func() {
+		Expect(src.EnsureReady(ctx)).To(Succeed())
+		Expect(src.Put(ctx, KeyCACert, []byte("c"), BlobPublic)).To(Succeed())
+
+		dst := NewFilesystemBackend(dstDir)
+		_, err := Migrate(ctx, src, dst, MigrateOptions{CAKey: func([]byte) ([]byte, error) {
+			Fail("called with no key to rewrite")
+			return nil, nil
+		}})
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(dst.Exists(ctx, KeyCAKey)).To(BeFalse())
+	})
+})
+
+// caKeyFlakyBackend fails the first reads of the CA key with an error other
+// than absence, then serves it: a transient failure, which is the case a
+// "treat any error as no key" shortcut would get wrong.
+type caKeyFlakyBackend struct {
+	*FilesystemBackend
+	failures int
+}
+
+func (b *caKeyFlakyBackend) Get(ctx context.Context, key string) ([]byte, error) {
+	if key == KeyCAKey && b.failures > 0 {
+		b.failures--
+		return nil, fmt.Errorf("transient read failure")
+	}
+	return b.FilesystemBackend.Get(ctx, key)
+}

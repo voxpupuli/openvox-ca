@@ -366,6 +366,13 @@ var _ = Describe("Key encryption", func() {
 				"--encrypt-ca-key is set", "--ca-key-passphrase-file"),
 			Entry("an encrypted --private-key", needImportedKeyEncrypted,
 				"the key given to --private-key is encrypted", "--ca-key-passphrase-file"),
+			Entry("migrate's encrypted source key", needSourceKeyEncrypted,
+				"the source's CA key is encrypted", "ca_key_passphrase_file in --source-config"),
+			Entry("migrate's encrypt_ca_key destination", needDestEncryptConfigured,
+				"encrypt_ca_key is set in --dest-config", "ca_key_passphrase_file in --dest-config"),
+			Entry("migrate keeping a key encrypted", needDestKeepsEncrypted,
+				"the source's CA key is encrypted, and migrate does not write a decrypted copy of it",
+				"ca_key_passphrase_file in --dest-config"),
 		)
 
 		// Each caller names the flag or setting its operator actually used.
@@ -383,6 +390,9 @@ var _ = Describe("Key encryption", func() {
 			Entry("an encrypted stored key", needStoredKeyEncrypted, "--ca-key-passphrase-file"),
 			Entry("import --encrypt-ca-key", needImportEncrypt, "--ca-key-passphrase-file"),
 			Entry("an encrypted --private-key", needImportedKeyEncrypted, "--ca-key-passphrase-file"),
+			Entry("migrate's encrypted source key", needSourceKeyEncrypted, "ca_key_passphrase_file in --source-config"),
+			Entry("migrate's encrypt_ca_key destination", needDestEncryptConfigured, "ca_key_passphrase_file in --dest-config"),
+			Entry("migrate keeping a key encrypted", needDestKeepsEncrypted, "ca_key_passphrase_file in --dest-config"),
 		)
 	})
 

@@ -66,6 +66,15 @@ type MigrateOptions struct {
 	// with ErrSourceUnverified. Migrate itself never verifies, so it ignores
 	// this.
 	AllowUnverifiedSource bool
+
+	// CAKey, when non-nil, turns the source's stored CA key into the one the
+	// destination stores; openvox-ca-ctl migrate uses it to encrypt or
+	// re-encrypt the key for the destination's configuration. It is a hook
+	// because this package cannot import internal/ca, which holds the encoder.
+	// Migrate calls it before it touches the destination at all, so a refusal
+	// leaves the destination as it was. It is not called when the source holds
+	// no CA key.
+	CAKey func(sourceKey []byte) ([]byte, error)
 }
 
 // MigrateReport summarises what a Migrate run copied.
@@ -229,12 +238,32 @@ func verifyMigrationSource(ctx context.Context, src *StorageService, allow bool)
 // database→database and database→filesystem migrations.
 //
 // Per-subject generated private keys are not copied: they always live on the
-// local filesystem outside any backend.
+// local filesystem outside any backend. The CA key is copied as it is unless
+// opts.CAKey rewrites it.
 //
 // Migrate is not transactional. On error it returns the blobs copied so far in
 // the report. Re-running is safe: copies overwrite matching keys idempotently.
 func Migrate(ctx context.Context, src, dst Backend, opts MigrateOptions) (MigrateReport, error) {
 	var report MigrateReport
+
+	// The CA key is prepared first, because preparing it can refuse: a source
+	// key that does not decrypt, or a destination with no passphrase to
+	// encrypt under. Refusing here leaves the destination untouched, where
+	// refusing at the key's turn in the copy below would leave the CA
+	// certificate already written beside no key.
+	var caKey []byte
+	if opts.CAKey != nil {
+		data, err := src.Get(ctx, KeyCAKey)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			return report, fmt.Errorf("reading %q from source: %w", KeyCAKey, err)
+		default:
+			if caKey, err = opts.CAKey(data); err != nil {
+				return report, fmt.Errorf("preparing the CA key for the destination: %w", err)
+			}
+		}
+	}
 
 	if err := dst.EnsureReady(ctx); err != nil {
 		return report, fmt.Errorf("preparing destination: %w", err)
@@ -261,10 +290,12 @@ func Migrate(ctx context.Context, src, dst Backend, opts MigrateOptions) (Migrat
 	_, dstStructured := asInventoryStore(dst)
 
 	// copyKey copies one blob; a key absent in the source is skipped (not an
-	// error) so partially-populated CAs migrate cleanly. The inventory is the
-	// one blob it converts: from the filesystem's OpenVox Server form to the
-	// structured backends' canonical form (canonicaliseBlobInventory), or the
-	// other way (openVoxBlobInventory).
+	// error) so partially-populated CAs migrate cleanly. Two blobs are not
+	// copied as they are. The inventory is converted from the filesystem's
+	// OpenVox Server form to the structured backends' canonical form
+	// (canonicaliseBlobInventory), or the other way (openVoxBlobInventory). The
+	// CA key is replaced by what opts.CAKey prepared from it, when there is a
+	// hook.
 	copyKey := func(key string, kind BlobKind) (bool, error) {
 		data, err := src.Get(ctx, key)
 		if err != nil {
@@ -278,6 +309,9 @@ func Migrate(ctx context.Context, src, dst Backend, opts MigrateOptions) (Migrat
 		}
 		if key == KeyInventory && srcStructured && !dstStructured {
 			data = openVoxBlobInventory(data)
+		}
+		if key == KeyCAKey && caKey != nil {
+			data = caKey
 		}
 		if err := dst.Put(ctx, key, data, kind); err != nil {
 			return false, fmt.Errorf("writing %q to destination: %w", key, err)

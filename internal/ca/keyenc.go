@@ -189,12 +189,12 @@ func encryptAndMarshalKey(key any, passphrase []byte) ([]byte, error) {
 //
 // The single encoder for every path that writes a CA key it holds as a
 // crypto.Signer: bootstrapCA and csr --create-key (through
-// marshalCAKeyForStorage), and openvox-ca-ctl import. A key any of them
-// writes encrypted is indistinguishable from one the others write encrypted;
-// import writes a plaintext key as it was given. It is shared rather than
-// mirrored because a divergence fails silently: a CA key written in plaintext
-// when it was meant to be encrypted is discovered whenever someone next reads
-// the file.
+// marshalCAKeyForStorage), openvox-ca-ctl import, and openvox-ca-ctl migrate
+// (through MigrateCAKey). A key any of them writes encrypted is
+// indistinguishable from one the others write encrypted; import and migrate
+// write a plaintext key as it was given. It is shared rather than mirrored
+// because a divergence fails silently: a CA key written in plaintext when it
+// was meant to be encrypted is discovered whenever someone next reads the file.
 //
 // need says why a passphrase is being resolved, so that a refusal names the
 // condition and the setting the operator actually has.
@@ -273,6 +273,17 @@ const (
 	// itself encrypted, so it has to be decrypted to be checked against the
 	// certificate, and re-encrypted to be written.
 	needImportedKeyEncrypted
+	// needSourceKeyEncrypted: openvox-ca-ctl migrate is copying an encrypted
+	// key, and decrypts it with the source configuration's passphrase.
+	needSourceKeyEncrypted
+	// needDestEncryptConfigured: the destination configuration of a migrate
+	// sets encrypt_ca_key, so the key is encrypted under its passphrase.
+	needDestEncryptConfigured
+	// needDestKeepsEncrypted: migrate is copying an encrypted key into a
+	// destination without encrypt_ca_key. It is still written encrypted, under
+	// the destination's passphrase, because migrate never writes a decrypted
+	// copy of a key that was encrypted.
+	needDestKeepsEncrypted
 )
 
 // because returns the clause naming this need, for the refusal messages below.
@@ -284,17 +295,28 @@ func (n passphraseNeed) because() string {
 		return "--encrypt-ca-key is set"
 	case needImportedKeyEncrypted:
 		return "the key given to --private-key is encrypted"
+	case needSourceKeyEncrypted:
+		return "the source's CA key is encrypted"
+	case needDestEncryptConfigured:
+		return "encrypt_ca_key is set in --dest-config"
+	case needDestKeepsEncrypted:
+		return "the source's CA key is encrypted, and migrate does not write a decrypted copy of it"
 	default:
 		return "encrypt_ca_key is set"
 	}
 }
 
 // fileSetting names where the operator configures a passphrase file for this
-// need: the server's setting or import's flag.
+// need: the server's setting, import's flag, or the setting in whichever of
+// migrate's two configuration files is being read.
 func (n passphraseNeed) fileSetting() string {
 	switch n {
 	case needImportEncrypt, needImportedKeyEncrypted:
 		return "--ca-key-passphrase-file"
+	case needSourceKeyEncrypted:
+		return "ca_key_passphrase_file in --source-config"
+	case needDestEncryptConfigured, needDestKeepsEncrypted:
+		return "ca_key_passphrase_file in --dest-config"
 	default:
 		return "ca_key_passphrase_file"
 	}
