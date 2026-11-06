@@ -3867,6 +3867,31 @@ var _ = Describe("buildVariantPackages", func() {
 			Entry("tls_key", `(?m)^tls_key: /etc/puppetlabs/puppet/ssl/private_keys/openvox-ca-server\.pem$`),
 		)
 
+		// The file says it sets four keys and only four, and there is a second
+		// reason to hold it to that. Provisioning bootstraps the CA with
+		// `openvox-ca-ctl setup --cadir --hostname`, which reads no
+		// configuration file, so a bootstrap-only setting shipped here
+		// (ca_key_algo, ca_subject_*, ca_validity_days -- "apply only when
+		// bootstrapping" in internal/config/server.go) would promise a CA the
+		// package does not deliver. The whole key set is pinned rather than a
+		// list of forbidden keys, because the bootstrap-only set exists only in
+		// those comments and a copy of it here would go stale without failing;
+		// this fails when a key is added, which is when the question needs
+		// asking.
+		It("sets exactly the four keys it documents, none of them bootstrap-only", func() {
+			var cfg map[string]any
+			Expect(yaml.Unmarshal([]byte(contents["/etc/openvox-ca/config.yaml"]), &cfg)).To(Succeed())
+			keys := make([]string, 0, len(cfg))
+			for k := range cfg {
+				keys = append(keys, k)
+			}
+			Expect(keys).To(ConsistOf("cadir", "port", "tls_cert", "tls_key"),
+				"a key added to packaging/config/config.yaml must not be one applied only at CA bootstrap "+
+					"(internal/config/server.go), because first-boot bootstraps with openvox-ca-ctl setup, "+
+					"which reads no configuration file; if it is not, add it here and correct the count in "+
+					"the file's header")
+		})
+
 		// The configuration names fixed paths because a shipped file cannot
 		// know this host's certname; provisioning links them. If the two ever
 		// disagree the service starts and exits, so they are checked against
