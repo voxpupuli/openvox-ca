@@ -10410,6 +10410,68 @@ jobs:
 		)
 	})
 
+	// A needed job that calls a reusable workflow has no steps of its own, so
+	// what decides the check is in the called file. packages.yml is the case.
+	Describe("a needed job that calls a reusable workflow", func() {
+		callingCI := mutate(goodCI, "      - unit\n    steps:", "      - unit\n      - packages\n    steps:")
+		callingCI = mutate(callingCI, "  ci:\n", "  packages:\n    uses: ./.github/workflows/packages.yml\n  ci:\n")
+		goodCalled := `
+on:
+  workflow_call:
+jobs:
+  build:
+    steps:
+      - run: "true"
+  install:
+    needs: build
+    steps:
+      - run: "true"
+`
+		withCalled := func(ci, called string) map[string][]byte {
+			src := sources(ci, goodImages)
+			src["packages.yml"] = []byte(called)
+			return src
+		}
+
+		It("accepts the good fixture", func() {
+			Expect(verifyAggregateJobsIn(withCalled(callingCI, goodCalled))).To(Succeed())
+		})
+
+		It("rejects continue-on-error on a job in the called workflow", func() {
+			bad := mutate(goodCalled, "    needs: build\n", "    needs: build\n    continue-on-error: true\n")
+			Expect(verifyAggregateJobsIn(withCalled(callingCI, bad))).To(MatchError(ContainSubstring(
+				`packages.yml job "install" sets continue-on-error, so its failure reaches "CI success" through ci.yml job "packages"`)))
+		})
+
+		DescribeTable("a condition on a job in the called workflow",
+			func(cond string, ok bool) {
+				src := mutate(goodCalled, "    needs: build\n", "    needs: build\n"+cond)
+				err := verifyAggregateJobsIn(withCalled(callingCI, src))
+				if ok {
+					Expect(err).NotTo(HaveOccurred())
+				} else {
+					Expect(err).To(MatchError(ContainSubstring(`packages.yml job "install" has condition`)))
+				}
+			},
+			Entry("accepts always()", "    if: always()\n", true),
+			// Skipped on pull requests, which is where it was meant to gate.
+			Entry("rejects one that can skip it", "    if: github.event_name == 'push'\n", false),
+		)
+
+		It("follows a call the called workflow makes in turn", func() {
+			nested := mutate(goodCalled, "  install:\n    needs: build\n    steps:\n      - run: \"true\"\n",
+				"  install:\n    needs: build\n    uses: ./.github/workflows/inner.yml\n")
+			src := withCalled(callingCI, nested)
+			src["inner.yml"] = []byte("on:\n  workflow_call:\njobs:\n  leg:\n    continue-on-error: true\n    steps:\n      - run: \"true\"\n")
+			Expect(verifyAggregateJobsIn(src)).To(MatchError(ContainSubstring(`inner.yml job "leg" sets continue-on-error`)))
+		})
+
+		It("reports a called workflow it was not given", func() {
+			Expect(verifyAggregateJobsIn(sources(callingCI, goodImages))).To(MatchError(ContainSubstring(
+				`ci.yml job "packages" calls ./.github/workflows/packages.yml, which is not among the workflows read`)))
+		})
+	})
+
 	It("names a job the aggregate does not need", func() {
 		bad := mutate(goodImages, "needs: [setup, build, merge]", "needs: [setup, merge]")
 		Expect(verifyAggregateJobsIn(sources(goodCI, bad))).To(MatchError(

@@ -2802,6 +2802,9 @@ type aggregateWorkflowDoc struct {
 type aggregateJob struct {
 	Name string `yaml:"name"`
 	If   string `yaml:"if"`
+	// Uses is set on a job that calls a reusable workflow instead of running
+	// steps. See verifyCalledWorkflow.
+	Uses string `yaml:"uses"`
 	// Needs is a node because GitHub accepts a bare string as well as a list.
 	Needs yaml.Node `yaml:"needs"`
 	// ContinueOnError is a node because GitHub accepts an expression too.
@@ -2858,6 +2861,10 @@ func verifyAggregateJobs() error {
 //     later and left out would gate nothing. It names no job that does not
 //     exist, includes every job its allowed skips name, and no needed job
 //     sets continue-on-error.
+//   - A needed job that calls a reusable workflow in this repository is
+//     followed into it: see verifyCalledWorkflow. Without that, the rule
+//     above sees only the calling stanza, which has no continue-on-error to
+//     find, while the called workflow's jobs decide what the call reports.
 //   - No other job in any workflow carries its name. The ruleset matches a
 //     check by name alone, so a second job of that name -- a copied block
 //     downstream of the aggregate, say, which the needs rule exempts -- makes
@@ -2929,6 +2936,7 @@ func verifyAggregateJobsIn(sources map[string][]byte) error {
 				errs = append(errs, fmt.Errorf("%s job %q sets continue-on-error, so its failure reaches %q as "+
 					"a success", agg.workflow, id, agg.name))
 			}
+			errs = append(errs, verifyCalledWorkflow(sources, agg, id, doc.Jobs[id].Uses, map[string]bool{})...)
 		}
 		// dependsOnAggregate reports whether a job needs the aggregate,
 		// directly or through other jobs. seen bounds the walk; GitHub
@@ -2963,6 +2971,58 @@ func verifyAggregateJobsIn(sources map[string][]byte) error {
 	}
 	errs = append(errs, verifyRequiredNamesUnique(sources)...)
 	return errors.Join(errs...)
+}
+
+// localWorkflowPrefix is how a job names a reusable workflow in this
+// repository. A call to one elsewhere (owner/repo/...@ref) is not followed:
+// its source is not here to read.
+const localWorkflowPrefix = "./.github/workflows/"
+
+// verifyCalledWorkflow holds the jobs of the reusable workflow that `uses`
+// names -- called by job `via` of agg's workflow, which agg needs -- to the
+// rules that keep a failure from reaching agg as a success, and follows any
+// call they make in turn. seen bounds the walk.
+//
+// Two rules. No job there may set continue-on-error, as for a job the
+// aggregate needs directly. And no job there may carry a condition other than
+// always(): a job the aggregate needs directly and that is skipped reaches
+// alls-green as skipped, which fails it, but a called workflow whose job was
+// skipped still concludes success, so the skip is invisible from here.
+// packages.yml, which ci.yml calls, is what this exists for.
+func verifyCalledWorkflow(sources map[string][]byte, agg requiredCheckAggregate, via, uses string,
+	seen map[string]bool) []error {
+	if !strings.HasPrefix(uses, localWorkflowPrefix) {
+		return nil
+	}
+	file := strings.TrimPrefix(uses, localWorkflowPrefix)
+	if seen[file] {
+		return nil
+	}
+	seen[file] = true
+	src, ok := sources[file]
+	if !ok {
+		return []error{fmt.Errorf("%s job %q calls %s, which is not among the workflows read, so nothing checks "+
+			"what it reports to %q", agg.workflow, via, uses, agg.name)}
+	}
+	var doc aggregateWorkflowDoc
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return []error{fmt.Errorf("%s, called by %s job %q: %w", file, agg.workflow, via, err)}
+	}
+	var errs []error
+	for _, id := range slices.Sorted(maps.Keys(doc.Jobs)) {
+		job := doc.Jobs[id]
+		if mayContinue(job.ContinueOnError) {
+			errs = append(errs, fmt.Errorf("%s job %q sets continue-on-error, so its failure reaches %q through %s "+
+				"job %q as a success", file, id, agg.name, agg.workflow, via))
+		}
+		if job.If != "" && !isAlways(job.If) {
+			errs = append(errs, fmt.Errorf("%s job %q has condition %q; a called workflow whose job is skipped "+
+				"still succeeds, so %q would pass through %s job %q with it never having run", file, id, job.If,
+				agg.name, agg.workflow, via))
+		}
+		errs = append(errs, verifyCalledWorkflow(sources, agg, via, job.Uses, seen)...)
+	}
+	return errs
 }
 
 // verifyRequiredNamesUnique returns every job, in any of sources, that
