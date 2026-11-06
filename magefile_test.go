@@ -3492,10 +3492,6 @@ var _ = Describe("buildVariantPackages", func() {
 			Entry("the operator CLI", "/usr/bin/openvox-ca-ctl", "openvox-ca-ctl"),
 		)
 
-		// The tarball in the fixture carries the unit rendered for
-		// /usr/local/bin. If the package ever shipped that copy instead of
-		// re-rendering, every packaged install would point at a path the
-		// package does not own -- and nothing else would say so.
 		// The format split for install-time values: the deb renders them from
 		// debconf and clears record-environment off the oneshot, so it must
 		// not ship the script -- and its drop-ins are what point the units at
@@ -3516,6 +3512,10 @@ var _ = Describe("buildVariantPackages", func() {
 				"packaging/systemd/debian/openvox-ca-first-boot.conf"),
 		)
 
+		// The tarball in the fixture carries the unit rendered for
+		// /usr/local/bin. If the package ever shipped that copy instead of
+		// re-rendering, every packaged install would point at a path the
+		// package does not own -- and nothing else would say so.
 		It("ships the unit rendered for /usr/bin, not the tarball's copy", func() {
 			unit := contents["/usr/lib/systemd/system/openvox-ca.service"]
 			Expect(unit).To(ContainSubstring("ExecStart=" + packageUnitBindir + "/openvox-ca"))
@@ -4581,8 +4581,6 @@ var _ = Describe("the rpm's payload", func() {
 		Entry("the configuration file", "/etc/openvox-ca/config.yaml", 0o640),
 	)
 
-	// The rpm's counterparts to the deb's content assertions, which is what
-	// makes this block's opening claim true. See rpmContents.
 	// The rpm reads /etc/sysconfig through the units' own line; a Debian
 	// drop-in here would also clear ExecStartPost= and take record-environment
 	// off the oneshot, silently.
@@ -4594,6 +4592,8 @@ var _ = Describe("the rpm's payload", func() {
 		Entry("the oneshot's", "/usr/lib/systemd/system/openvox-ca-first-boot.service.d/00-debian.conf"),
 	)
 
+	// The rpm's counterparts to the deb's content assertions, which is what
+	// makes this block's opening claim true. See rpmContents.
 	It("ships the unit rendered for /usr/bin, not the tarball's copy", func() {
 		unit := contents["/usr/lib/systemd/system/openvox-ca.service"]
 		Expect(unit).To(ContainSubstring("ExecStart=" + packageUnitBindir + "/openvox-ca"))
