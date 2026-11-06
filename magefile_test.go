@@ -5405,7 +5405,26 @@ var _ = Describe("record-environment", func() {
 		// report the key absent -- the fail-open direction here.
 		Entry("a quoted key", "\"puppet_server\": admin.example.com\n", false),
 		Entry("an indented key", "  puppet_server_file: /etc/openvox-ca/admins\n", false),
+		// Spellings no key-at-line-start match sees, which is why the check
+		// is a mention rather than a key (openvox-ca#557).
+		Entry("a flow mapping", "{port: 8141, puppet_server: admin.example.com}\n", false),
+		Entry("an explicit key", "? puppet_server\n: admin.example.com\n", false),
+		Entry("a key after a trailing comment", "port: 8141 # moved\npuppet_server_file: /x\n", false),
 	)
+
+	// A config.yaml that is there but cannot be read may hold a list, so the
+	// admin line is left out rather than recorded over it.
+	It("leaves out the admin list when config.yaml cannot be read", func() {
+		if os.Geteuid() == 0 {
+			Skip("root reads a mode-0 file regardless")
+		}
+		config := filepath.Join(GinkgoT().TempDir(), "config.yaml")
+		Expect(os.WriteFile(config, []byte("port: 8141\n"), 0o000)).To(Succeed())
+		r := run("OPENVOX_CA_CONFIG=" + config)
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(assignments()).To(Equal([]string{"OPENVOX_CA_CERTNAME=ca.example.com"}))
+		Expect(r.output).To(ContainSubstring("cannot read " + config))
+	})
 
 	// The shipped file itself, not a stand-in: on a default EL install this
 	// is what decides whether the node certificate becomes an admin, and an

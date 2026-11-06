@@ -205,16 +205,25 @@ fi
 # here is a drop-in for the oneshot, which first-boot honours too; the
 # service's own is handled above.
 #
-# DELIBERATELY WIDE, for the reason first-boot's config_key_set gives: the
-# server's YAML parser accepts a quoted key and leading whitespace, and a
-# narrower match would report such a key absent -- here, the fail-open
-# direction. A false match costs only an admin grant the operator can add.
+# A mention, not a parsed key: any line that is not a comment and names
+# puppet_server or puppet_server_file counts as the operator's choice. The
+# server's YAML parser accepts far more spellings than a key-at-line-start
+# match sees -- a quoted key, a flow mapping ({port: 8141, puppet_server: x}),
+# an explicit `? puppet_server` -- and every one it missed would be the
+# fail-open direction here, recording a list that silently replaces theirs. A
+# false match costs only an admin grant the operator can add. Whole words, so
+# an unrelated key that merely starts the same way is not one. A file that is
+# there but cannot be read counts too, for the same reason.
 if [ "$record_admin" = yes ]; then
 	CONFIG="${OPENVOX_CA_CONFIG:-/etc/openvox-ca/config.yaml}"
-	if [ -f "$CONFIG" ] &&
-		grep -Eq "^[[:space:]]*['\"]?(puppet_server|puppet_server_file)['\"]?[[:space:]]*:" "$CONFIG" 2>/dev/null; then
+	if [ -e "$CONFIG" ] && [ ! -r "$CONFIG" ]; then
 		record_admin=no
-		info "$CONFIG sets its admin allow-list already; not recording OPENVOX_CA_PUPPET_SERVER."
+		info "cannot read $CONFIG to see whether it sets an admin allow-list; not recording OPENVOX_CA_PUPPET_SERVER."
+	elif [ -f "$CONFIG" ] &&
+		sed -e '/^[[:space:]]*#/d' "$CONFIG" |
+		grep -Eq '(^|[^A-Za-z0-9_])puppet_server(_file)?([^A-Za-z0-9_]|$)'; then
+		record_admin=no
+		info "$CONFIG mentions its admin allow-list already; not recording OPENVOX_CA_PUPPET_SERVER."
 	fi
 fi
 
