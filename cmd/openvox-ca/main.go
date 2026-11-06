@@ -563,6 +563,31 @@ func isLoopback(host string) bool {
 	return host == "localhost"
 }
 
+// generateRefusesPlainHTTP reports whether POST /generate must refuse to return
+// private keys: whenever the server itself has no TLS, unless the operator has
+// set insecure_allow_plain_http_generate. Neither the bind address nor
+// no_tls_required enters into it. Both once did, and the server had already
+// refused to start in the only case they left, so the refusal never fired.
+func generateRefusesPlainHTTP(cfg *serverConfig, tlsConfigured bool) bool {
+	return !tlsConfigured && !cfg.InsecureAllowPlainHTTPGenerate
+}
+
+// plainHTTPGenerateNotice is the startup warning for
+// insecure_allow_plain_http_generate. It warns when the setting is live, and
+// also when TLS makes it inert, so that a forgotten opt-in is visible before
+// TLS is ever turned off. Empty when the setting is off.
+func plainHTTPGenerateNotice(cfg *serverConfig, tlsConfigured bool) string {
+	if !cfg.InsecureAllowPlainHTTPGenerate {
+		return ""
+	}
+	if tlsConfigured {
+		return "insecure_allow_plain_http_generate is set but has no effect while TLS is configured; " +
+			"remove it, or POST /generate will hand private keys to any caller if TLS is ever turned off"
+	}
+	return "INSECURE: insecure_allow_plain_http_generate is set and TLS is not configured, so POST /generate " +
+		"returns private keys in cleartext, without client authentication, to any caller that can reach the listener"
+}
+
 // defaultCSRRateLimit is the built-in CSR submission cap (per IP per minute)
 // applied when no rate limit is configured on any layer.
 const defaultCSRRateLimit = 60
@@ -706,6 +731,7 @@ func newRootCmd() *cobra.Command {
 		encryptCAKey            bool
 		insecureAllowWorldKeys  bool
 		insecureAutosignPath    bool
+		insecurePlainGenerate   bool
 		caKeyPassphraseFile     string
 		singleProcess           bool
 		storageBackend          string
@@ -834,6 +860,9 @@ func newRootCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("insecure-allow-unsafe-autosign-path") {
 				cfg.InsecureAllowUnsafeAutosignPath = insecureAutosignPath
+			}
+			if cmd.Flags().Changed("insecure-allow-plain-http-generate") {
+				cfg.InsecureAllowPlainHTTPGenerate = insecurePlainGenerate
 			}
 			if cmd.Flags().Changed("ca-key-passphrase-file") {
 				cfg.CAKeyPassphraseFile = caKeyPassphraseFile
@@ -1109,6 +1138,9 @@ func newRootCmd() *cobra.Command {
 						"Only use --no-tls-required behind a trusted TLS proxy or in test environments.")
 				}
 			}
+			if msg := plainHTTPGenerateNotice(cfg, tlsConfigured); msg != "" {
+				slog.Warn(msg)
+			}
 			if !tlsConfigured && (cfg.PuppetServer != "" || cfg.PuppetServerFile != "") {
 				slog.Warn("--puppet-server / --puppet-server-file have no effect without TLS; " +
 					"all endpoints are accessible without authentication in plain HTTP mode.")
@@ -1298,7 +1330,7 @@ func newRootCmd() *cobra.Command {
 			// disables it; the unset sentinel (-1) falls back to the default.
 			srv.CSRRateLimit = resolveCSRRateLimit(cfg.CSRRateLimit)
 			srv.SignBatchLimit = 50 // Default max batch size for sign operations
-			srv.PlainHTTP = !tlsConfigured && !isLoopback(cfg.Host) && !cfg.NoTLSRequired
+			srv.PlainHTTP = generateRefusesPlainHTTP(cfg, tlsConfigured)
 			if err := applyResponseFormats(srv, cfg); err != nil {
 				return err
 			}
@@ -1590,6 +1622,8 @@ func newRootCmd() *cobra.Command {
 		"Start even when CA key material is readable by every local account, warning loudly instead of refusing. Treat the key as compromised if you need this")
 	f.BoolVar(&insecureAutosignPath, "insecure-allow-unsafe-autosign-path", false,
 		"Run the autosign executable even when someone other than root or the CA's own user could replace it (an entry on its path they own, or a file or directory on it that is group- or world-writable), warning instead of refusing")
+	f.BoolVar(&insecurePlainGenerate, "insecure-allow-plain-http-generate", false,
+		"Let POST /generate return private keys when the server has no TLS (loopback bootstrap, or behind a TLS-terminating proxy). Without TLS there is no client authentication, so any caller gets the key")
 	f.StringVar(&caKeyPassphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (first line used)")
 	f.BoolVar(&singleProcess, "single-process", false, "Disable CA key isolation (run signer and frontend in a single process)")
 	f.StringVar(&storageBackend, "storage-backend", "", "Storage backend: 'filesystem' (default), 'etcd', 'redis' (alias 'valkey'), 'sqlite', 'postgres', or 'mysql' (alias 'mariadb')")

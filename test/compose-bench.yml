@@ -26,6 +26,7 @@ services:
       - --cadir=/data
       - --autosign-config=true      # workflow scenario needs immediate signing
       - --no-tls-required           # test-only stack; CA not reachable from outside compose network
+      - --insecure-allow-plain-http-generate  # the workflow scenario calls POST /generate
       - --csr-rate-limit=0          # disable rate limiting for load testing
       - -v=0                        # quiet logging; reduces I/O noise during load
     expose:

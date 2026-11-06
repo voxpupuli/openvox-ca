@@ -84,9 +84,12 @@ if [ -s "${TLS_CERT}" ] && [ -s "${TLS_KEY}" ]; then
 fi
 
 # -- Phase 1: bootstrap CA on loopback --------------------------------------
+# Without TLS, POST /generate refuses to return a private key unless
+# --insecure-allow-plain-http-generate is set. Phase 2 serves TLS and drops it.
 echo "Phase 1: bootstrapping CA on loopback to generate TLS cert..."
 /usr/local/bin/openvox-ca \
     --cadir="${CA_DIR}" \
+    --insecure-allow-plain-http-generate \
     --hostname="${HOSTNAME_FOR_TLS}" \
     --host=127.0.0.1 \
     --autosign-config=true &

@@ -32,6 +32,7 @@ re-asserting inventory integrity on a CA that will not start.
 | `--encrypt-ca-key` | `false` | Encrypt the CA private key at rest (AES-256-GCM + Argon2id). See [CA key security](ca-key-security.md) |
 | `--insecure-allow-world-readable-keys` | `false` | Start even when CA key material is readable by every local account, warning loudly instead of refusing. Treat the key as compromised if you need this |
 | `--insecure-allow-unsafe-autosign-path` | `false` | Run the autosign executable even when someone other than root or the CA's own user could replace it, warning instead of refusing. See [the autosign executable's path](#the-autosign-executables-path) |
+| `--insecure-allow-plain-http-generate` | `false` | Let `POST /generate` return private keys when the server has no TLS, to any caller. See [server-side key generation without TLS](#server-side-key-generation-without-tls) |
 | `--ca-key-passphrase-file` | `""` | Path to file containing the CA key passphrase (first line used) |
 | `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables) |
 | `--ca-signing-concurrency` | `max(4, GOMAXPROCS)` | Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound) |
@@ -183,6 +184,7 @@ expired_cert_cleanup_interval_sec: 0     # how often to run; 0 = built-in defaul
 encrypt_ca_key: false           # encrypt the CA private key (AES-256-GCM + Argon2id)
 insecure_allow_world_readable_keys: false  # start even if key material is world-readable (refuses by default)
 insecure_allow_unsafe_autosign_path: false # run an autosign executable others could replace (refuses by default)
+insecure_allow_plain_http_generate: false  # let POST /generate return keys without TLS (refuses by default)
 ca_key_passphrase_file: ""      # path to passphrase file; required with encrypt_ca_key
 # Date/time format in JSON responses.
 puppet_datetime_format: false   # use Puppet CA style "2006-01-02T15:04:05MST" instead of RFC 3339
@@ -255,6 +257,7 @@ Environment variables mirror the CLI flags:
 | `--encrypt-ca-key` | `OPENVOX_CA_ENCRYPT_CA_KEY` |
 | `--insecure-allow-world-readable-keys` | `OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS` |
 | `--insecure-allow-unsafe-autosign-path` | `OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH` |
+| `--insecure-allow-plain-http-generate` | `OPENVOX_CA_INSECURE_ALLOW_PLAIN_HTTP_GENERATE` |
 | `--ca-key-passphrase-file` | `OPENVOX_CA_KEY_PASSPHRASE_FILE` |
 | `--storage-backend` | `OPENVOX_CA_STORAGE_BACKEND` |
 | `--etcd-endpoints` | `OPENVOX_CA_ETCD_ENDPOINTS` |
@@ -407,7 +410,8 @@ says where it does not hold. Stop the service rather than rely on it. Then:
 # also what the unit expects cadir to be.
 CADIR=/etc/puppetlabs/puppet/ssl/ca
 
-openvox-ca --tls-cert= --tls-key= --host 127.0.0.1 --port 8140 &
+openvox-ca --tls-cert= --tls-key= --insecure-allow-plain-http-generate \
+  --host 127.0.0.1 --port 8140 &
 PCA_PID=$!
 
 # Poll rather than sleep: bootstrapping a cold cadir generates an RSA-4096 key
@@ -440,6 +444,12 @@ force, which matters more than it looks.
 > subject as the real one and no warning that it has done so. The serving
 > certificate would be issued by that impostor, every agent would reject it, and
 > a stray signing key would be left in `cadir`.
+
+`--insecure-allow-plain-http-generate` is what lets `generate` have the key at
+all: with TLS off, `POST /generate` refuses with `403` unless it is set (see
+[server-side key generation without
+TLS](#server-side-key-generation-without-tls)). Give it on the command line, as
+here, and not in the config file, where it would outlive this one start.
 
 If you are not using a config file at all, pass `--cadir` (and, on a cold
 `cadir`, `--hostname` — it is the CN *suffix* a CA is bootstrapped with, once
@@ -487,10 +497,10 @@ their environment equivalents, or [`serving_cert`](#the-cas-own-serving-certific
 window short. On an ordinary configuration the server would refuse to serve
 plain HTTP off loopback anyway, so forgetting it fails safe. On one carrying
 `no_tls_required: true` — the documented setup behind a TLS-terminating proxy —
-that refusal is already switched off, and so is the block on handing a private
-key over plain HTTP. There, the loopback bind is the only thing standing
-between an unauthenticated `POST /generate/<subject>` and every interface on
-the host.
+that refusal is already switched off, and `--insecure-allow-plain-http-generate`
+switches off the block on handing a private key over plain HTTP. There, the
+loopback bind is the only thing standing between an unauthenticated
+`POST /generate/<subject>` and every interface on the host.
 
 [Migrating from Puppet
 Server](migrating-from-puppet-server.md#step-7-start-openvox-ca) mints a
@@ -540,6 +550,36 @@ Pointing `tls_cert` at `ca_crt.pem` produces both. Two ways of being rejected
 by agents still pass every check here, because neither is visible from the
 server: a certificate issued by some other CA, and one whose SANs name a host
 other than the one agents dial — the `hostname mismatch` above.
+
+## Server-side key generation without TLS
+
+`POST /generate/{subject}` returns the private key it generates in the response
+body. Without TLS that key crosses the network in cleartext, and the
+authorisation middleware is not installed either, so it goes to any caller that
+can reach the listener. The route therefore refuses with `403 Forbidden` and the
+body `private key delivery requires TLS` whenever the server has no TLS of its
+own — neither `tls_cert`/`tls_key` nor
+[`serving_cert`](#the-cas-own-serving-certificate) — whatever address it is
+bound to, and whether or not `no_tls_required` is set. Each refusal is logged at
+warning level as `Generate refused: TLS is not configured`, with the remedy.
+
+`insecure_allow_plain_http_generate` (`--insecure-allow-plain-http-generate`,
+`OPENVOX_CA_INSECURE_ALLOW_PLAIN_HTTP_GENERATE`) lifts the refusal. Two setups
+need it:
+
+- the loopback bootstrap under [issuing one](#issuing-one), which passes the
+  flag for that one start;
+- a CA behind a proxy that terminates TLS, with `no_tls_required`. There the
+  proxy is all that decides who reaches the route, and anything that can reach
+  the CA's own port directly gets a key as well.
+
+It defaults to `false` and has no effect when TLS is configured. While it is
+set the server warns at startup: an `INSECURE:` warning when TLS is off and the
+setting is live, and a warning that it has no effect when TLS is on, so that an
+opt-in left behind is noticed before TLS is ever turned off. Where the key need
+not come from a running server, the offline
+[`openvox-ca generate`](operator-cli.md#generate-minting-a-certificate-offline)
+needs neither TLS nor this setting.
 
 ## Revocation across replicas
 

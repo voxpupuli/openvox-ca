@@ -150,8 +150,9 @@ type Server struct {
 	// address per minute on the unauthenticated PUT /certificate_request
 	// endpoint. Zero (the default) disables rate limiting.
 	CSRRateLimit int
-	// PlainHTTP is set when the server is running without TLS.
-	// The /generate endpoint refuses to serve private keys when this is true.
+	// PlainHTTP is set when the server is running without TLS and the
+	// operator has not set insecure_allow_plain_http_generate. The /generate
+	// endpoint refuses to serve private keys when this is true.
 	PlainHTTP bool
 	// SignBatchLimit is the maximum number of certificates that can be signed
 	// in a single POST /sign or POST /sign/all request. Zero disables the limit.
@@ -952,10 +953,17 @@ type generateResponse struct {
 
 func (s *Server) handlePostGenerate(w http.ResponseWriter, r *http.Request) {
 	// SECURITY: Refuse to serve private keys over plain HTTP: the response
-	// body contains the generated private key in cleartext. Without TLS, any
-	// on-path observer can capture the key.
+	// body contains the generated private key in cleartext, and without TLS
+	// there is no client authentication either, so the key would go to any
+	// caller as well as to any on-path observer.
+	//
+	// The remedy names the setting in the log and not in the body: the body
+	// goes to a caller nobody has authenticated.
 	// NIST 800-53: SC-8 (Transmission Confidentiality and Integrity), SC-12 (Cryptographic Key Establishment and Management)
 	if s.PlainHTTP {
+		slog.Warn("Generate refused: TLS is not configured; configure TLS, or set "+
+			"insecure_allow_plain_http_generate to return private keys without it",
+			"client", clientOf(r))
 		http.Error(w, "private key delivery requires TLS", http.StatusForbidden)
 		return
 	}
