@@ -6587,6 +6587,30 @@ esac
 		Entry("localhost", "", "", "", "", false),
 	)
 
+	// The name in OPENVOX_CA_CERTNAME may be one the operator never typed --
+	// record-environment wrote it on an earlier run -- so provisioning says
+	// where it came from, and says it only for that tier.
+	DescribeTable("names OPENVOX_CA_CERTNAME as the source only when it is",
+		func(certname, puppetConfCertname string, want bool) {
+			stubHostname("", "")
+			env := []string{"RUNTIME_DIRECTORY=" + runtimeDir, "PATH=" + stubBin + ":/usr/bin:/bin"}
+			if puppetConfCertname != "" {
+				conf := filepath.Join(GinkgoT().TempDir(), "puppet.conf")
+				Expect(os.WriteFile(conf, []byte("[main]\ncertname = "+puppetConfCertname+"\n"), 0o644)).To(Succeed())
+				env = append(env, "OPENVOX_CA_PUPPET_CONF="+conf)
+			}
+			r := runFirstBootScript(sslDir, binDir, certname, env...)
+			Expect(r.ok).To(BeTrue(), "provisioning failed: %s", r.output)
+			if want {
+				Expect(r.output).To(ContainSubstring("taking the name from OPENVOX_CA_CERTNAME"))
+			} else {
+				Expect(r.output).NotTo(ContainSubstring("taking the name from OPENVOX_CA_CERTNAME"))
+			}
+		},
+		Entry("the environment's", "ca.example.com", "", true),
+		Entry("puppet.conf's", "", "agent.example.com", false),
+	)
+
 	// The marker describes the run that created the serving link, and only
 	// that one. RuntimeDirectory= is emptied when the unit stops, so a later
 	// boot starts without one and must not leave another.
