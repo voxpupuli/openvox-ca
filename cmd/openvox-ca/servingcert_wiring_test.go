@@ -318,10 +318,11 @@ var _ = Describe("the serve command's serving-certificate wiring", func() {
 	// warning and the status line. Neither opens anything, which is why they
 	// were not worth the count.
 	//
-	// srv.PlainHTTP's read is pinned by generate_plainhttp_test.go, from both
-	// sides. Losing the read alone fails closed, refusing /generate even with
-	// TLS. Losing the whole assignment fails open: the field is then false
-	// without TLS, and /generate hands private keys to any caller.
+	// srv.PlainHTTP's read and the insecure_allow_plain_http_generate startup
+	// notice's are pinned by generate_plainhttp_test.go, each from both sides.
+	// For srv.PlainHTTP, losing the read alone fails closed, refusing /generate
+	// even with TLS. Losing the whole assignment fails open: the field is then
+	// false without TLS, and /generate hands private keys to any caller.
 	It("reads the TLS predicate rather than tls_cert/tls_key directly", func() {
 		var predicateReads, rawReads int
 		ast.Inspect(file, func(n ast.Node) bool {
