@@ -61,7 +61,8 @@ cadir: /etc/puppetlabs/puppet/ssl/ca
 # and restart the oneshot; it relinks them to the new name. The short-hostname
 # warning and the unresolved-certname marker both say so.
 #
-# On EL, if /etc/sysconfig/openvox-ca exists, set OPENVOX_CA_CERTNAME and
+# On EL, if /etc/sysconfig/openvox-ca exists (on Debian, /etc/default/openvox-ca:
+# use dpkg-reconfigure openvox-ca for the name), set OPENVOX_CA_CERTNAME and
 # OPENVOX_CA_PUPPET_SERVER in it to the new name first: that file outranks
 # puppet.conf and this one, and provisioning never rewrites it, so otherwise the
 # oneshot re-mints under the name it recorded and the new certificate is not an
@@ -103,6 +104,13 @@ port: 8141
 # host's own certificate is a CA admin -- unless this file already sets
 # puppet_server or puppet_server_file by then, in which case it leaves that
 # line out. So a list set here before the first start is the one that applies.
+# On Debian the package renders the same line into /etc/default/openvox-ca from
+# debconf at every install and upgrade, and leaves it out under the same rule.
+# That file is ucf's, not yours alone: delete the line and ucf keeps your edit;
+# set puppet_server here and the next upgrade removes it; leave the debconf
+# answer openvox-ca/ca-name empty to have neither value written. The rest of
+# this note is about EL. See "The debconf question and /etc/default on Debian"
+# in /usr/share/doc/openvox-ca/docs/systemd.md.
 #
 # Set one here AFTER the first start and it is silently ignored while that line
 # is in that file: the environment outranks this file, and it REPLACES

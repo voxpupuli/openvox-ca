@@ -1,0 +1,148 @@
+#!/bin/sh
+#
+# The deb's debconf config script: asks openvox-ca/ca-name, the name this
+# host's node certificate is issued under. Shipped in the deb's control archive
+# (nfpm's deb.scripts.config); the rpm has no equivalent, because rpm
+# scriptlets cannot ask anything (openvox-ca#252).
+#
+# Debian Policy's shape: prompt only where there is no sane default. The
+# default is the answer first-boot's own chain would reach -- certname from
+# puppet.conf, else `hostname -f` -- and the priority follows from it:
+#
+#   a usable FQDN   medium, below debconf's default threshold, so an ordinary
+#                   install is silent and takes it
+#   anything else   high, because the alternative is a short-name or
+#                   localhost certificate and only the operator knows better
+#
+# A non-interactive install with no usable default records nothing, and
+# provisioning falls back to the same chain the EL package uses. The answer is
+# checked against the allow-list first-boot enforces, so a bad one is re-asked
+# here rather than failing provisioning later.
+#
+# The postinst reads the answer and renders /etc/default/openvox-ca from it.
+
+set -e
+
+# Overridable so a spec can supply a stand-in for debconf's protocol; the
+# package never sets either.
+CONFMODULE="${OPENVOX_CA_CONFMODULE:-/usr/share/debconf/confmodule}"
+PUPPET_CONF="${OPENVOX_CA_PUPPET_CONF:-/etc/puppetlabs/puppet/puppet.conf}"
+SYSTEMD_RUNTIME="${OPENVOX_CA_SYSTEMD_RUNTIME:-/run/systemd/system}"
+
+# shellcheck disable=SC1090 # the confmodule is debconf's, not ours
+. "$CONFMODULE"
+
+# The same three checks first-boot makes, kept in step with
+# packaging/scripts/first-boot by hand: a maintainer script must be
+# self-contained, and this one runs before anything the package ships is on
+# disk. magefile_test.go's "the certname allow-list's copies" drives this,
+# first-boot and the postinstall's rendering check with one list of names.
+is_safe_certname() {
+	case "$1" in
+	"" | -* | . | ..) return 1 ;;
+	*[!A-Za-z0-9._-]*) return 1 ;;
+	esac
+	return 0
+}
+is_reserved_certname() {
+	case "$1" in
+	ca | openvox-ca-server) return 0 ;;
+	esac
+	return 1
+}
+is_usable_fqdn() {
+	case "$1" in
+	*.*) ;;
+	*) return 1 ;;
+	esac
+	case "$1" in
+	localhost | localhost.* | localhost6 | localhost6.* | *.localdomain) return 1 ;;
+	esac
+	return 0
+}
+acceptable() {
+	is_safe_certname "$1" && ! is_reserved_certname "$1"
+}
+
+# What first-boot would choose, as far as it can be known before the package
+# is unpacked: puppet.conf's certname, then the resolver's fully qualified
+# name. The short-hostname and localhost tiers are not defaults -- they are the
+# failure states this question exists to head off.
+default_name() {
+	if [ -r "$PUPPET_CONF" ]; then
+		n=$(sed -n 's/^[[:space:]]*certname[[:space:]]*=[[:space:]]*\([^[:space:]#]*\).*/\1/p' \
+			"$PUPPET_CONF" | tail -n 1)
+		if [ -n "$n" ] && acceptable "$n"; then
+			printf '%s\n' "$n"
+			return 0
+		fi
+	fi
+	n=$(hostname -f 2>/dev/null) || n=
+	if [ -n "$n" ] && acceptable "$n" && is_usable_fqdn "$n"; then
+		printf '%s\n' "$n"
+	fi
+}
+
+# on_the_host says whether this install is running on the machine that will
+# run the CA. An image build is not: a chroot (debootstrap, mmdebstrap,
+# live-build) shares the build host's name, and a container or VM build has
+# no running systemd. A default seeded there is the BUILDER's name, below the
+# question's threshold, and every machine booted from the image would mint its
+# certificate under it. So there, no default: the answer stays empty and each
+# instance resolves its own name at first boot. Unlike EL, nothing records
+# that name as the admin list afterwards, so such an instance has none until
+# puppet_server is set (docs/systemd.md says so). A preseeded answer still
+# applies -- which is how an image builder who does want one name, and one
+# admin, sets it.
+on_the_host() {
+	[ -d "$SYSTEMD_RUNTIME" ] || return 1
+	if command -v ischroot >/dev/null 2>&1 && ischroot; then
+		return 1
+	fi
+	return 0
+}
+
+# Seed the default once, while the question is unanswered, so a preseeded or
+# earlier answer is never replaced.
+db_get openvox-ca/ca-name
+if [ -z "$RET" ]; then
+	db_fget openvox-ca/ca-name seen
+	if [ "$RET" != true ] && on_the_host; then
+		db_set openvox-ca/ca-name "$(default_name)"
+	fi
+fi
+
+db_get openvox-ca/ca-name
+if is_usable_fqdn "$RET" && acceptable "$RET"; then
+	priority=medium
+else
+	priority=high
+fi
+
+# Ask, and ask again while the answer is unusable. An empty answer is
+# acceptable: it hands the choice to provisioning. db_input exits 30 when the
+# question is not shown (below the threshold, or non-interactive); then there
+# is nobody to re-ask, so an unusable value is cleared rather than looped on.
+while :; do
+	shown=yes
+	db_input "$priority" openvox-ca/ca-name || shown=no
+	db_go || :
+	db_get openvox-ca/ca-name
+	if [ -z "$RET" ] || acceptable "$RET"; then
+		break
+	fi
+	if [ "$shown" = no ]; then
+		# Said, not just dropped: a preseeded typo otherwise surfaces only as a
+		# CA minted under some other name. stderr, because the confmodule has
+		# made stdout debconf's; non-printing characters shown as `?`, so a
+		# newline in the refused value cannot forge a second line.
+		printf 'openvox-ca: WARNING: ignoring openvox-ca/ca-name "%s": not a usable certificate name. Provisioning will choose the name; to set one, run dpkg-reconfigure openvox-ca.\n' \
+			"$(printf '%s' "$RET" | tr -c '[:print:]' '?')" >&2
+		db_set openvox-ca/ca-name ""
+		break
+	fi
+	db_subst openvox-ca/ca-name-invalid name "$RET"
+	db_input critical openvox-ca/ca-name-invalid || :
+	db_go || :
+	priority=critical
+done

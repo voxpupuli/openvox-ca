@@ -117,9 +117,14 @@ See [running under systemd](docs/systemd.md) for the rest of a VM install.
 
 A `.deb` and an `.rpm` per architecture install the binaries, a unit rendered
 for `/usr/bin`, a working `/etc/openvox-ca/config.yaml`, and a `Type=oneshot`
-that provisions the CA the first time you start the service — so on a host with
-no CA of its own, a package install is `install`, then `systemctl enable --now
-openvox-ca`, with no configuration to write first. They create the `puppet`
+that provisions the CA the first time the service starts, with no configuration
+to write first. Each follows its distribution's convention. On Debian and
+Ubuntu, `apt install` enables and starts it, so the CA is serving when the
+install returns; the package may first ask which name to issue this host's
+certificate under (debconf), and it does not start where `policy-rc.d` forbids
+it, or on a host that already holds a CA or has OpenVox Server installed. On EL, `dnf
+install` installs and nothing else; `systemctl enable --now openvox-ca` creates
+the CA. They create the `puppet`
 service account and use the OpenVox/Puppet layout
 (`/etc/puppetlabs/puppet/ssl`), so they coexist with an openvox-agent or
 OpenVox Server on the same host; that is also why they listen on **8141**
