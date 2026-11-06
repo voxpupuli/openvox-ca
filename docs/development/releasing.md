@@ -126,10 +126,11 @@ never name an image that does not exist.
 > `main`'s ruleset requires — *CI success* and *Container images success* —
 > from GitHub Actions' push runs on `main` itself, i.e. it went green on
 > `main`. A merged PR's head commit does not qualify, though it is an ancestor
-> of `main` and passed its own PR runs: `main` never built that tree. Tagging an unprepared,
-> unmerged, or red commit fails the gate instead of publishing. (The artefact
-> builds themselves are also exercised on every PR by CI's per-variant
-> *Release artefact build* jobs, and the chart by its *Helm chart* job. **The packaging step is the exception**: nothing runs
+> of `main` and passed its own PR runs: `main` never built that tree.
+> Tagging an unprepared, unmerged, or red commit fails the gate instead of
+> publishing. (The artefact builds themselves are also exercised on every PR
+> by CI's per-variant *Release artefact build* jobs, and the chart by its
+> *Helm chart* job. **The packaging step is the exception**: nothing runs
 > `mage build:packages` on a pull request, so a green CI run says nothing
 > about it, and a packaging defect would first appear on a tag. Adding that
 > leg is [#254](https://github.com/voxpupuli/openvox-ca/issues/254).)
