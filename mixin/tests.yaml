@@ -1,5 +1,6 @@
 # promtool rule tests for the CRL-propagation, upstream-chain,
-# Kubernetes-export, delayed-supersession and managed-certificate alerts.
+# Kubernetes-export, delayed-supersession, leaf- and CRL-expiry and
+# managed-certificate alerts.
 #
 # Run with `mage test:mixin` from the repository root, which renders the mixin
 # to the path below and then runs both promtool checks over it.
@@ -26,9 +27,14 @@
 #   * OpenVoxCASupersedeFailing, where what needs pinning is the debounce: it is
 #     deliberately slower than its neighbours because the sweep retries on its
 #     own interval, so a case asserts it is quiet at 20m and firing at 40m.
+#   * The leaf and CRL expiry rules, plain thresholds, pinned for how they meet
+#     the exporter rather than for their shape: a failed gather holds the series
+#     they read for an hour, so their `for:` clocks run on through the failure,
+#     but only while they stay ungated on scrape_success.
 #   * OpenVoxCAManagedCertificateNeverIssued, whose two sides come from different
 #     places -- the configured series from the in-process configuration, the
-#     leaf series from storage -- so they disagree whenever a gather fails. The
+#     leaf series from storage -- so they disagree once a gather has been
+#     failing for longer than the exporter holds the leaf series (an hour). The
 #     cases pin that it fires for a certificate that never appears, stays quiet
 #     for one that exists, keeps the target labels so one replica's certificate
 #     cannot satisfy another's entry, stays quiet for a revoked predecessor
@@ -118,8 +124,9 @@ tests:
               summary: "OpenVox CA replica is enforcing an out-of-date CRL."
               description: "The OpenVox CA on ca-1:9140 has not caught up with the CRL in storage for more than 10m, so certificates revoked on another replica are still being accepted here. Either it is behind the stored CRL, or the stored CRL cannot be read at all (in which case openvoxca_crl_number is absent for this instance). Check openvoxca_crl_sync_failures_total and the CA logs. A restart reloads the CRL, selecting the newest block this CA signed; if the stored chain carries none, startup warns and the re-sign paths refuse it, so check the stored chain rather than restarting repeatedly."
 
-  # ...and the qualifier on that arm. A storage outage drops the same series,
-  # but is already paged by OpenVoxCAScrapeFailing, so this must not double-page.
+  # ...and the qualifier on that arm. A storage outage drops the same series once
+  # the exporter stops holding it, an hour in, but is already paged by
+  # OpenVoxCAScrapeFailing, so this must not double-page.
   - interval: 1m
     name: whole gather failing is left to the scrape alert
     input_series:
@@ -241,6 +248,96 @@ tests:
       - eval_time: 60m
         alertname: OpenVoxCAKubernetesExportNotRunning
         exp_alerts: []
+
+  # What the exporter's hold is for (#435). A failed gather republishes the
+  # leaf series for up to an hour, so to Prometheus they run on unbroken while
+  # scrape_success reads 0, and an expiry alert's `for` clock has to run on
+  # through that. It does only while the expiry rules stay ungated on
+  # scrape_success: qualifying them the way the managed-certificate rule is
+  # qualified would bring back the silence the hold removed. The gather fails
+  # at 20m, well before expiryFor has elapsed, and every expiry rule over a held
+  # series must still fire: both leaf warnings, the critical, and the CRL pair.
+  # The upstream CRL rules are pinned the same way by their own cases below,
+  # whose inputs carry no scrape_success at all.
+  - interval: 1m
+    name: an expiry alert keeps its clock while the gather fails
+    input_series:
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="node.example.com",serial="0a1d",state="signed"}'
+        values: "259200+0x90"
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="soon.example.com",serial="0a1e",state="signed"}'
+        values: "43200+0x90"
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="gone.example.com",serial="0a1f",state="signed"}'
+        values: "0+0x90"
+      - series: 'openvoxca_crl_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140"}'
+        values: "86400+0x90"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x20 0+0x70"
+      # A second instance for the expired CRL: one instance has one CRL series,
+      # and it cannot be both expiring and expired.
+      - series: 'openvoxca_crl_next_update_timestamp_seconds{job="openvox-ca",instance="ca-2:9140"}'
+        values: "0+0x90"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-2:9140"}'
+        values: "1+0x20 0+0x70"
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: OpenVoxCALeafCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              subject: node.example.com
+              serial: 0a1d
+              state: signed
+            exp_annotations:
+              summary: "A leaf certificate is approaching expiry."
+              description: "Certificate for node.example.com (serial 0a1d) expires in 2d 22h 50m 0s. The node may have stopped renewing."
+      - eval_time: 70m
+        alertname: OpenVoxCALeafCertificateExpiringCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openvox-ca
+              instance: ca-1:9140
+              subject: soon.example.com
+              serial: 0a1e
+              state: signed
+            exp_annotations:
+              summary: "A leaf certificate expires imminently."
+              description: "Certificate for soon.example.com (serial 0a1e) expires in 10h 50m 0s."
+      - eval_time: 70m
+        alertname: OpenVoxCALeafCertificateExpired
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              subject: gone.example.com
+              serial: 0a1f
+              state: signed
+            exp_annotations:
+              summary: "A non-revoked leaf certificate has expired."
+              description: "Certificate for gone.example.com (serial 0a1f) on ca-1:9140 has expired but is not revoked."
+      - eval_time: 70m
+        alertname: OpenVoxCACRLExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+            exp_annotations:
+              summary: "OpenVox CA CRL is approaching its NextUpdate."
+              description: "The CRL on ca-1:9140 reaches NextUpdate in 22h 50m 0s. The CA normally auto-refreshes it; check the CRL refresher."
+      - eval_time: 70m
+        alertname: OpenVoxCACRLExpired
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openvox-ca
+              instance: ca-2:9140
+            exp_annotations:
+              summary: "OpenVox CA CRL has expired."
+              description: "The CRL on ca-2:9140 is past its NextUpdate. Relying parties may reject it and fail revocation checks."
 
   # OpenVoxCAManagedCertificateNeverIssued, whose whole job is a shape no
   # comparison over the leaf series can express: a configured certificate that
@@ -445,17 +542,19 @@ tests:
   # expression is qualified on a successful scrape.
   #
   # The configured series is built from the in-process configuration and is
-  # published even when the gather fails; the leaf series are read from storage
-  # and all vanish together. So a storage outage leaves the left side of the
-  # `unless` standing with nothing on the right, and every configured entry
-  # matches -- healthy ones included. Without the qualifier this fires an hour
-  # into an outage OpenVoxCAScrapeFailing has already been paging for, and sends
-  # an operator to check RBAC for certificates that exist and are fine.
+  # published even when the gather fails; the leaf series are read from storage,
+  # held for an hour after the last successful gather, and then all vanish
+  # together. So an outage longer than that leaves the left side of the `unless`
+  # standing with nothing on the right, and every configured entry matches --
+  # healthy ones included. Without the qualifier this fires in an outage
+  # OpenVoxCAScrapeFailing has already been paging for, and sends an operator to
+  # check RBAC for certificates that exist and are fine.
   #
-  # Both certificates here are healthy and present up to the outage: the series
-  # stop at 40m, which is what a gather failure looks like to Prometheus, and
-  # scrape_success goes to 0 at the same moment. The assertion is silence at
-  # 110m, more than managedCertNeverIssuedFor past the failure.
+  # Both certificates here are healthy and present up to the point where the
+  # exporter stops holding them: the series stop at 40m, which is what that
+  # looks like to Prometheus, and scrape_success is 0 from there on (the hour
+  # of holding before it is left out, as the rule is quiet throughout it). The
+  # assertion is silence at 110m, more than managedCertNeverIssuedFor past it.
   - interval: 1m
     name: a storage outage does not page for every managed certificate
     input_series:

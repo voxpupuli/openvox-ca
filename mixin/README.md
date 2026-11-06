@@ -144,9 +144,11 @@ promtool check rules openvox_ca_alerts.yaml
 
 `mage test:mixin` renders the mixin and runs both promtool checks over it —
 `check rules` for syntax and `test rules` against [`tests.yaml`](tests.yaml),
-which covers the rules whose expressions are not simple thresholds. CI runs the
-same target, so a broken expression fails the build rather than waiting to be
-noticed in an alertmanager that never fires. It skips with a message if
+which covers the rules whose firing is not obvious from the PromQL: the ones
+built from set operators or a timing argument, and the plain leaf and CRL expiry
+thresholds, pinned for how they meet the exporter's hold on a failed gather. CI
+runs the same target, so a broken expression fails the build rather than
+waiting to be noticed in an alertmanager that never fires. It skips with a message if
 `jsonnet` or `promtool` is not on your `PATH`.
 
 ## Importing into another repo
@@ -207,4 +209,4 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `managedCertNeverIssuedFor` | `1h` | How long a configured managed certificate may go without ever being issued before alerting. Deliberately longer than one reconcile interval: every remedy is manual, and a certificate nothing has yet is not an emergency in the first hour of an install. Raise it if you have raised `managed_cert_interval_sec`. |
 | `supersedeWindow` | `1h` | Window over which delayed-revocation failures are counted (the metric is a restart-resetting counter). |
 | `supersedeFor` | `30m` | `for:` debounce for the delayed-revocation-failure alert. Longer than the CRL ones because the sweep retries on its own interval; raise it if you have raised `superseded_cert_sweep_interval_sec`. |
-| `expiryFor` / `scrapeFor` / `readyFor` / `downFor` | `1h` / `15m` / `10m` / `5m` | `for:` debounce durations. |
+| `expiryFor` / `scrapeFor` / `readyFor` / `downFor` | `1h` / `15m` / `10m` / `5m` | `for:` debounce durations. Below `1h`, `expiryFor` lets an expiry alert fire on data the exporter is holding after a failed gather — see [When a gather fails](../docs/metrics.md#when-a-gather-fails). |

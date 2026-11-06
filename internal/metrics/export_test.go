@@ -19,6 +19,7 @@ package metrics
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/httpserver"
 )
@@ -34,4 +35,14 @@ const DefaultGatherTimeout = defaultGatherTimeout
 // listener's timeouts in milliseconds rather than waiting out the real ones.
 func (e *Exporter) NewServerWithTimeoutsForTest(addr string, timeouts httpserver.Timeouts) *http.Server {
 	return e.newServer(addr, timeouts)
+}
+
+// StaleSnapshotLimit exposes how long a failed gather republishes the last
+// successful one.
+const StaleSnapshotLimit = staleSnapshotLimit
+
+// SetClockForTest replaces the collector's clock, so a spec can age the last
+// successful gather past StaleSnapshotLimit without waiting an hour.
+func (c *Collector) SetClockForTest(now func() time.Time) {
+	c.now = now
 }

@@ -500,8 +500,9 @@
             //
             // It is qualified on a successful scrape so that arm covers only
             // the CRL being unreadable, not the whole gather failing: a storage
-            // outage drops the same series and is already paged by
-            // OpenVoxCAScrapeFailing, and one cause should not raise two alerts.
+            // outage holds the stored number for an hour and then drops it
+            // too, in an outage OpenVoxCAScrapeFailing is already paging for,
+            // and one cause should not raise two alerts.
             // The reverse asymmetry (cached absent, stored present) means the
             // replica has no CRL in memory at all and is covered by
             // OpenVoxCANotReady, so it is deliberately left out.
@@ -733,11 +734,12 @@
             // in-process configuration and is published even when the gather
             // fails, deliberately, so that a CA which cannot reach storage
             // still reports what it is meant to be keeping alive. The leaf
-            // series are read from storage and all vanish together. So during a
-            // storage outage the left side stands and the right side is empty,
-            // and without this qualifier every configured entry would match --
-            // healthy ones included -- an hour into an outage that
-            // OpenVoxCAScrapeFailing has already been paging for. One cause
+            // series are read from storage: a failed gather holds them for an
+            // hour and then drops them all together. So once the hold runs out
+            // the left side stands and the right side is empty, and without
+            // this qualifier every configured entry would match -- healthy ones
+            // included -- in an outage that OpenVoxCAScrapeFailing has already
+            // been paging for. One cause
             // should not raise two alerts, and the second one here would name
             // the wrong remedy: it would send an operator to check RBAC and
             // store permissions for certificates that exist and are fine.
