@@ -100,6 +100,20 @@ RestartSec=5s
 # and an earlier revision of this line said otherwise.
 TimeoutStartSec=300s
 
+# Values provisioning recorded on EL: the certificate name and the admin
+# allow-list (OPENVOX_CA_PUPPET_SERVER), which outranks puppet_server in
+# /etc/openvox-ca/config.yaml -- and, because systemd lets EnvironmentFile=
+# outrank Environment=, the same variable set with Environment= in any drop-in
+# (a drop-in's own EnvironmentFile= is read after this one and wins). Written
+# once per host by openvox-ca-first-boot.service's record-environment step,
+# which leaves out a variable a drop-in's Environment= already sets, and never
+# by the package, so it is the
+# operator's from then on. The leading `-` is what lets a host without it
+# start: one that was never provisioned, a Debian host, a tarball install, or
+# one whose operator deleted it to hand those values back to the
+# configuration file.
+EnvironmentFile=-/etc/sysconfig/openvox-ca
+
 # Must exceed the drain budget (shutdown_timeout_sec, 25s by default) plus the
 # supervisor's 3s headroom, or systemd will truncate the drain it asked for.
 TimeoutStopSec=35s

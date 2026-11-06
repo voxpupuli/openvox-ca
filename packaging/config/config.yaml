@@ -58,8 +58,16 @@ cadir: /etc/puppetlabs/puppet/ssl/ca
 # existing one is its own -- a dangling alias may equally be an operator's,
 # pointing at a certificate they are about to install. So after deleting
 # certs/<old>.pem and private_keys/<old>.pem, delete these two aliases as well
-# and restart the oneshot; it relinks them to the new name. The tier-3 warning
-# and the unresolved-certname marker both say so.
+# and restart the oneshot; it relinks them to the new name. The short-hostname
+# warning and the unresolved-certname marker both say so.
+#
+# On EL, if /etc/sysconfig/openvox-ca exists, set OPENVOX_CA_CERTNAME and
+# OPENVOX_CA_PUPPET_SERVER in it to the new name first: that file outranks
+# puppet.conf and this one, and provisioning never rewrites it, so otherwise the
+# oneshot re-mints under the name it recorded and the new certificate is not an
+# admin. (Deleting those lines also fixes the name, but then the certificate is
+# an admin only if puppet_server below names it.) See "The environment file on EL" in
+# /usr/share/doc/openvox-ca/docs/systemd.md.
 #
 # Point them elsewhere and provisioning leaves them alone: like every other
 # step, the link is only made when nothing is already there.
@@ -86,3 +94,24 @@ tls_key: /etc/puppetlabs/puppet/ssl/private_keys/openvox-ca-server.pem
 # and silently ignore an operator who edited it. A default has to sit at the
 # layer an operator can override, and that is this one.
 port: 8141
+
+# The admin allow-list: the certnames allowed to sign, revoke and clean through
+# the API. NOT set here.
+#
+# On EL, first-boot provisioning writes /etc/sysconfig/openvox-ca once, setting
+# OPENVOX_CA_PUPPET_SERVER to the name it provisioned this host under, so this
+# host's own certificate is a CA admin -- unless this file already sets
+# puppet_server or puppet_server_file by then, in which case it leaves that
+# line out. So a list set here before the first start is the one that applies.
+#
+# Set one here AFTER the first start and it is silently ignored while that line
+# is in that file: the environment outranks this file, and it REPLACES
+# puppet_server rather than adding to it. Delete the line to hand the list back
+# to this file; provisioning writes that file once per host and never again.
+# (Creating /etc/sysconfig/openvox-ca yourself before the first start, even
+# empty, opts out of both the values it would record.) That file is yours, not the
+# package's, which is why it can carry a value this one cannot: anything the
+# package changed in THIS file would stop rpm updating it for good. See
+# /usr/share/doc/openvox-ca/docs/systemd.md.
+#
+# puppet_server: ca.example.com

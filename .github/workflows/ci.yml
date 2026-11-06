@@ -164,6 +164,7 @@ jobs:
           shellcheck --version
           shellcheck -s sh \
             packaging/scripts/first-boot \
+            packaging/scripts/record-environment \
             packaging/scripts/preinstall \
             packaging/scripts/postinstall \
             packaging/scripts/preremove \
