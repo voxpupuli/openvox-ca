@@ -204,8 +204,8 @@ var _ = Describe("the server's own startup, on a missing key passphrase", func()
 
 	// The must-fail twin for the two above: the preflight has to refuse the
 	// cases that genuinely cannot proceed and *only* those. A plaintext stored
-	// key needs no passphrase even with encrypt_ca_key set, because nothing
-	// re-encrypts a key that already exists -- so a preflight that refused on
+	// key needs no passphrase even with encrypt_ca_key set, because the server
+	// does not re-encrypt a key that already exists -- so a preflight that refused on
 	// the setting alone would stop a CA that works today.
 	It("does not refuse a plaintext stored key, even with encrypt_ca_key set", func() {
 		caDir := GinkgoT().TempDir()

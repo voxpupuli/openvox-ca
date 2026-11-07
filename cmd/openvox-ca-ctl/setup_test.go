@@ -248,3 +248,21 @@ var _ = Describe("setup subcommand output", func() {
 			"a newline in the subject must not start a line of its own:\n%s", out)
 	})
 })
+
+// setup reaches the passphrase through Init, whose unreadable-file error is
+// shared with the server. It has to name the flag setup was given, not the
+// server's setting.
+var _ = Describe("setup subcommand passphrase file", func() {
+	It("names --ca-key-passphrase-file when the file cannot be read", func() {
+		saveCtlGlobals()
+		clearCtlEnv()
+		cfg := writeTempCtlConfig("")
+		GinkgoT().Setenv(ca.DefaultPassphraseEnvVar, "")
+		missing := filepath.Join(GinkgoT().TempDir(), "no-such-passphrase")
+
+		_, err := captureStdout([]string{"setup", "--config", cfg, "--cadir", GinkgoT().TempDir(),
+			"--encrypt-ca-key", "--ca-key-passphrase-file", missing})
+
+		Expect(err).To(MatchError(ContainSubstring("reading --ca-key-passphrase-file " + missing)))
+	})
+})

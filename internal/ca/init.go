@@ -454,21 +454,9 @@ func (c *CA) loadCAKeyFromDisk(ctx context.Context) error {
 
 	// Handle encrypted keys: decrypt first, then parse the PKCS#8 DER.
 	if isEncryptedPEM(block) {
-		passphrase, err := resolvePassphrase(c.KeyPassphrase, c.Storage.CADir(), needStoredKeyEncrypted)
+		signer, err := decryptCAKey(block, c.KeyPassphrase, c.Storage.CADir(), needStoredKeyEncrypted)
 		if err != nil {
-			return fmt.Errorf("resolving CA key passphrase: %w", err)
-		}
-		pkcs8DER, err := decryptKeyDER(block.Bytes, passphrase)
-		if err != nil {
-			return fmt.Errorf("decrypting CA key: %w", err)
-		}
-		k, err := x509.ParsePKCS8PrivateKey(pkcs8DER)
-		if err != nil {
-			return fmt.Errorf("parsing decrypted CA key: %w", err)
-		}
-		signer, ok := k.(crypto.Signer)
-		if !ok {
-			return fmt.Errorf("decrypted CA key does not implement crypto.Signer")
+			return err
 		}
 		c.CAKey = signer
 		return nil
@@ -488,11 +476,11 @@ func (c *CA) loadCAKeyFromDisk(ctx context.Context) error {
 // warnPlaintextKey reports a stored CA key held in plaintext while
 // EncryptCAKey is set (#432).
 //
-// That is a key created before the setting was, and nothing re-encrypts it:
-// EncryptCAKey acts only when a key is written. An operator who set it expects
-// the protection docs/ca-key-security.md describes, against a copied backup,
-// disk image or snapshot, and does not have it; without this the only sign is
-// reading the key file.
+// That is a key created before the setting was, and the server does not
+// re-encrypt it: EncryptCAKey acts only when a key is written. An operator
+// who set it expects the protection docs/ca-key-security.md describes, against
+// a copied backup, disk image or snapshot, and does not have it; without this
+// the only sign is reading the key file.
 //
 // Here, on the branch that has just parsed a plaintext key from the store,
 // because that is the one place the condition is known rather than inferred.
@@ -502,10 +490,11 @@ func (c *CA) loadCAKeyFromDisk(ctx context.Context) error {
 // but runs again in the signer child it forks, which would say it twice.
 //
 // The message points at the documentation rather than naming a remedy,
-// because there is no command that encrypts an existing key; the options
-// that do exist are written up there. The key's path is named only where
-// the backend has one: on a database backend without a ca_key_file override
-// it is a blob, and key="" would read as a misconfigured path.
+// because the remedy depends on the backend: openvox-ca-ctl import encrypts
+// the key in a local cadir, and the other options are written up there too.
+// The key's path is named only where the backend has one: on a database
+// backend without a ca_key_file override it is a blob, and key="" would read
+// as a misconfigured path.
 func (c *CA) warnPlaintextKey() {
 	var args []any
 	if path := c.Storage.CAKeyPath(); path != "" {
@@ -605,6 +594,9 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 		}
 		if err := c.Storage.SaveCAKey(ctx, keyPEM); err != nil {
 			return fmt.Errorf("failed to write CA key: %w", err)
+		}
+		if c.EncryptCAKey {
+			logCAKeyStoredEncrypted()
 		}
 	}
 

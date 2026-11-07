@@ -18,12 +18,15 @@
 package ca
 
 import (
+	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -124,13 +127,21 @@ func encryptKeyPEM(pkcs8DER, passphrase []byte) ([]byte, error) {
 	}), nil
 }
 
+// errNotOwnEnvelope reports an ENCRYPTED PRIVATE KEY block that is not this
+// CA's own envelope. The PEM type is the standard one for an encrypted PKCS#8
+// key, so a key encrypted by OpenSSL arrives looking like one of ours and is
+// told apart only here, by its first byte.
+var errNotOwnEnvelope = errors.New("the key is not in openvox-ca's own encrypted form; " +
+	"a key encrypted by another tool, such as OpenSSL, has the same PEM header and has to be " +
+	"decrypted with that tool first")
+
 // decryptKeyDER decrypts an encrypted PEM envelope and returns the PKCS#8 DER.
 func decryptKeyDER(envelope, passphrase []byte) ([]byte, error) {
 	if len(envelope) < keyEncMinLen {
 		return nil, fmt.Errorf("encrypted key envelope too short")
 	}
 	if envelope[0] != keyEncVersion {
-		return nil, fmt.Errorf("unsupported encrypted key version: %d", envelope[0])
+		return nil, fmt.Errorf("unsupported encrypted key version %d: %w", envelope[0], errNotOwnEnvelope)
 	}
 
 	offset := 1
@@ -173,6 +184,69 @@ func encryptAndMarshalKey(key any, passphrase []byte) ([]byte, error) {
 	return encryptKeyPEM(pkcs8DER, passphrase)
 }
 
+// encodeCAKey encodes a CA key for storage, encrypted under the passphrase
+// cfg resolves when encrypt is set and in plaintext otherwise.
+//
+// The single encoder for every path that writes a CA key it holds as a
+// crypto.Signer: bootstrapCA and csr --create-key (through
+// marshalCAKeyForStorage), openvox-ca-ctl import, and openvox-ca-ctl migrate
+// (through MigrateCAKey). A key any of them writes encrypted is
+// indistinguishable from one the others write encrypted; import and migrate
+// write a plaintext key as it was given. It is shared rather than mirrored
+// because a divergence fails silently: a CA key written in plaintext when it
+// was meant to be encrypted is discovered whenever someone next reads the file.
+//
+// need says why a passphrase is being resolved, so that a refusal names the
+// condition and the setting the operator actually has.
+func encodeCAKey(key crypto.Signer, encrypt bool, cfg KeyPassphraseConfig, caDir string, need passphraseNeed) ([]byte, error) {
+	if !encrypt {
+		keyPEM, err := marshalPrivateKeyPEM(key)
+		if err != nil {
+			return nil, fmt.Errorf("marshalling CA key: %w", err)
+		}
+		return keyPEM, nil
+	}
+	passphrase, err := resolvePassphrase(cfg, caDir, need)
+	if err != nil {
+		return nil, fmt.Errorf("resolving CA key passphrase: %w", err)
+	}
+	keyPEM, err := encryptAndMarshalKey(key, passphrase)
+	if err != nil {
+		return nil, fmt.Errorf("encrypting CA key: %w", err)
+	}
+	return keyPEM, nil
+}
+
+// logCAKeyStoredEncrypted reports a CA key that has been written encrypted.
+// Callers make it after the write, not encodeCAKey: import encodes before the
+// checks that can still refuse, and a line saying the key is encrypted at rest
+// on a run that stored nothing would be false.
+func logCAKeyStoredEncrypted() {
+	slog.Info("CA private key encrypted at rest")
+}
+
+// decryptCAKey decrypts an encrypted CA key PEM block under the passphrase cfg
+// resolves, and parses it. need is as for encodeCAKey.
+func decryptCAKey(block *pem.Block, cfg KeyPassphraseConfig, caDir string, need passphraseNeed) (crypto.Signer, error) {
+	passphrase, err := resolvePassphrase(cfg, caDir, need)
+	if err != nil {
+		return nil, fmt.Errorf("resolving CA key passphrase: %w", err)
+	}
+	pkcs8DER, err := decryptKeyDER(block.Bytes, passphrase)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting CA key: %w", err)
+	}
+	k, err := x509.ParsePKCS8PrivateKey(pkcs8DER)
+	if err != nil {
+		return nil, fmt.Errorf("parsing decrypted CA key: %w", err)
+	}
+	signer, ok := k.(crypto.Signer)
+	if !ok {
+		return nil, fmt.Errorf("decrypted CA key does not implement crypto.Signer")
+	}
+	return signer, nil
+}
+
 // passphraseNeed says why a passphrase has to be resolved, so that a refusal
 // can name the condition the operator actually has rather than guessing.
 //
@@ -192,14 +266,74 @@ const (
 	// PEM, so the passphrase is needed to decrypt it, whatever encrypt_ca_key
 	// is set to.
 	needStoredKeyEncrypted
+	// needImportEncrypt: openvox-ca-ctl import was asked to encrypt the key
+	// it writes.
+	needImportEncrypt
+	// needImportedKeyEncrypted: the key handed to openvox-ca-ctl import is
+	// itself encrypted, so it has to be decrypted to be checked against the
+	// certificate, and re-encrypted to be written.
+	needImportedKeyEncrypted
+	// needSourceKeyEncrypted: openvox-ca-ctl migrate is copying an encrypted
+	// key, and decrypts it with the source configuration's passphrase.
+	needSourceKeyEncrypted
+	// needDestEncryptConfigured: the destination configuration of a migrate
+	// sets encrypt_ca_key, so the key is encrypted under its passphrase.
+	needDestEncryptConfigured
+	// needDestKeepsEncrypted: migrate is copying an encrypted key into a
+	// destination without encrypt_ca_key. It is still written encrypted, under
+	// the destination's passphrase, because migrate never writes a decrypted
+	// copy of a key that was encrypted.
+	needDestKeepsEncrypted
 )
 
 // because returns the clause naming this need, for the refusal messages below.
 func (n passphraseNeed) because() string {
-	if n == needStoredKeyEncrypted {
+	switch n {
+	case needStoredKeyEncrypted:
 		return "the CA key in the store is encrypted"
+	case needImportEncrypt:
+		return "--encrypt-ca-key is set"
+	case needImportedKeyEncrypted:
+		return "the key given to --private-key is encrypted"
+	case needSourceKeyEncrypted:
+		return "the source's CA key is encrypted"
+	case needDestEncryptConfigured:
+		return "encrypt_ca_key is set in --dest-config"
+	case needDestKeepsEncrypted:
+		return "the source's CA key is encrypted, and migrate does not write a decrypted copy of it"
+	default:
+		return "encrypt_ca_key is set"
 	}
-	return "encrypt_ca_key is set"
+}
+
+// fileSetting names where the operator configures a passphrase file for this
+// need: the server's setting, import's flag, or the setting in whichever of
+// migrate's two configuration files is being read.
+func (n passphraseNeed) fileSetting() string {
+	switch n {
+	case needImportEncrypt, needImportedKeyEncrypted:
+		return "--ca-key-passphrase-file"
+	case needSourceKeyEncrypted:
+		return "ca_key_passphrase_file in --source-config"
+	case needDestEncryptConfigured, needDestKeepsEncrypted:
+		return "ca_key_passphrase_file in --dest-config"
+	default:
+		return "ca_key_passphrase_file"
+	}
+}
+
+// fileReadLabel names the passphrase file in the error for one that cannot be
+// read. The server's two needs keep the flag's name, as they did before import
+// and migrate had needs of their own: openvox-ca-ctl setup reaches them too,
+// through Init, and its flag has the same name. import and migrate name the
+// flag or setting they read.
+func (n passphraseNeed) fileReadLabel() string {
+	switch n {
+	case needEncryptConfigured, needStoredKeyEncrypted:
+		return "--ca-key-passphrase-file"
+	default:
+		return n.fileSetting()
+	}
 }
 
 // PassphraseNeeded reports whether a CA with this configuration and this
@@ -208,8 +342,9 @@ func (n passphraseNeed) because() string {
 // It derives the answer from state rather than from configuration alone,
 // because the two disagree in both directions. A stored key that is already
 // encrypted needs a passphrase even with encrypt_ca_key off; a stored key held
-// in plaintext needs none even with encrypt_ca_key on, since nothing
-// re-encrypts a key that already exists. Only when there is no stored key --
+// in plaintext needs none even with encrypt_ca_key on, since the server does
+// not re-encrypt a key that already exists (only the offline openvox-ca-ctl
+// import and migrate do). Only when there is no stored key --
 // the bootstrap case, where one is about to be written -- does the flag decide.
 //
 // storedKeyPEM is the PEM as the store holds it, or nil when the store has no
@@ -279,7 +414,7 @@ func resolvePassphrase(cfg KeyPassphraseConfig, caDir string, need passphraseNee
 	if cfg.PassphraseFile != "" {
 		pp, err := readPassphraseFile(cfg.PassphraseFile)
 		if err != nil {
-			return nil, fmt.Errorf("reading --ca-key-passphrase-file %s: %w", cfg.PassphraseFile, err)
+			return nil, fmt.Errorf("reading %s %s: %w", need.fileReadLabel(), cfg.PassphraseFile, err)
 		}
 		return pp, nil
 	}
@@ -295,14 +430,14 @@ func resolvePassphrase(cfg KeyPassphraseConfig, caDir string, need passphraseNee
 		return nil, fmt.Errorf("%s and no passphrase source is configured, "+
 			"but %s exists -- openvox-ca does not read a passphrase from it implicitly, "+
 			"because a passphrase stored beside the key it protects defends neither against a "+
-			"copied cadir; set ca_key_passphrase_file to that path to use it, or set %s, then "+
+			"copied cadir; set %s to that path to use it, or set %s, then "+
 			"move the file somewhere the cadir's backups do not reach",
-			need.because(), autoPath, envVar)
+			need.because(), autoPath, need.fileSetting(), envVar)
 	}
 	return nil, fmt.Errorf("%s but no passphrase source is configured; "+
-		"set ca_key_passphrase_file to a file holding the passphrase, or set %s. openvox-ca does "+
+		"set %s to a file holding the passphrase, or set %s. openvox-ca does "+
 		"not generate one: it would have to live beside the key it protects, which defends neither "+
-		"against a copied backup, disk image or snapshot", need.because(), envVar)
+		"against a copied backup, disk image or snapshot", need.because(), need.fileSetting(), envVar)
 }
 
 // readPassphraseFile reads a passphrase from a file, using the first line.
