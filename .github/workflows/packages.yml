@@ -1,0 +1,107 @@
+name: Packages
+
+# Install-and-verify for the deb and rpm packages (#254): build them as the
+# release does, then install each into a container booted with systemd and
+# judge it from the installed state. See test/packages/install-verify.sh for
+# what is asserted and why it needs systemd as PID 1.
+#
+# Reusable rather than triggered, and called from ci.yml as one job that
+# "CI success" needs. GitHub has no `needs` across workflows, so a workflow
+# with its own triggers would need its own aggregate and a ruleset entry; as
+# a called workflow it is gated by the check main's ruleset already requires,
+# and by the release-tag gate that reads that check. It inherits ci.yml's
+# triggers and concurrency group.
+#
+# What this does NOT verify is the release's own bytes: release.yml builds
+# and publishes its packages without running these legs. They verify packages
+# built by the same `mage build:packages` from the same commit, on every pull
+# request and every push to main.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+
+  # -- Build ---------------------------------------------------------------------
+  # Both packaged variants are pure Go (CGO_ENABLED=0), so one runner
+  # cross-builds both; the install legs below need the packages for their own
+  # architecture only.
+  build:
+    name: Build packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install Mage
+        run: go install github.com/magefile/mage@v1.17.2
+      - name: Build the packaged variants' tarballs
+        run: |
+          mage build:distVariant linux_amd64
+          mage build:distVariant linux_arm64
+      - name: Pin the build timestamp
+        # As release.yml's package job does, so these are built the way the
+        # release builds them. build-upgrade.sh inherits it.
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+      - name: Build packages
+        run: mage build:packages
+      - name: Build the upgrade packages
+        # A newer version with a changed config.yaml, for the upgrade cases.
+        run: test/packages/build-upgrade.sh dist/upgrade
+      - name: Upload packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages
+          path: |
+            dist/*.deb
+            dist/*.rpm
+            dist/upgrade/
+          if-no-files-found: error
+          retention-days: 1
+
+  # -- Install and verify ----------------------------------------------------------
+  # One leg per format per architecture, each on a runner of that architecture
+  # so the container runs the package natively. An arm64 leg is what notices a
+  # package labelled for the wrong architecture, which apt and dnf refuse.
+  install:
+    name: Install and verify (${{ matrix.format }}, ${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: deb
+            arch: amd64
+            runner: ubuntu-latest
+          - format: deb
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - format: rpm
+            arch: amd64
+            runner: ubuntu-latest
+          - format: rpm
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packages
+          path: dist
+      - name: Install and verify
+        env:
+          FORMAT: ${{ matrix.format }}
+          OPENVOX_CA_PKGTEST_ARCH: ${{ matrix.arch }}
+        run: test/packages/install-verify.sh "$FORMAT" dist

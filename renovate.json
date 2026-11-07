@@ -91,6 +91,17 @@
     },
     {
       "customType": "regex",
+      "description": "The Debian base image the deb install-and-verify legs build from, inlined in the harness",
+      "managerFilePatterns": [
+        "/^test/packages/install-verify\\.sh$/"
+      ],
+      "matchStrings": [
+        "FROM (?<depName>docker\\.io/library/debian):(?<currentValue>[a-z]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
       "description": "cosign, pinned as a cosign-installer input rather than a uses: ref",
       "managerFilePatterns": [
         "/^\\.github/workflows/.*\\.ya?ml$/",
