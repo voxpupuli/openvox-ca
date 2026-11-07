@@ -2331,6 +2331,71 @@ jobs:
 	})
 })
 
+var _ = Describe("verifyPackageLegsIn", func() {
+	It("finds the real packages.yml in step with the packaged variants", func() {
+		src, err := os.ReadFile(filepath.Join(".github", "workflows", "packages.yml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(verifyPackageLegsIn(src, packagedDistVariants(), packageFormats)).To(Succeed())
+	})
+
+	packaged := []distVariantSpec{
+		{name: "linux_amd64", env: map[string]string{"GOARCH": "amd64"}, packaged: true},
+		{name: "linux_arm64", env: map[string]string{"GOARCH": "arm64"}, packaged: true},
+	}
+	good := `
+jobs:
+  build:
+    steps:
+      - run: |
+          # mage build:distVariant linux_s390x is only prose
+          mage build:distVariant linux_amd64
+          mage build:distVariant linux_arm64
+  install:
+    strategy:
+      matrix:
+        include:
+          - {format: deb, arch: amd64}
+          - {format: deb, arch: arm64}
+          - {format: rpm, arch: amd64}
+          - {format: rpm, arch: arm64}
+`
+	mutate := func(src, old, replacement string) string {
+		GinkgoHelper()
+		Expect(strings.Count(src, old)).To(Equal(1), "mutation anchor %q must occur exactly once", old)
+		return strings.Replace(src, old, replacement, 1)
+	}
+
+	It("accepts the good fixture", func() {
+		Expect(verifyPackageLegsIn([]byte(good), packaged, []string{"deb", "rpm"})).To(Succeed())
+	})
+
+	// The case the check exists for: a newly packaged architecture whose build
+	// step was updated, because build:packages failed until it was, and whose
+	// install legs were not, because nothing failed.
+	It("rejects a packaged architecture with no install leg", func() {
+		three := append(append([]distVariantSpec{}, packaged...),
+			distVariantSpec{name: "linux_ppc64le", env: map[string]string{"GOARCH": "ppc64le"}, packaged: true})
+		src := mutate(good, "          mage build:distVariant linux_arm64\n",
+			"          mage build:distVariant linux_arm64\n          mage build:distVariant linux_ppc64le\n")
+		err := verifyPackageLegsIn([]byte(src), three, []string{"deb", "rpm"})
+		Expect(err).To(MatchError(ContainSubstring("has no deb/ppc64le leg")))
+		Expect(err).To(MatchError(ContainSubstring("has no rpm/ppc64le leg")))
+	})
+
+	It("rejects an install leg nothing packages", func() {
+		src := mutate(good, "          - {format: rpm, arch: arm64}\n",
+			"          - {format: rpm, arch: arm64}\n          - {format: rpm, arch: s390x}\n")
+		Expect(verifyPackageLegsIn([]byte(src), packaged, []string{"deb", "rpm"})).To(MatchError(
+			ContainSubstring("has a rpm/s390x leg, which no packaged variant")))
+	})
+
+	It("rejects a build step that builds a different set", func() {
+		src := mutate(good, "          mage build:distVariant linux_arm64\n", "")
+		Expect(verifyPackageLegsIn([]byte(src), packaged, []string{"deb", "rpm"})).To(MatchError(
+			ContainSubstring("build job builds variants [linux_amd64]")))
+	})
+})
+
 var _ = Describe("the packaged variant set", func() {
 	It("packages the two pure-Go variants and neither FIPS variant", func() {
 		var names []string

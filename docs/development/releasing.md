@@ -78,7 +78,8 @@ inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. What follows from that:
   cannot satisfy a guard by being written down.
 - **`packageFormats` in `magefile.go` is the list of formats, and
   `mage build:packages` builds from it.** `verifyDistVariants` holds
-  `release.yml`'s package counts and globs to that variable, and the packaging
+  `release.yml`'s package counts and globs, and `packages.yml`'s install legs,
+  to that variable, and the packaging
   code iterates the same variable rather than a list of its own — which is the
   drift the `packaged` field was made a field to avoid. `verifyDistVariants`
   cannot see the packaging code, though, so it is not what keeps the two
@@ -88,7 +89,8 @@ inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. What follows from that:
   installs into a controlled estate rather than from a repository, so
   `linux_amd64_fips` and `linux_arm64_fips` ship as tarballs only. This is
   recorded as `packaged` on `distVariantSpec` in `magefile.go`, and
-  `verifyDistVariants` holds `release.yml`'s package counts to it.
+  `verifyDistVariants` holds `release.yml`'s package counts, and
+  `packages.yml`'s build list and install legs, to it.
 
 The packaging job must export `SOURCE_DATE_EPOCH`. nfpm stamps every
 entry it generates from that variable, and `stageDocTree` stamps the

@@ -381,7 +381,9 @@ const sbomFormatsPerVariant = 2
 // incomplete release. The checked copies: ci.yml's dist job matrix,
 // release.yml's build job matrix, release.yml's checksum-step shell loop and
 // its tarball-, SBOM- and package-count literals, and the generate-sbom
-// action's output format count.
+// action's output format count. packages.yml's copies of the PACKAGED subset
+// -- its build step's variant list and its install matrix -- are held to
+// packagedDistVariants() by verifyPackageLegsIn, called from here.
 //
 // It also enforces two things that are not copies of a list, and they are
 // named here because a reader who stops at the paragraph above will not expect
@@ -410,7 +412,92 @@ func verifyDistVariants() error {
 	if err != nil {
 		return err
 	}
-	return verifyDistVariantsIn(ciSrc, relSrc, sbomSrc)
+	pkgSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "packages.yml"))
+	if err != nil {
+		return err
+	}
+	return errors.Join(verifyDistVariantsIn(ciSrc, relSrc, sbomSrc),
+		verifyPackageLegsIn(pkgSrc, packagedDistVariants(), packageFormats))
+}
+
+// distVariantBuildRE matches one `mage build:distVariant <name>` in a step's
+// shell.
+var distVariantBuildRE = regexp.MustCompile(`(?m)\bmage build:distVariant (\S+)`)
+
+// verifyPackageLegsIn holds packages.yml (#254) to the packaged variants: its
+// build job must build exactly their tarballs, which `mage build:packages`
+// needs all of, and its install job must have one leg per format per packaged
+// architecture. The second is the one that matters. A newly packaged
+// architecture breaks the build step loudly, and fixing that alone would leave
+// its packages built on every pull request and installed by none -- the gap the
+// legs exist to close, reopened without a failure anywhere.
+func verifyPackageLegsIn(src []byte, packaged []distVariantSpec, formats []string) error {
+	var errs []error
+
+	var wantVariants []string
+	wantLegs := map[string]bool{}
+	for _, v := range packaged {
+		wantVariants = append(wantVariants, v.name)
+		goarch, err := variantGOARCH(v)
+		if err != nil {
+			return err
+		}
+		for _, f := range formats {
+			wantLegs[f+"/"+goarch] = true
+		}
+	}
+	slices.Sort(wantVariants)
+
+	script, err := workflowRunScripts(src, "build")
+	if err != nil {
+		errs = append(errs, fmt.Errorf("packages.yml: %w", err))
+	} else {
+		var built []string
+		for _, m := range distVariantBuildRE.FindAllStringSubmatch(script, -1) {
+			built = append(built, m[1])
+		}
+		slices.Sort(built)
+		if !slices.Equal(built, wantVariants) {
+			errs = append(errs, fmt.Errorf("packages.yml's build job builds variants %v, but packagedDistVariants() "+
+				"in magefile.go is %v; update them together", built, wantVariants))
+		}
+	}
+
+	var doc struct {
+		Jobs map[string]struct {
+			Strategy struct {
+				Matrix struct {
+					Include []map[string]any `yaml:"include"`
+				} `yaml:"matrix"`
+			} `yaml:"strategy"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return errors.Join(append(errs, fmt.Errorf("packages.yml: %w", err))...)
+	}
+	install, ok := doc.Jobs["install"]
+	if !ok {
+		return errors.Join(append(errs, errors.New("packages.yml has no install job"))...)
+	}
+	gotLegs := map[string]bool{}
+	for _, inc := range install.Strategy.Matrix.Include {
+		f, _ := inc["format"].(string)
+		a, _ := inc["arch"].(string)
+		gotLegs[f+"/"+a] = true
+	}
+	for _, leg := range slices.Sorted(maps.Keys(wantLegs)) {
+		if !gotLegs[leg] {
+			errs = append(errs, fmt.Errorf("packages.yml's install job has no %s leg, so that package is built on "+
+				"every pull request and installed by none", leg))
+		}
+	}
+	for _, leg := range slices.Sorted(maps.Keys(gotLegs)) {
+		if !wantLegs[leg] {
+			errs = append(errs, fmt.Errorf("packages.yml's install job has a %s leg, which no packaged variant and "+
+				"format in magefile.go produces", leg))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // verifyDistVariantsIn is verifyDistVariants over caller-supplied workflow
