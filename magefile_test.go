@@ -2394,6 +2394,25 @@ jobs:
 		Expect(verifyPackageLegsIn([]byte(src), packaged, []string{"deb", "rpm"})).To(MatchError(
 			ContainSubstring("build job builds variants [linux_amd64]")))
 	})
+
+	// A renamed job is the likeliest real edit, and the guard must say so
+	// rather than find nothing to compare and pass.
+	It("reports an install job it cannot find", func() {
+		src := mutate(good, "  install:\n", "  verify:\n")
+		Expect(verifyPackageLegsIn([]byte(src), packaged, []string{"deb", "rpm"})).To(MatchError(
+			ContainSubstring("packages.yml has no install job")))
+	})
+
+	It("reports a build job it cannot find", func() {
+		src := mutate(good, "  build:\n", "  compile:\n")
+		Expect(verifyPackageLegsIn([]byte(src), packaged, []string{"deb", "rpm"})).To(MatchError(
+			ContainSubstring(`packages.yml: job "build" not found`)))
+	})
+
+	It("reports a file it cannot parse", func() {
+		Expect(verifyPackageLegsIn([]byte("jobs: [\n"), packaged, []string{"deb", "rpm"})).To(MatchError(
+			ContainSubstring("packages.yml: yaml:")))
+	})
 })
 
 var _ = Describe("the packaged variant set", func() {
@@ -10529,6 +10548,29 @@ jobs:
 			src := withCalled(callingCI, nested)
 			src["inner.yml"] = []byte("on:\n  workflow_call:\njobs:\n  leg:\n    continue-on-error: true\n    steps:\n      - run: \"true\"\n")
 			Expect(verifyAggregateJobsIn(src)).To(MatchError(ContainSubstring(`inner.yml job "leg" sets continue-on-error`)))
+		})
+
+		// Its source is not in this repository, so there is nothing to open:
+		// following it would report a workflow it could never have been given.
+		It("does not follow a call to another repository's workflow", func() {
+			remote := mutate(callingCI, "uses: ./.github/workflows/packages.yml",
+				"uses: octo-org/shared/.github/workflows/packages.yml@v1")
+			Expect(verifyAggregateJobsIn(sources(remote, goodImages))).To(Succeed())
+		})
+
+		// Without the seen set this recurses until the stack runs out, which
+		// takes `mage dev:check` down with it rather than failing a check.
+		It("terminates on workflows that call each other", func() {
+			looped := mutate(goodCalled, "  install:\n    needs: build\n    steps:\n      - run: \"true\"\n",
+				"  install:\n    needs: build\n    uses: ./.github/workflows/inner.yml\n")
+			src := withCalled(callingCI, looped)
+			src["inner.yml"] = []byte("on:\n  workflow_call:\njobs:\n  back:\n    uses: ./.github/workflows/packages.yml\n")
+			Expect(verifyAggregateJobsIn(src)).To(Succeed())
+		})
+
+		It("reports a called workflow it cannot parse", func() {
+			Expect(verifyAggregateJobsIn(withCalled(callingCI, "on: [\n"))).To(MatchError(ContainSubstring(
+				`packages.yml, called by ci.yml job "packages": yaml:`)))
 		})
 
 		It("reports a called workflow it was not given", func() {
