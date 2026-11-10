@@ -170,6 +170,9 @@ jobs:
             packaging/scripts/postinstall \
             packaging/scripts/preremove \
             packaging/scripts/postremove
+      - name: Run shellcheck over the package install-and-verify harness
+        # bash, not sh: these run on the CI runner, not as maintainer scripts.
+        run: shellcheck test/packages/install-verify.sh test/packages/build-upgrade.sh
 
   # -- Monitoring mixin --------------------------------------------------------
   # The mixin ships Prometheus alerting rules and no Go code, so nothing in the
