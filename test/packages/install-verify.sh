@@ -410,7 +410,7 @@ deb_scenarios() {
     start main ca.example.test
     # The official image forbids starting daemons; this scenario is the host
     # that does not. policy-rc scenario below keeps one.
-    in_c 'rm -f /usr/sbin/policy-rc.d'
+    check "no policy-rc.d forbids starts on this host" 'rm -f /usr/sbin/policy-rc.d'
 
     check "the image does not already carry ucf" '! dpkg -s ucf >/dev/null 2>&1'
     install_first
@@ -434,7 +434,7 @@ deb_scenarios() {
         'ucfq -w /etc/default/openvox-ca | grep -q "^/etc/default/openvox-ca:openvox-ca:"'
     remember_ca
 
-    in_c 'echo "# local edit (install-verify)" >>/etc/openvox-ca/config.yaml
+    check "config.yaml and /etc/default/openvox-ca carry a local edit" 'echo "# local edit (install-verify)" >>/etc/openvox-ca/config.yaml
           echo "# local edit (install-verify)" >>/etc/default/openvox-ca'
     remember_pid
     install_upgrade
@@ -489,7 +489,7 @@ deb_scenarios() {
     ca_unchanged "after adoption"
     serves ca.example.test
 
-    in_c 'echo "openvox-ca openvox-ca/purge_ca_data boolean true" | debconf-set-selections'
+    check "purge_ca_data is preseeded true" 'echo "openvox-ca openvox-ca/purge_ca_data boolean true" | debconf-set-selections'
     purge_pkg
     judge "apt purge with purge_ca_data preseeded true succeeds"
     check "it removes the CA directory and provisioning's links" \
@@ -498,7 +498,7 @@ deb_scenarios() {
     check "and leaves the rest of the ssl tree" \
         "test -f $SSL/certs/ca.example.test.pem && test -f $SSL/private_keys/ca.example.test.pem"
 
-    in_c 'echo "openvox-ca openvox-ca/ca-name string named.example.test" | debconf-set-selections'
+    check "openvox-ca/ca-name is preseeded as named.example.test" 'echo "openvox-ca openvox-ca/ca-name string named.example.test" | debconf-set-selections'
     install_first
     judge "a preseeded install succeeds"
     unit_state enabled active
@@ -516,7 +516,7 @@ deb_scenarios() {
     # usable: the install succeeds and starts nothing, and the start that
     # follows provisions under the localhost fallback.
     start policy-rc localhost
-    in_c 'printf "#!/bin/sh\nexit 101\n" >/usr/sbin/policy-rc.d && chmod 0755 /usr/sbin/policy-rc.d'
+    check "a policy-rc.d that forbids starts is in place" 'printf "#!/bin/sh\nexit 101\n" >/usr/sbin/policy-rc.d && chmod 0755 /usr/sbin/policy-rc.d'
     install_first
     judge "an install under a policy-rc.d that forbids starts succeeds"
     unit_state enabled inactive
@@ -527,10 +527,10 @@ deb_scenarios() {
 
     # A CA placed before install is adopted, not overwritten.
     start takeover ca.example.test
-    in_c 'rm -f /usr/sbin/policy-rc.d'
+    check "no policy-rc.d forbids starts on this host" 'rm -f /usr/sbin/policy-rc.d'
     place_ca "$SSL/ca"
     remember_ca
-    in_c "cp $SSL/ca/ca_crt.pem /root/placed-ca.pem"
+    check "the placed CA certificate is kept to verify against" "cp $SSL/ca/ca_crt.pem /root/placed-ca.pem"
     install_first
     judge "installing onto a pre-placed CA succeeds"
     said "and does not start, naming the CA it found" "$SSL/ca already holds a CA"
@@ -547,7 +547,7 @@ deb_scenarios() {
     # purge removes the adopted CA so it cannot be the trigger; the second
     # is the default one, and keeps only the empty CA directory the
     # unstarted install left.
-    in_c 'echo "openvox-ca openvox-ca/purge_ca_data boolean true" | debconf-set-selections'
+    check "purge_ca_data is preseeded true" 'echo "openvox-ca openvox-ca/purge_ca_data boolean true" | debconf-set-selections'
     purge_pkg
     judge "apt purge with purge_ca_data preseeded true succeeds"
     place_ca /etc/puppetlabs/puppetserver/ca
@@ -559,7 +559,7 @@ deb_scenarios() {
         'test "$(systemctl is-enabled openvox-ca.service)" != enabled && ! systemctl is-active --quiet openvox-ca.service'
     purge_pkg
     judge "apt purge with the question at its default succeeds"
-    in_c 'rm -rf /etc/puppetlabs/puppetserver &&
+    check "OpenVox Server's CA directory is gone and a puppetserver.service unit is installed" 'rm -rf /etc/puppetlabs/puppetserver &&
           printf "[Service]\nExecStart=/bin/true\n" >/etc/systemd/system/puppetserver.service'
     install_first
     judge "installing where puppetserver.service is installed succeeds"
@@ -610,7 +610,7 @@ rpm_scenarios() {
     # re-minting under a corrected name does, which is the run first-boot
     # leaves its marker on -- so only record-environment's own record stands
     # between it and a rewrite. The service then starts without the file.
-    in_c 'sha256sum /etc/sysconfig/openvox-ca >/root/sysconfig.sha256'
+    check "the environment file's digest is recorded" 'sha256sum /etc/sysconfig/openvox-ca >/root/sysconfig.sha256'
     check "restarting an already-provisioned host leaves it unchanged" \
         'systemctl restart openvox-ca-first-boot.service openvox-ca.service && sha256sum -c --quiet /root/sysconfig.sha256'
     check "deleted, a run that relinks the serving credential does not write it again" \
@@ -620,7 +620,7 @@ rpm_scenarios() {
     unit_state enabled active
     serves ca.example.test
 
-    in_c 'echo "# local edit (install-verify)" >>/etc/openvox-ca/config.yaml'
+    check "config.yaml carries a local edit" 'echo "# local edit (install-verify)" >>/etc/openvox-ca/config.yaml'
     remember_pid
     install_upgrade
     judge "an upgrade succeeds"
@@ -655,7 +655,7 @@ rpm_scenarios() {
     start takeover ca.example.test
     place_ca "$SSL/ca"
     remember_ca
-    in_c "cp $SSL/ca/ca_crt.pem /root/placed-ca.pem"
+    check "the placed CA certificate is kept to verify against" "cp $SSL/ca/ca_crt.pem /root/placed-ca.pem"
     install_first
     judge "installing onto a pre-placed CA succeeds"
     unit_state disabled inactive
