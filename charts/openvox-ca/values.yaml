@@ -717,8 +717,9 @@ service:
 # HAProxy form; nginx uses nginx.ingress.kubernetes.io/ssl-passthrough.
 #
 # If you deliberately terminate TLS at the ingress, set
-# config.no_tls_required: true and understand that mTLS-authenticated
-# endpoints are then unreachable.
+# config.no_tls_required: true and understand that the pod then serves plain
+# HTTP with no client authentication: the admin API answers anything that
+# reaches the pod's port, so restrict it with networkPolicy below.
 ingress:
   enabled: false
   className: ""
