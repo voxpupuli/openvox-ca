@@ -157,6 +157,22 @@
     // wedged export job sit unreported for hours.
     k8sExportNotRunningFor: '30m',
 
+    // How long a file export target may go without a successful sync before
+    // OpenVoxCAFileExportStale considers it stale, in seconds. The CA syncs
+    // every file_export.interval_sec (60s by default, 300s at most) and a
+    // success is stamped whether or not the file needed rewriting, so this
+    // only has to outlast a couple of attempts at the longest interval the CA
+    // accepts. Keep it above twice that ceiling.
+    fileExportStaleAfterSeconds: 600,
+
+    // Dwell on top of that. Short, because the threshold above already
+    // tolerates several failed attempts; together they page fifteen minutes
+    // after the last confirmed-current sync, and five minutes into a CA whose
+    // targets have never synced at all. A CRL copy has days of validity left
+    // when this fires on the default crl_validity_days, which is the headroom
+    // the alert exists to spend.
+    fileExportStaleFor: '5m',
+
     // A configured managed certificate that has never been issued at all. The
     // reconcile loop runs once at startup and then every
     // managed_cert_interval_sec (15 minutes by default), so this only has to

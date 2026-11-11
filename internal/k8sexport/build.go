@@ -18,9 +18,8 @@
 package k8sexport
 
 import (
-	"encoding/pem"
-
 	"github.com/voxpupuli/openvox-ca/internal/k8sclient"
+	"github.com/voxpupuli/openvox-ca/internal/k8sexport/exportconfig"
 	corev1 "k8s.io/api/core/v1"
 	accorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 )
@@ -36,52 +35,6 @@ func labelsFor(t *Target) map[string]string {
 	return k8sclient.WithManagedByLabel(t.Metadata.Labels)
 }
 
-// pemBlocks splits a PEM blob into its individual blocks of the given type,
-// each still PEM-encoded.
-//
-// Block boundaries are all the scoping needs, so this deliberately does not
-// parse certificates or CRLs: the exporter republishes what the CA already
-// validated on the way in, and re-deriving trust decisions here would be a
-// second, weaker copy of them.
-func pemBlocks(data []byte, blockType string) [][]byte {
-	var out [][]byte
-	rest := data
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			return out
-		}
-		if block.Type != blockType {
-			continue
-		}
-		out = append(out, pem.EncodeToMemory(block))
-	}
-}
-
-// scoped selects the part of a PEM chain a scope asks for. An unrecognised
-// scope cannot occur after Validate; an empty chain passes through untouched so
-// the caller's own empty-material guard reports it.
-func scoped(chain []byte, blockType, scope string) []byte {
-	// An unset scope means the same thing here as it does in validate(): the
-	// whole chain. Validation is what normally fills it in, so this only
-	// matters for a Target assembled in code rather than loaded from
-	// configuration -- but the two must not disagree about the default, or a
-	// missed Validate() call would silently narrow what a target publishes,
-	// which is the failure this feature's default was chosen to avoid.
-	if scope == ScopeChain || scope == "" {
-		return chain
-	}
-	blocks := pemBlocks(chain, blockType)
-	if len(blocks) == 0 {
-		return chain
-	}
-	if scope == ScopeRoot {
-		return blocks[len(blocks)-1]
-	}
-	return blocks[0]
-}
-
 // secretDataFor returns the Secret data entries for a target given the current
 // cert and CRL PEM. Only the materials the target requested are included, so a
 // cert-only target never carries the CRL and vice versa. Secret data is applied
@@ -92,10 +45,10 @@ func scoped(chain []byte, blockType, scope string) []byte {
 func secretDataFor(t *Target, certPEM, crlPEM []byte) map[string][]byte {
 	data := make(map[string][]byte, 2)
 	if t.Cert {
-		data[t.CertKey] = scoped(certPEM, "CERTIFICATE", t.CertScope)
+		data[t.CertKey] = exportconfig.Scoped(certPEM, "CERTIFICATE", t.CertScope)
 	}
 	if t.CRL {
-		data[t.CRLKey] = scoped(crlPEM, "X509 CRL", t.CRLScope)
+		data[t.CRLKey] = exportconfig.Scoped(crlPEM, "X509 CRL", t.CRLScope)
 	}
 	return data
 }
@@ -105,10 +58,10 @@ func secretDataFor(t *Target, certPEM, crlPEM []byte) map[string][]byte {
 func configMapDataFor(t *Target, certPEM, crlPEM []byte) map[string]string {
 	data := make(map[string]string, 2)
 	if t.Cert {
-		data[t.CertKey] = string(scoped(certPEM, "CERTIFICATE", t.CertScope))
+		data[t.CertKey] = string(exportconfig.Scoped(certPEM, "CERTIFICATE", t.CertScope))
 	}
 	if t.CRL {
-		data[t.CRLKey] = string(scoped(crlPEM, "X509 CRL", t.CRLScope))
+		data[t.CRLKey] = string(exportconfig.Scoped(crlPEM, "X509 CRL", t.CRLScope))
 	}
 	return data
 }

@@ -20,6 +20,8 @@ package k8sexport
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/voxpupuli/openvox-ca/internal/k8sexport/exportconfig"
 )
 
 var _ = Describe("needsDefaultNamespace", func() {
@@ -40,23 +42,23 @@ var _ = Describe("needsDefaultNamespace", func() {
 	})
 })
 
-// pemBlocks filters by block type, and it decides what a *narrowed* target
-// publishes: scoped() returns the blob untouched under the default chain scope,
-// so this is reached only for self and root. On those, dropping the filter would
+// PEMBlocks filters by block type, and it decides what a *narrowed* target
+// publishes: Scoped returns the blob untouched under the default chain scope, so
+// this is reached only for self and root. On those, dropping the filter would
 // make "block 0" mean whatever came first in the blob rather than the first
 // certificate. Nothing drove the mismatch branch: every fixture elsewhere holds
 // one block type.
-var _ = Describe("pemBlocks", func() {
+var _ = Describe("PEMBlocks", func() {
 	const mixed = "-----BEGIN CERTIFICATE-----\nQ0VSVA==\n-----END CERTIFICATE-----\n" +
 		"-----BEGIN X509 CRL-----\nQ1JM\n-----END X509 CRL-----\n" +
 		"-----BEGIN RSA PRIVATE KEY-----\nS0VZ\n-----END RSA PRIVATE KEY-----\n"
 
 	It("keeps only the blocks of the type asked for", func() {
-		certs := pemBlocks([]byte(mixed), "CERTIFICATE")
+		certs := exportconfig.PEMBlocks([]byte(mixed), "CERTIFICATE")
 		Expect(certs).To(HaveLen(1))
 		Expect(string(certs[0])).To(ContainSubstring("Q0VSVA=="))
 
-		crls := pemBlocks([]byte(mixed), "X509 CRL")
+		crls := exportconfig.PEMBlocks([]byte(mixed), "X509 CRL")
 		Expect(crls).To(HaveLen(1))
 		Expect(string(crls[0])).To(ContainSubstring("Q1JM"))
 	})
@@ -65,7 +67,7 @@ var _ = Describe("pemBlocks", func() {
 		// What this returns is written into a Secret or ConfigMap by a narrowed
 		// target, so a key surviving the filter would be published there.
 		for _, t := range []string{"CERTIFICATE", "X509 CRL"} {
-			blocks := pemBlocks([]byte(mixed), t)
+			blocks := exportconfig.PEMBlocks([]byte(mixed), t)
 			Expect(blocks).NotTo(BeEmpty(), "an empty result would pass the loop below vacuously")
 			for _, b := range blocks {
 				Expect(string(b)).NotTo(ContainSubstring("PRIVATE KEY"))
@@ -74,11 +76,11 @@ var _ = Describe("pemBlocks", func() {
 	})
 
 	It("returns nothing when no block matches", func() {
-		Expect(pemBlocks([]byte(mixed), "CERTIFICATE REQUEST")).To(BeEmpty())
+		Expect(exportconfig.PEMBlocks([]byte(mixed), "CERTIFICATE REQUEST")).To(BeEmpty())
 	})
 })
 
-// scoped()'s zero-block fallback. It is the one branch that decides what a
+// Scoped's zero-block fallback. It is the one branch that decides what a
 // target publishes when the *material* is not what the scope assumed -- a CRL
 // blob asked for a certificate scope, or a blob that decodes to nothing at all.
 //
@@ -89,12 +91,12 @@ var _ = Describe("pemBlocks", func() {
 // asks for, so the branch was reachable only through material this suite never
 // built, and inverting it -- returning nil, or blocks[0] on an empty slice --
 // would have gone unnoticed or panicked in production rather than in a spec.
-var _ = Describe("scoped's fallback when nothing matches the block type", func() {
+var _ = Describe("Scoped's fallback when nothing matches the block type", func() {
 	const crlOnly = "-----BEGIN X509 CRL-----\nQ1JM\n-----END X509 CRL-----\n"
 
 	It("publishes the blob untouched rather than narrowing to nothing", func() {
 		for _, scope := range []string{ScopeSelf, ScopeRoot} {
-			out := scoped([]byte(crlOnly), "CERTIFICATE", scope)
+			out := exportconfig.Scoped([]byte(crlOnly), "CERTIFICATE", scope)
 			Expect(string(out)).To(Equal(crlOnly),
 				"scope %q must fall back to the whole blob when no CERTIFICATE block matches", scope)
 		}
@@ -105,7 +107,7 @@ var _ = Describe("scoped's fallback when nothing matches the block type", func()
 		// must not be an index into an empty slice.
 		garbage := []byte("not pem at all\n")
 		for _, scope := range []string{ScopeSelf, ScopeRoot} {
-			Expect(string(scoped(garbage, "CERTIFICATE", scope))).To(Equal(string(garbage)))
+			Expect(string(exportconfig.Scoped(garbage, "CERTIFICATE", scope))).To(Equal(string(garbage)))
 		}
 	})
 })
