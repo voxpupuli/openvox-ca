@@ -361,7 +361,7 @@ The subject condition cannot be reached from HTTP at all, because the handler de
 | --- | --- | --- |
 | `POST` | `/renew/{subject}` | Renew the certificate stored for `{subject}`; body: raw CSR PEM, or empty; returns the new certificate PEM. Admin only. openvox-ca's own route: OpenVox Server has no equivalent |
 
-For a certificate whose holder runs no agent to renew it — a CA-only host, or a component certificate minted with `POST /generate/{subject}` — this renews it on the caller's authority rather than its own.
+For a certificate whose holder runs no agent to renew it — a CA-only host, or a component certificate minted with `POST /generate/{subject}` — this renews it on the caller's authority rather than its own. [`openvox-ca-ctl renew`](operator-cli.md#subcommands) drives it.
 
 It behaves as [`POST /certificate_renewal`](#certificate-renewal) would if the stored certificate had presented itself:
 

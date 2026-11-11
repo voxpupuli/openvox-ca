@@ -203,6 +203,44 @@ func generateKey(cfg KeyConfig) (crypto.Signer, error) {
 	}
 }
 
+// NewKeyLike generates a private key of the same algorithm as pub, for a
+// client re-keying a certificate (openvox-ca-ctl renew). An RSA key gets the
+// smallest size this CA generates that is at least its own -- so one below the
+// 2048-bit floor comes back at 2048, and one above 4096 at 4096; an ECDSA key
+// keeps its curve. Any other key is refused with ErrKeyPolicy, as
+// validatePublicKey would refuse it. The key is returned with its PEM encoding,
+// in the form the CA writes its own.
+func NewKeyLike(pub crypto.PublicKey) (crypto.Signer, []byte, error) {
+	var cfg KeyConfig
+	switch k := pub.(type) {
+	case *rsa.PublicKey:
+		size := 4096
+		for _, s := range []int{2048, 3072} {
+			if k.N.BitLen() <= s {
+				size = s
+				break
+			}
+		}
+		cfg = KeyConfig{Algo: KeyAlgoRSA, Size: size}
+	case *ecdsa.PublicKey:
+		if err := validatePublicKey(k); err != nil {
+			return nil, nil, err
+		}
+		cfg = KeyConfig{Algo: KeyAlgoECDSA, Size: k.Curve.Params().BitSize}
+	default:
+		return nil, nil, validatePublicKey(pub)
+	}
+	key, err := generateKey(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyPEM, err := marshalPrivateKeyPEM(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	return key, keyPEM, nil
+}
+
 // marshalPrivateKeyPEM returns the PEM encoding of a private key.
 // RSA keys use PKCS1 format ("RSA PRIVATE KEY").
 // ECDSA keys use SEC 1 format ("EC PRIVATE KEY").
