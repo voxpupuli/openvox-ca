@@ -203,8 +203,9 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > `DELETE /certificate_status` (`puppet cert clean`) and the best-effort
 > revocation of a superseded certificate on renewal, which on a busy fleet is
 > the likeliest source of a rising count: grep for `Renew:` /
-> `AutoRenew:` / `ReconcileManaged: failed to retire replaced certificate`
-> alongside the `Clean:` warnings. All three *renewal* warnings name the serial,
+> `AutoRenew:` / `RenewStored:` / `ReconcileManaged: failed to retire replaced
+> certificate` alongside the `Clean:` warnings. All four *renewal* warnings name
+> the serial,
 > and the certificate they left valid is one revoking by subject cannot reach:
 > the replacement is what makes it a renewal, so `revoke --certname` would
 > retire that instead. That is
@@ -228,8 +229,9 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > itself rather than through the helper (a failure there is not the file's
 > fault, so it does not touch `openvoxca_crl_chain_refresh_failures_total`). The
 > revoke step inside `Clean` and `GenerateWithOptions`, the retire step inside
-> `Renew`, `AutoRenew` and `ReconcileManaged` — whether it revokes inline or
-> defers to the superseded sweep — the sweep itself (`ReconcileSuperseded`),
+> `Renew`, `AutoRenew`, `RenewStored` and `ReconcileManaged` — whether it
+> revokes inline or defers to the superseded sweep — the sweep itself
+> (`ReconcileSuperseded`),
 > `ReconcileManaged`'s immediate revoke of a certificate whose store write
 > failed after signing, and `ImportCA`, are not counted on that arm at all.
 >
