@@ -54,11 +54,10 @@ type (
 	Target = fileexportconfig.Target
 )
 
-// Re-exported from fileexportconfig; see there.
+// Re-exported from fileexportconfig; see there. Only the names this package and
+// its callers use: the other scopes are fileexportconfig's to name.
 const (
 	MaterialCert = fileexportconfig.MaterialCert
 	MaterialCRL  = fileexportconfig.MaterialCRL
-	ScopeSelf    = fileexportconfig.ScopeSelf
 	ScopeChain   = fileexportconfig.ScopeChain
-	ScopeRoot    = fileexportconfig.ScopeRoot
 )

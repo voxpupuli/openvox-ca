@@ -50,13 +50,21 @@ const (
 
 // stubSource is a MaterialSource returning fixed PEM bytes.
 type stubSource struct {
-	cert, crl []byte
-	certErr   error
-	crlErr    error
+	cert, crl           []byte
+	certErr             error
+	crlErr              error
+	certCalls, crlCalls int
 }
 
-func (s *stubSource) GetCACert(context.Context) ([]byte, error) { return s.cert, s.certErr }
-func (s *stubSource) GetCRL(context.Context) ([]byte, error)    { return s.crl, s.crlErr }
+func (s *stubSource) GetCACert(context.Context) ([]byte, error) {
+	s.certCalls++
+	return s.cert, s.certErr
+}
+
+func (s *stubSource) GetCRL(context.Context) ([]byte, error) {
+	s.crlCalls++
+	return s.crl, s.crlErr
+}
 
 // metricValue gathers reg and returns the value of the counter or gauge series
 // matching name and labels, or false when no such series exists.
@@ -316,9 +324,11 @@ var _ = Describe("Exporter", func() {
 			DeferCleanup(os.Chmod, dir, fs.FileMode(0o755))
 			src.crl = []byte(upstreamCRL + ownCRL)
 
-			Expect(exp.SyncAll(ctx)).To(HaveOccurred())
+			Expect(exp.SyncAll(ctx)).To(MatchError(ContainSubstring(crlPath)))
 			Expect(readFile(crlPath)).To(Equal(crlChain))
 			Expect(syncs(crlPath, "error")).To(Equal(1.0))
+			Expect(syncs(crlPath, "success")).To(Equal(1.0),
+				"a rewrite that failed must not count as a success after the first one")
 		})
 
 		// The two ways a target can fail to be inspected. Each decides what
@@ -463,6 +473,18 @@ var _ = Describe("Exporter", func() {
 			Expect(info.Mode().IsRegular()).To(BeTrue())
 			Expect(readFile(crlPath)).To(Equal(crlChain))
 			Expect(filepath.Join(dir, "old-cadir")).NotTo(BeAnExistingFile())
+		})
+	})
+
+	Describe("reading storage", func() {
+		It("reads each material at most once a cycle, and only if a target wants it", func() {
+			exp := newExporter(
+				fileexport.Target{Path: crlPath, Material: "crl"},
+				fileexport.Target{Path: filepath.Join(dir, "crl-self.pem"), Material: "crl", Scope: "self"},
+			)
+			Expect(exp.SyncAll(ctx)).To(Succeed())
+			Expect(src.crlCalls).To(Equal(1), "two CRL targets share one read")
+			Expect(src.certCalls).To(Equal(0), "no target asked for the certificate")
 		})
 	})
 
