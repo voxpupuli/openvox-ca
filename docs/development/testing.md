@@ -332,6 +332,40 @@ bash -c 'set -uo pipefail; FIXTURE_MISSING_LOG=/proc/x; . test/fixture-commands.
     require_fixture_commands'
 ```
 
+## Package install-and-verify legs
+
+CI's *Packages* legs (`.github/workflows/packages.yml`, which "CI success"
+needs) build the deb and rpm as the release does and install each into a
+container booted with systemd as PID 1: `debian:trixie` for the deb and
+CentOS Stream 10 for the rpm, each on an amd64 and an arm64 runner. They judge
+the packages from the installed state. The CA must answer TLS verified through
+the `certs/ca.pem` the package linked, a CA placed before install must come
+through byte-identical, and each format's lifecycle (takeover, upgrade,
+remove, purge, the environment file) must behave as
+[docs/systemd.md](../systemd.md#installing-from-a-package) describes.
+`test/packages/install-verify.sh` holds every assertion and says why each one
+is there.
+
+To reproduce a failed leg locally, with Docker able to run `--privileged`
+containers (Docker Desktop can) and a `timeout` command on the `PATH` (older
+macOS releases lack one; Homebrew's coreutils provides it, and the harness
+also finds it as `gtimeout`):
+
+```console
+$ mage build:distVariant linux_amd64
+$ mage build:distVariant linux_arm64
+$ mage build:packages
+$ test/packages/build-upgrade.sh dist/upgrade
+$ test/packages/install-verify.sh deb dist   # or rpm
+```
+
+It installs the package for the Docker engine's own architecture.
+`build-upgrade.sh` builds the newer packages the upgrade cases install, from
+`HEAD` in a temporary worktree, so commit packaging changes before running it.
+The output is TAP. A scenario with a failure prints the journal of both units
+before its container is removed, and a container whose systemd never boots
+prints its own log.
+
 ## Diagnosing a failed compose suite
 
 When `test:puppet`, `test:puppetFIPS` or `test:backendsRedis` fails, the

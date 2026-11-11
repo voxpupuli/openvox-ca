@@ -159,16 +159,15 @@ jobs:
         # the wrong path, a missing unit, the wrong mode -- passes the count
         # gate, is checksummed, is attested and is published.
         #
-        # The reason for not closing it here has changed, so it is restated
-        # rather than left reading as though it had not. It used to be that a
-        # payload check would assert an install layout that did not exist; the
-        # payload is now on the base, so such a check is writable. What remains
-        # is that it belongs with the install-and-verify legs in #254, which
-        # exercise a package by installing it rather than by inspecting a
-        # tarball-shaped view of it, and that doing it here would duplicate
-        # them. Until #254 lands, the rehearsal checklist in
-        # docs/development/releasing.md asks a maintainer to open one by hand,
-        # which is a worse guarantee honestly labelled.
+        # What covers the packaging instead is the install-and-verify legs
+        # from #254 (packages.yml, called from ci.yml under "CI success"). They
+        # build packages with this same target from the same commit and install
+        # each into a container booted with systemd, on every pull request and
+        # every push to main, and the release-tag gate requires that push's CI
+        # success. So the packaging is verified; THESE bytes are not. Running
+        # the legs here as well was left out of #254 deliberately, so the
+        # rehearsal checklist in docs/development/releasing.md still has a
+        # maintainer open one of the published packages by hand.
         run: mage build:packages
       - name: Upload packages
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

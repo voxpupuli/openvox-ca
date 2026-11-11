@@ -78,7 +78,8 @@ inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. What follows from that:
   cannot satisfy a guard by being written down.
 - **`packageFormats` in `magefile.go` is the list of formats, and
   `mage build:packages` builds from it.** `verifyDistVariants` holds
-  `release.yml`'s package counts and globs to that variable, and the packaging
+  `release.yml`'s package counts and globs, and `packages.yml`'s install legs,
+  to that variable, and the packaging
   code iterates the same variable rather than a list of its own — which is the
   drift the `packaged` field was made a field to avoid. `verifyDistVariants`
   cannot see the packaging code, though, so it is not what keeps the two
@@ -88,7 +89,8 @@ inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. What follows from that:
   installs into a controlled estate rather than from a repository, so
   `linux_amd64_fips` and `linux_arm64_fips` ship as tarballs only. This is
   recorded as `packaged` on `distVariantSpec` in `magefile.go`, and
-  `verifyDistVariants` holds `release.yml`'s package counts to it.
+  `verifyDistVariants` holds `release.yml`'s package counts, and
+  `packages.yml`'s build list and install legs, to it.
 
 The packaging job must export `SOURCE_DATE_EPOCH`. nfpm stamps every
 entry it generates from that variable, and `stageDocTree` stamps the
@@ -129,11 +131,10 @@ never name an image that does not exist.
 > of `main` and passed its own PR runs: `main` never built that tree.
 > Tagging an unprepared, unmerged, or red commit fails the gate instead of
 > publishing. (The artefact builds themselves are also exercised on every PR
-> by CI's per-variant *Release artefact build* jobs, and the chart by its
-> *Helm chart* job. **The packaging step is the exception**: nothing runs
-> `mage build:packages` on a pull request, so a green CI run says nothing
-> about it, and a packaging defect would first appear on a tag. Adding that
-> leg is [#254](https://github.com/voxpupuli/openvox-ca/issues/254).)
+> by CI's per-variant *Release artefact build* jobs, the packages by its
+> *Packages* legs, which build them with `mage build:packages` and install
+> each into a container booted with systemd, and the chart by its *Helm
+> chart* job.)
 
 ## Before you tag
 
@@ -476,12 +477,13 @@ Worth checking specifically:
   $ ls -1 *.deb *.rpm
   ```
 
-- **Open one package of each format.** Nothing in the pipeline does: the
-  tarballs are unpacked and executed by `verify-dist-artifact` before they are
-  attested, and the packages have no counterpart, so a well-formed package
-  with the wrong contents would be checksummed, attested and published. Until
-  [#254](https://github.com/voxpupuli/openvox-ca/issues/254) adds
-  install-and-verify legs, this is the only place anyone looks inside one:
+- **Open one package of each format.** CI's *Packages* legs install packages
+  built by `mage build:packages` from the same commit and judge them from the
+  installed state, on every pull request and every push to `main` — but not
+  these. The release workflow builds its packages again and publishes them
+  without installing them, and unlike the tarballs, which `verify-dist-artifact`
+  unpacks and executes, they have no check of their own. So this is the only
+  look anyone takes inside the bytes that are published:
 
   ```console
   $ dpkg-deb -c openvox-ca_*_amd64.deb
@@ -664,4 +666,4 @@ cache today.)
 | --- | --- |
 | **`helm verify` has nothing to check.** | The chart is signed with cosign and carries SLSA provenance like everything else, but it is packaged without `helm package --sign`, so there is no `.prov` file for `helm push` to upload. Helm's own provenance mechanism is PGP: it wants a long-lived keyring, which is the thing Sigstore's short-lived certificates exist to avoid. Anyone whose tooling asserts specifically on `helm verify`, rather than on a cosign signature, is not served. |
 | **No package manager checks a signature on either format.** | The same gap in a second ecosystem, and it covers both packages rather than only the `.rpm`. The `.rpm` carries no rpm header signature, so a `gpgcheck=1` repository rejects it. The `.deb` is unverified too, for a different reason: `apt` checks a repository's `InRelease` index, and a release asset is not served from a repository — `apt install ./file.deb` and `dpkg -i` check nothing. Both carry the Sigstore bundle over `checksums.txt`, which neither tool can read, so that bundle is the only provenance check a downloader has. Signing rpm headers is [#256](https://github.com/voxpupuli/openvox-ca/issues/256). Nothing tracks a signed apt repository; [#257](https://github.com/voxpupuli/openvox-ca/issues/257) publishes the packages to a bucket but does not sign an index. See [verifying a release](#verifying-a-release). |
-| **Nothing verifies what is inside a package.** | Tarballs are unpacked and their binaries executed by `verify-dist-artifact` before they are attested. The packages have no counterpart, so a well-formed package with the wrong contents is checksummed, attested and published, and the first person to find out runs `apt install`. The install-and-verify legs that close it are [#254](https://github.com/voxpupuli/openvox-ca/issues/254); until then the [rehearsal checklist](#rehearsing-on-your-own-fork) asks a maintainer to open one by hand. |
+| **Nothing installs the packages a release publishes.** | Tarballs are unpacked and their binaries executed by `verify-dist-artifact` before they are attested. The release's packages have no counterpart: they are built again from the tag and checksummed, attested and published without being installed. CI's *Packages* legs install packages built by the same `mage build:packages` from the same commit, on every pull request and on the push to `main` whose *CI success* the tag gate requires, so a packaging defect fails there before a tag. What they cannot see is the published bytes themselves, which is why the [rehearsal checklist](#rehearsing-on-your-own-fork) still asks a maintainer to open one by hand. Running the legs in the release workflow was left out of [#254](https://github.com/voxpupuli/openvox-ca/issues/254) deliberately. |

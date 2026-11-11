@@ -243,6 +243,9 @@ jobs:
             packaging/scripts/postinstall \
             packaging/scripts/preremove \
             packaging/scripts/postremove
+      - name: Run shellcheck over the package install-and-verify harness
+        # bash, not sh: these run on the CI runner, not as maintainer scripts.
+        run: shellcheck test/packages/install-verify.sh test/packages/build-upgrade.sh
 
   # -- Monitoring mixin --------------------------------------------------------
   # The mixin ships Prometheus alerting rules and no Go code, so nothing in the
@@ -490,6 +493,14 @@ jobs:
         with:
           variant: ${{ matrix.variant }}
 
+  # -- Package install-and-verify ------------------------------------------------
+  # Builds the deb and rpm and installs each into a systemd container per
+  # architecture (#254). A reusable workflow so its legs live in their own
+  # file; called here so "CI success" gates them. See packages.yml.
+  packages:
+    name: Packages
+    uses: ./.github/workflows/packages.yml
+
   # -- Puppet stack integration tests ------------------------------------------
   # Runs the full OpenVox 8 stack: Go CA (TLS) → OpenVox Server (WEBrick) →
   # OpenVoxDB.  Requires docker compose and network access to pull base images
@@ -729,6 +740,7 @@ jobs:
       - chart
       - unit
       - dist
+      - packages
       - puppet
       - migration
       - backends-redis

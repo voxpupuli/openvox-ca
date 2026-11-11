@@ -381,7 +381,9 @@ const sbomFormatsPerVariant = 2
 // incomplete release. The checked copies: ci.yml's dist job matrix,
 // release.yml's build job matrix, release.yml's checksum-step shell loop and
 // its tarball-, SBOM- and package-count literals, and the generate-sbom
-// action's output format count.
+// action's output format count. packages.yml's copies of the PACKAGED subset
+// -- its build step's variant list and its install matrix -- are held to
+// packagedDistVariants() by verifyPackageLegsIn, called from here.
 //
 // It also enforces two things that are not copies of a list, and they are
 // named here because a reader who stops at the paragraph above will not expect
@@ -410,7 +412,92 @@ func verifyDistVariants() error {
 	if err != nil {
 		return err
 	}
-	return verifyDistVariantsIn(ciSrc, relSrc, sbomSrc)
+	pkgSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "packages.yml"))
+	if err != nil {
+		return err
+	}
+	return errors.Join(verifyDistVariantsIn(ciSrc, relSrc, sbomSrc),
+		verifyPackageLegsIn(pkgSrc, packagedDistVariants(), packageFormats))
+}
+
+// distVariantBuildRE matches one `mage build:distVariant <name>` in a step's
+// shell.
+var distVariantBuildRE = regexp.MustCompile(`(?m)\bmage build:distVariant (\S+)`)
+
+// verifyPackageLegsIn holds packages.yml (#254) to the packaged variants: its
+// build job must build exactly their tarballs, which `mage build:packages`
+// needs all of, and its install job must have one leg per format per packaged
+// architecture. The second is the one that matters. A newly packaged
+// architecture breaks the build step loudly, and fixing that alone would leave
+// its packages built on every pull request and installed by none -- the gap the
+// legs exist to close, reopened without a failure anywhere.
+func verifyPackageLegsIn(src []byte, packaged []distVariantSpec, formats []string) error {
+	var errs []error
+
+	var wantVariants []string
+	wantLegs := map[string]bool{}
+	for _, v := range packaged {
+		wantVariants = append(wantVariants, v.name)
+		goarch, err := variantGOARCH(v)
+		if err != nil {
+			return err
+		}
+		for _, f := range formats {
+			wantLegs[f+"/"+goarch] = true
+		}
+	}
+	slices.Sort(wantVariants)
+
+	script, err := workflowRunScripts(src, "build")
+	if err != nil {
+		errs = append(errs, fmt.Errorf("packages.yml: %w", err))
+	} else {
+		var built []string
+		for _, m := range distVariantBuildRE.FindAllStringSubmatch(script, -1) {
+			built = append(built, m[1])
+		}
+		slices.Sort(built)
+		if !slices.Equal(built, wantVariants) {
+			errs = append(errs, fmt.Errorf("packages.yml's build job builds variants %v, but packagedDistVariants() "+
+				"in magefile.go is %v; update them together", built, wantVariants))
+		}
+	}
+
+	var doc struct {
+		Jobs map[string]struct {
+			Strategy struct {
+				Matrix struct {
+					Include []map[string]any `yaml:"include"`
+				} `yaml:"matrix"`
+			} `yaml:"strategy"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return errors.Join(append(errs, fmt.Errorf("packages.yml: %w", err))...)
+	}
+	install, ok := doc.Jobs["install"]
+	if !ok {
+		return errors.Join(append(errs, errors.New("packages.yml has no install job"))...)
+	}
+	gotLegs := map[string]bool{}
+	for _, inc := range install.Strategy.Matrix.Include {
+		f, _ := inc["format"].(string)
+		a, _ := inc["arch"].(string)
+		gotLegs[f+"/"+a] = true
+	}
+	for _, leg := range slices.Sorted(maps.Keys(wantLegs)) {
+		if !gotLegs[leg] {
+			errs = append(errs, fmt.Errorf("packages.yml's install job has no %s leg, so that package is built on "+
+				"every pull request and installed by none", leg))
+		}
+	}
+	for _, leg := range slices.Sorted(maps.Keys(gotLegs)) {
+		if !wantLegs[leg] {
+			errs = append(errs, fmt.Errorf("packages.yml's install job has a %s leg, which no packaged variant and "+
+				"format in magefile.go produces", leg))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // verifyDistVariantsIn is verifyDistVariants over caller-supplied workflow
@@ -1710,43 +1797,36 @@ var automergeActionRE = regexp.MustCompile(`(?i)auto-?merge`)
 // requiredMageTargets are targets something outside this repository's Go code
 // depends on by name, and which nothing in Go would notice the loss of.
 //
-// build:packages is listed BEFORE its caller exists. Nothing in this tree runs
-// it: release.yml here has three jobs (verify, build, release) and no
-// packaging job. The job that calls it -- once, in the packaging job #266 adds
-// to release.yml -- arrives with #266, which was held until this target existed. So
-// this entry is deliberately early rather than describing the tree you are
-// reading, and a grep through release.yml is not evidence that it is unused.
+// build:packages was listed here before any workflow called it, while the
+// packaging job #266 added to release.yml was held for this target to exist.
+// Both workflows that run it now -- release.yml's packaging job and
+// packages.yml's build job -- arrived later.
 //
-// The count is stated because it was got wrong: `git grep -c` reports 2 for
-// that file, and the second line is a comment describing the target rather
-// than a second invocation. It counts matching lines, not occurrences.
-//
-// docs/development/releasing.md DOES describe packages, as of the commit that
-// made the build reproducible -- what it does not have is a release job that
-// builds them, which is the thing this entry stands in for.
-//
-// What it is worth once that caller lands: a workflow names a target as a
-// string, so deleting or renaming the target would compile cleanly, pass every
-// test, and fail at tag time -- after the tag is pushed, and while
-// container-images.yml and helm-chart.yml publish their images regardless,
-// including the mutable latest tags. Recovery is deleting GHCR package
-// versions, not re-tagging.
+// What it is worth: a workflow names a target as a string, so deleting or
+// renaming it compiles cleanly. Before packages.yml that also passed every test
+// and failed at tag time, after the tag was pushed and while
+// container-images.yml and helm-chart.yml published their images regardless.
+// packages.yml now runs the target on every pull request, so a deletion, or a
+// rename that missed a workflow, fails there first. What is left for this list
+// is the rename whose workflow callers were all updated: CI passes, and every
+// `mage build:packages` written down outside this repository is dead.
 //
 // This list is the machine-checked half of that dependency; the loop over the
 // workflows below is the other half, and neither subsumes the other. The
 // workflow scan catches a target a workflow calls and the magefile does not
-// have -- but it can only see callers that exist, which today is why the scan
-// alone would not notice build:packages disappearing. This catches that, and
-// it also catches the target being renamed and its caller updated to match,
-// which the scan would call correct while every `mage build:packages` written
-// down outside this repository had silently stopped working.
+// have -- but it can only see callers that exist. This catches the target
+// disappearing however many callers it has, and it also catches the target
+// being renamed and its callers updated to match, which the scan would call
+// correct while every `mage build:packages` written down outside this
+// repository had silently stopped working.
 var requiredMageTargets = []string{"build:packages", "build:unit"}
 
 // Why each entry is here, since the comment above argues the case for only one
 // of them:
 //
-//   - build:packages is called by release.yml once #266 lands, and by the
-//     recipes in README.md, CONTRIBUTING.md and docs/systemd.md.
+//   - build:packages is called by release.yml and packages.yml, by
+//     test/packages/build-upgrade.sh, and by the recipes in CONTRIBUTING.md,
+//     docs/systemd.md and docs/development/testing.md.
 //   - build:unit is called by no workflow. It is named by CONTRIBUTING.md's
 //     from-source recipe, AGENTS.md's command table and the from-source
 //     paragraph of docs/systemd.md as the way to get an installable unit
@@ -2890,6 +2970,9 @@ type aggregateWorkflowDoc struct {
 type aggregateJob struct {
 	Name string `yaml:"name"`
 	If   string `yaml:"if"`
+	// Uses is set on a job that calls a reusable workflow instead of running
+	// steps. See verifyCalledWorkflow.
+	Uses string `yaml:"uses"`
 	// Needs is a node because GitHub accepts a bare string as well as a list.
 	Needs yaml.Node `yaml:"needs"`
 	// ContinueOnError is a node because GitHub accepts an expression too.
@@ -2946,6 +3029,10 @@ func verifyAggregateJobs() error {
 //     later and left out would gate nothing. It names no job that does not
 //     exist, includes every job its allowed skips name, and no needed job
 //     sets continue-on-error.
+//   - A needed job that calls a reusable workflow in this repository is
+//     followed into it: see verifyCalledWorkflow. Without that, the rule
+//     above sees only the calling stanza, which has no continue-on-error to
+//     find, while the called workflow's jobs decide what the call reports.
 //   - No other job in any workflow carries its name. The ruleset matches a
 //     check by name alone, so a second job of that name -- a copied block
 //     downstream of the aggregate, say, which the needs rule exempts -- makes
@@ -3017,6 +3104,7 @@ func verifyAggregateJobsIn(sources map[string][]byte) error {
 				errs = append(errs, fmt.Errorf("%s job %q sets continue-on-error, so its failure reaches %q as "+
 					"a success", agg.workflow, id, agg.name))
 			}
+			errs = append(errs, verifyCalledWorkflow(sources, agg, id, doc.Jobs[id].Uses, map[string]bool{})...)
 		}
 		// dependsOnAggregate reports whether a job needs the aggregate,
 		// directly or through other jobs. seen bounds the walk; GitHub
@@ -3051,6 +3139,58 @@ func verifyAggregateJobsIn(sources map[string][]byte) error {
 	}
 	errs = append(errs, verifyRequiredNamesUnique(sources)...)
 	return errors.Join(errs...)
+}
+
+// localWorkflowPrefix is how a job names a reusable workflow in this
+// repository. A call to one elsewhere (owner/repo/...@ref) is not followed:
+// its source is not here to read.
+const localWorkflowPrefix = "./.github/workflows/"
+
+// verifyCalledWorkflow holds the jobs of the reusable workflow that `uses`
+// names -- called by job `via` of agg's workflow, which agg needs -- to the
+// rules that keep a failure from reaching agg as a success, and follows any
+// call they make in turn. seen bounds the walk.
+//
+// Two rules. No job there may set continue-on-error, as for a job the
+// aggregate needs directly. And no job there may carry a condition other than
+// always(): a job the aggregate needs directly and that is skipped reaches
+// alls-green as skipped, which fails it, but a called workflow whose job was
+// skipped still concludes success, so the skip is invisible from here.
+// packages.yml, which ci.yml calls, is what this exists for.
+func verifyCalledWorkflow(sources map[string][]byte, agg requiredCheckAggregate, via, uses string,
+	seen map[string]bool) []error {
+	if !strings.HasPrefix(uses, localWorkflowPrefix) {
+		return nil
+	}
+	file := strings.TrimPrefix(uses, localWorkflowPrefix)
+	if seen[file] {
+		return nil
+	}
+	seen[file] = true
+	src, ok := sources[file]
+	if !ok {
+		return []error{fmt.Errorf("%s job %q calls %s, which is not among the workflows read, so nothing checks "+
+			"what it reports to %q", agg.workflow, via, uses, agg.name)}
+	}
+	var doc aggregateWorkflowDoc
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return []error{fmt.Errorf("%s, called by %s job %q: %w", file, agg.workflow, via, err)}
+	}
+	var errs []error
+	for _, id := range slices.Sorted(maps.Keys(doc.Jobs)) {
+		job := doc.Jobs[id]
+		if mayContinue(job.ContinueOnError) {
+			errs = append(errs, fmt.Errorf("%s job %q sets continue-on-error, so its failure reaches %q through %s "+
+				"job %q as a success", file, id, agg.name, agg.workflow, via))
+		}
+		if job.If != "" && !isAlways(job.If) {
+			errs = append(errs, fmt.Errorf("%s job %q has condition %q; a called workflow whose job is skipped "+
+				"still succeeds, so %q would pass through %s job %q with it never having run", file, id, job.If,
+				agg.name, agg.workflow, via))
+		}
+		errs = append(errs, verifyCalledWorkflow(sources, agg, via, job.Uses, seen)...)
+	}
+	return errs
 }
 
 // verifyRequiredNamesUnique returns every job, in any of sources, that

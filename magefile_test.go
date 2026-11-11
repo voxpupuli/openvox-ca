@@ -2331,6 +2331,90 @@ jobs:
 	})
 })
 
+var _ = Describe("verifyPackageLegsIn", func() {
+	It("finds the real packages.yml in step with the packaged variants", func() {
+		src, err := os.ReadFile(filepath.Join(".github", "workflows", "packages.yml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(verifyPackageLegsIn(src, packagedDistVariants(), packageFormats)).To(Succeed())
+	})
+
+	packaged := []distVariantSpec{
+		{name: "linux_amd64", env: map[string]string{"GOARCH": "amd64"}, packaged: true},
+		{name: "linux_arm64", env: map[string]string{"GOARCH": "arm64"}, packaged: true},
+	}
+	good := `
+jobs:
+  build:
+    steps:
+      - run: |
+          # mage build:distVariant linux_s390x is only prose
+          mage build:distVariant linux_amd64
+          mage build:distVariant linux_arm64
+  install:
+    strategy:
+      matrix:
+        include:
+          - {format: deb, arch: amd64}
+          - {format: deb, arch: arm64}
+          - {format: rpm, arch: amd64}
+          - {format: rpm, arch: arm64}
+`
+	mutate := func(src, old, replacement string) string {
+		GinkgoHelper()
+		Expect(strings.Count(src, old)).To(Equal(1), "mutation anchor %q must occur exactly once", old)
+		return strings.Replace(src, old, replacement, 1)
+	}
+
+	It("accepts the good fixture", func() {
+		Expect(verifyPackageLegsIn([]byte(good), packaged, []string{"deb", "rpm"})).To(Succeed())
+	})
+
+	// The case the check exists for: a newly packaged architecture whose build
+	// step was updated, because build:packages failed until it was, and whose
+	// install legs were not, because nothing failed.
+	It("rejects a packaged architecture with no install leg", func() {
+		three := append(append([]distVariantSpec{}, packaged...),
+			distVariantSpec{name: "linux_ppc64le", env: map[string]string{"GOARCH": "ppc64le"}, packaged: true})
+		src := mutate(good, "          mage build:distVariant linux_arm64\n",
+			"          mage build:distVariant linux_arm64\n          mage build:distVariant linux_ppc64le\n")
+		err := verifyPackageLegsIn([]byte(src), three, []string{"deb", "rpm"})
+		Expect(err).To(MatchError(ContainSubstring("has no deb/ppc64le leg")))
+		Expect(err).To(MatchError(ContainSubstring("has no rpm/ppc64le leg")))
+	})
+
+	It("rejects an install leg nothing packages", func() {
+		src := mutate(good, "          - {format: rpm, arch: arm64}\n",
+			"          - {format: rpm, arch: arm64}\n          - {format: rpm, arch: s390x}\n")
+		Expect(verifyPackageLegsIn([]byte(src), packaged, []string{"deb", "rpm"})).To(MatchError(
+			ContainSubstring("has a rpm/s390x leg, which no packaged variant")))
+	})
+
+	It("rejects a build step that builds a different set", func() {
+		src := mutate(good, "          mage build:distVariant linux_arm64\n", "")
+		Expect(verifyPackageLegsIn([]byte(src), packaged, []string{"deb", "rpm"})).To(MatchError(
+			ContainSubstring("build job builds variants [linux_amd64]")))
+	})
+
+	// A renamed job is the likeliest real edit, and the guard must say so
+	// rather than find nothing to compare and pass.
+	It("reports an install job it cannot find", func() {
+		src := mutate(good, "  install:\n", "  verify:\n")
+		Expect(verifyPackageLegsIn([]byte(src), packaged, []string{"deb", "rpm"})).To(MatchError(
+			ContainSubstring("packages.yml has no install job")))
+	})
+
+	It("reports a build job it cannot find", func() {
+		src := mutate(good, "  build:\n", "  compile:\n")
+		Expect(verifyPackageLegsIn([]byte(src), packaged, []string{"deb", "rpm"})).To(MatchError(
+			ContainSubstring(`packages.yml: job "build" not found`)))
+	})
+
+	It("reports a file it cannot parse", func() {
+		Expect(verifyPackageLegsIn([]byte("jobs: [\n"), packaged, []string{"deb", "rpm"})).To(MatchError(
+			ContainSubstring("packages.yml: yaml:")))
+	})
+})
+
 var _ = Describe("the packaged variant set", func() {
 	It("packages the two pure-Go variants and neither FIPS variant", func() {
 		var names []string
@@ -3866,6 +3950,31 @@ var _ = Describe("buildVariantPackages", func() {
 			Entry("tls_cert", `(?m)^tls_cert: /etc/puppetlabs/puppet/ssl/certs/openvox-ca-server\.pem$`),
 			Entry("tls_key", `(?m)^tls_key: /etc/puppetlabs/puppet/ssl/private_keys/openvox-ca-server\.pem$`),
 		)
+
+		// The file says it sets four keys and only four, and there is a second
+		// reason to hold it to that. Provisioning bootstraps the CA with
+		// `openvox-ca-ctl setup --cadir --hostname`, which reads no
+		// configuration file, so a bootstrap-only setting shipped here
+		// (ca_key_algo, ca_subject_*, ca_validity_days -- "apply only when
+		// bootstrapping" in internal/config/server.go) would promise a CA the
+		// package does not deliver. The whole key set is pinned rather than a
+		// list of forbidden keys, because the bootstrap-only set exists only in
+		// those comments and a copy of it here would go stale without failing;
+		// this fails when a key is added, which is when the question needs
+		// asking.
+		It("sets exactly the four keys it documents, none of them bootstrap-only", func() {
+			var cfg map[string]any
+			Expect(yaml.Unmarshal([]byte(contents["/etc/openvox-ca/config.yaml"]), &cfg)).To(Succeed())
+			keys := make([]string, 0, len(cfg))
+			for k := range cfg {
+				keys = append(keys, k)
+			}
+			Expect(keys).To(ConsistOf("cadir", "port", "tls_cert", "tls_key"),
+				"a key added to packaging/config/config.yaml must not be one applied only at CA bootstrap "+
+					"(internal/config/server.go), because first-boot bootstraps with openvox-ca-ctl setup, "+
+					"which reads no configuration file; if it is not, add it here and correct the count in "+
+					"the file's header")
+		})
 
 		// The configuration names fixed paths because a shipped file cannot
 		// know this host's certname; provisioning links them. If the two ever
@@ -8191,7 +8300,8 @@ var _ = Describe("Build.Packages", func() {
 // The stubs stand in for the CA, not for the script: openvox-ca-ctl `setup`
 // creates the files a bootstrapped cadir has, and `generate` writes the
 // credential it is asked for. What is under test is the script's own
-// behaviour, which is what the packages ship and what no CI leg installs.
+// behaviour, branch by branch, which the Packages legs (#254) cannot reach:
+// they run it once per scenario, against the real CA under systemd.
 func runFirstBootScript(sslDir, binDir, certname string, extraEnv ...string) firstBootResult {
 	cmd := exec.Command("sh", firstBootScriptPath)
 	cmd.Env = append(os.Environ(),
@@ -10489,6 +10599,91 @@ jobs:
 					"          allowed-skips: ${{ needs.setup.outputs.push != 'true' && 'merge' || '' }}\n", "", 1),
 				`container-images.yml job "aggregate" step 1 (re-actors/alls-green) has allowed-skips ""`),
 		)
+	})
+
+	// A needed job that calls a reusable workflow has no steps of its own, so
+	// what decides the check is in the called file. packages.yml is the case.
+	Describe("a needed job that calls a reusable workflow", func() {
+		callingCI := mutate(goodCI, "      - unit\n    steps:", "      - unit\n      - packages\n    steps:")
+		callingCI = mutate(callingCI, "  ci:\n", "  packages:\n    uses: ./.github/workflows/packages.yml\n  ci:\n")
+		goodCalled := `
+on:
+  workflow_call:
+jobs:
+  build:
+    steps:
+      - run: "true"
+  install:
+    needs: build
+    steps:
+      - run: "true"
+`
+		withCalled := func(ci, called string) map[string][]byte {
+			src := sources(ci, goodImages)
+			src["packages.yml"] = []byte(called)
+			return src
+		}
+
+		It("accepts the good fixture", func() {
+			Expect(verifyAggregateJobsIn(withCalled(callingCI, goodCalled))).To(Succeed())
+		})
+
+		It("rejects continue-on-error on a job in the called workflow", func() {
+			bad := mutate(goodCalled, "    needs: build\n", "    needs: build\n    continue-on-error: true\n")
+			Expect(verifyAggregateJobsIn(withCalled(callingCI, bad))).To(MatchError(ContainSubstring(
+				`packages.yml job "install" sets continue-on-error, so its failure reaches "CI success" through ci.yml job "packages"`)))
+		})
+
+		DescribeTable("a condition on a job in the called workflow",
+			func(cond string, ok bool) {
+				src := mutate(goodCalled, "    needs: build\n", "    needs: build\n"+cond)
+				err := verifyAggregateJobsIn(withCalled(callingCI, src))
+				if ok {
+					Expect(err).NotTo(HaveOccurred())
+				} else {
+					Expect(err).To(MatchError(ContainSubstring(`packages.yml job "install" has condition`)))
+				}
+			},
+			Entry("accepts always()", "    if: always()\n", true),
+			// Skipped on pull requests, which is where it was meant to gate.
+			Entry("rejects one that can skip it", "    if: github.event_name == 'push'\n", false),
+		)
+
+		It("follows a call the called workflow makes in turn", func() {
+			nested := mutate(goodCalled, "  install:\n    needs: build\n    steps:\n      - run: \"true\"\n",
+				"  install:\n    needs: build\n    uses: ./.github/workflows/inner.yml\n")
+			src := withCalled(callingCI, nested)
+			src["inner.yml"] = []byte("on:\n  workflow_call:\njobs:\n  leg:\n    continue-on-error: true\n    steps:\n      - run: \"true\"\n")
+			Expect(verifyAggregateJobsIn(src)).To(MatchError(ContainSubstring(`inner.yml job "leg" sets continue-on-error`)))
+		})
+
+		// Its source is not in this repository, so there is nothing to open:
+		// following it would report a workflow it could never have been given.
+		It("does not follow a call to another repository's workflow", func() {
+			remote := mutate(callingCI, "uses: ./.github/workflows/packages.yml",
+				"uses: octo-org/shared/.github/workflows/packages.yml@v1")
+			Expect(verifyAggregateJobsIn(sources(remote, goodImages))).To(Succeed())
+		})
+
+		// Without the seen set this recurses until the stack runs out, which
+		// takes `mage dev:check` down with it rather than failing a check.
+		It("terminates on workflows that call each other", func() {
+			looped := mutate(goodCalled, "  install:\n    needs: build\n    steps:\n      - run: \"true\"\n",
+				"  install:\n    needs: build\n    uses: ./.github/workflows/inner.yml\n")
+			src := withCalled(callingCI, looped)
+			src["inner.yml"] = []byte("on:\n  workflow_call:\njobs:\n  back:\n    uses: ./.github/workflows/packages.yml\n")
+			Expect(verifyAggregateJobsIn(src)).To(Succeed())
+		})
+
+		It("reports a called workflow it cannot parse", func() {
+			Expect(verifyAggregateJobsIn(withCalled(callingCI, "on: [\n"))).To(MatchError(ContainSubstring(
+				`packages.yml, called by ci.yml job "packages": yaml:`)))
+		})
+
+		It("reports a called workflow it was not given", func() {
+			Expect(verifyAggregateJobsIn(sources(callingCI, goodImages))).To(MatchError(ContainSubstring(
+				`ci.yml job "packages" calls ./.github/workflows/packages.yml, which is not among the workflows read`)))
+		})
 	})
 
 	It("names a job the aggregate does not need", func() {
