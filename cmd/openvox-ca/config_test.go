@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -55,15 +56,17 @@ func setEnv(key, value string) {
 // developer's shell may still export them, and a spec that pins that they are
 // ignored must not be decided by what the host happened to leave behind.
 //
-// Enumerated from the live environment rather than from serverEnvVars, which is
-// a hand-written list and had fallen well short of the ~90 the server actually
-// reads. The gap mattered once specs began driving whole commands through
-// resolveRuntime: OPENVOX_CA_STORAGE_BACKEND or OPENVOX_CA_SQL_DSN exported on a
-// developer box would silently point them at a real database instead of the
-// --cadir filesystem backend, and OPENVOX_CA_ENCRYPT_CA_KEY would make the
-// "encrypts the created key at rest when configured" spec pass without its
-// config file doing anything — a test that can no longer fail. Reading the
-// environment cannot drift from what the server reads.
+// Enumerated from the live environment rather than from a list of the names
+// the server reads. A hand-written list once did this job and had fallen well
+// short of them. serverEnvBindings is complete, but it covers applyServerEnv
+// alone, not OPENVOX_CA_KEY_PASSPHRASE or the old names. The gap mattered once
+// specs began driving whole commands through resolveRuntime:
+// OPENVOX_CA_STORAGE_BACKEND or OPENVOX_CA_SQL_DSN exported on a developer box
+// would silently point them at a real database instead of the --cadir
+// filesystem backend, and OPENVOX_CA_ENCRYPT_CA_KEY would make the "encrypts
+// the created key at rest when configured" spec pass without its config file
+// doing anything — a test that can no longer fail. Reading the environment
+// cannot drift from what the server reads.
 func clearServerEnv() {
 	GinkgoHelper()
 	for _, entry := range os.Environ() {
@@ -957,7 +960,201 @@ var _ = Describe("applyServerEnv ignores the pre-rename variable names", func() 
 	)
 })
 
+// serverEnvBinding is one variable applyServerEnv reads: a sample value to set
+// it to, the field it must land in, and what that field must hold afterwards.
+type serverEnvBinding struct {
+	name  string
+	value string
+	// field returns a pointer to the field the variable binds.
+	field func(*serverConfig) any
+	want  any
+}
+
+// serverEnvBindings is every variable applyServerEnv reads, one entry each, in
+// the order it reads them.
+//
+// Each sample value differs from the field's default, and the spec checks
+// that, because an entry whose value is the default passes with the variable
+// unread. Neighbours that a transposition could swap get distinct values, so
+// the swap fails on both of them. Credential samples say they are fake; the
+// spec's failure output prints the config, so a realistic one would read like
+// a leak in a CI log.
+func serverEnvBindings() []serverEnvBinding {
+	return []serverEnvBinding{
+		{"OPENVOX_CA_CADIR", "/some/dir", func(c *serverConfig) any { return &c.CADir }, "/some/dir"},
+		{"OPENVOX_CA_AUTOSIGN_CONFIG", "true", func(c *serverConfig) any { return &c.AutosignConfig }, "true"},
+		{"OPENVOX_CA_HOST", "1.2.3.4", func(c *serverConfig) any { return &c.Host }, "1.2.3.4"},
+		{"OPENVOX_CA_PORT", "9999", func(c *serverConfig) any { return &c.Port }, 9999},
+		{"OPENVOX_CA_HOSTNAME", "puppet.test", func(c *serverConfig) any { return &c.Hostname }, "puppet.test"},
+		{"OPENVOX_CA_VERBOSITY", "2", func(c *serverConfig) any { return &c.Verbosity }, 2},
+		{"OPENVOX_CA_LOGFILE", "/var/log/puppet.log", func(c *serverConfig) any { return &c.LogFile }, "/var/log/puppet.log"},
+		{"OPENVOX_CA_TLS_CERT", "/etc/tls/cert.pem", func(c *serverConfig) any { return &c.TLSCert }, "/etc/tls/cert.pem"},
+		{"OPENVOX_CA_TLS_KEY", "/etc/tls/key.pem", func(c *serverConfig) any { return &c.TLSKey }, "/etc/tls/key.pem"},
+		{"OPENVOX_CA_CRL_CHAIN_FILE", "/etc/tls/chain.crl", func(c *serverConfig) any { return &c.CRLChainFile }, "/etc/tls/chain.crl"},
+		{"OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", "600", func(c *serverConfig) any { return &c.CRLChainRefreshIntervalSec }, 600},
+		{"OPENVOX_CA_PUPPET_SERVER", "puppet-master", func(c *serverConfig) any { return &c.PuppetServer }, "puppet-master"},
+		{"OPENVOX_CA_PUPPET_SERVER_FILE", "/etc/openvox-ca/servers.txt", func(c *serverConfig) any { return &c.PuppetServerFile }, "/etc/openvox-ca/servers.txt"},
+		{"OPENVOX_CA_NO_PP_CLI_AUTH", "true", func(c *serverConfig) any { return &c.NoPpCliAuth }, true},
+		{"OPENVOX_CA_NO_TLS_REQUIRED", "true", func(c *serverConfig) any { return &c.NoTLSRequired }, true},
+		{"OPENVOX_CA_CLIENT_REVOCATION_POLICY", "check", func(c *serverConfig) any { return &c.ClientRevocationPolicy }, "check"},
+		{"OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", "300", func(c *serverConfig) any { return &c.ClientCRLRefreshIntervalSec }, 300},
+		{"OPENVOX_CA_ALLOW_PUBLIC_STATUS", "true", func(c *serverConfig) any { return &c.AllowPublicStatus }, true},
+		{"OPENVOX_CA_OCSP_URL", "http://ocsp.example.com", func(c *serverConfig) any { return &c.OCSPUrl }, "http://ocsp.example.com"},
+		{"OPENVOX_CA_CRL_URL", "http://crl.example.com", func(c *serverConfig) any { return &c.CRLUrl }, "http://crl.example.com"},
+		{"OPENVOX_CA_METRICS_LISTEN", "127.0.0.1:9090", func(c *serverConfig) any { return &c.MetricsListen }, "127.0.0.1:9090"},
+		{"OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC", "45", func(c *serverConfig) any { return &c.ShutdownTimeoutSec }, 45},
+		// Distinct values for the two reservations: they are adjacent
+		// same-typed fields with near-identical names, so a transposition would
+		// leave both "working" and silently make the documented remedy for a
+		// large fleet raise the launcher's share instead of the signer's.
+		{"OPENVOX_CA_MEMORY_RESERVE_LAUNCHER", "16MiB", func(c *serverConfig) any { return &c.MemoryReserveLauncher }, "16MiB"},
+		{"OPENVOX_CA_MEMORY_RESERVE_SIGNER", "64MiB", func(c *serverConfig) any { return &c.MemoryReserveSigner }, "64MiB"},
+		{"OPENVOX_CA_MEMORY_BUDGET_PERCENT", "75", func(c *serverConfig) any { return &c.MemoryBudgetPercent }, 75},
+		{"OPENVOX_CA_CA_KEY_ALGO", "ecdsa", func(c *serverConfig) any { return &c.CAKeyAlgo }, "ecdsa"},
+		{"OPENVOX_CA_CA_KEY_SIZE", "384", func(c *serverConfig) any { return &c.CAKeySize }, 384},
+		{"OPENVOX_CA_LEAF_KEY_ALGO", "rsa", func(c *serverConfig) any { return &c.LeafKeyAlgo }, "rsa"},
+		{"OPENVOX_CA_LEAF_KEY_SIZE", "3072", func(c *serverConfig) any { return &c.LeafKeySize }, 3072},
+		{"OPENVOX_CA_CA_SUBJECT_ORG", "Example Org", func(c *serverConfig) any { return &c.CASubjectOrg }, "Example Org"},
+		{"OPENVOX_CA_CA_SUBJECT_OU", "IT", func(c *serverConfig) any { return &c.CASubjectOU }, "IT"},
+		{"OPENVOX_CA_CA_SUBJECT_COUNTRY", "US", func(c *serverConfig) any { return &c.CASubjectCountry }, "US"},
+		{"OPENVOX_CA_CA_SUBJECT_LOCALITY", "Springfield", func(c *serverConfig) any { return &c.CASubjectLocality }, "Springfield"},
+		{"OPENVOX_CA_CA_SUBJECT_PROVINCE", "IL", func(c *serverConfig) any { return &c.CASubjectProvince }, "IL"},
+		{"OPENVOX_CA_CA_PATH_LENGTH", "1", func(c *serverConfig) any { return &c.CAPathLength }, 1},
+		{"OPENVOX_CA_CA_VALIDITY_DAYS", "3650", func(c *serverConfig) any { return &c.CAValidityDays }, 3650},
+		{"OPENVOX_CA_LEAF_VALIDITY_DAYS", "1825", func(c *serverConfig) any { return &c.LeafValidityDays }, 1825},
+		{"OPENVOX_CA_CRL_VALIDITY_DAYS", "7", func(c *serverConfig) any { return &c.CRLValidityDays }, 7},
+		{"OPENVOX_CA_DISABLE_CRL_REFRESH", "true", func(c *serverConfig) any { return &c.DisableCRLRefresh }, true},
+		{"OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC", "900", func(c *serverConfig) any { return &c.CRLRefreshIntervalSec }, 900},
+		{"OPENVOX_CA_CRL_REFRESH_BEFORE_SEC", "86400", func(c *serverConfig) any { return &c.CRLRefreshBeforeSec }, 86400},
+		{"OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", "15", func(c *serverConfig) any { return &c.CRLSyncIntervalSec }, 15},
+		{"OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "300", func(c *serverConfig) any { return &c.OCSPIndexSyncIntervalSec }, 300},
+		{"OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP", "true", func(c *serverConfig) any { return &c.EnableExpiredCertCleanup }, true},
+		{"OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC", "2592000", func(c *serverConfig) any { return &c.ExpiredCertRetentionSec }, 2592000},
+		{"OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", "3600", func(c *serverConfig) any { return &c.ExpiredCertCleanupIntervalSec }, 3600},
+		{"OPENVOX_CA_CSR_RATE_LIMIT", "20", func(c *serverConfig) any { return &c.CSRRateLimit }, 20},
+		{"OPENVOX_CA_SIGNING_CONCURRENCY", "4", func(c *serverConfig) any { return &c.CASigningConcurrency }, 4},
+		{"OPENVOX_CA_ENCRYPT_CA_KEY", "true", func(c *serverConfig) any { return &c.EncryptCAKey }, true},
+		// true is the distinguishing value for these: false is the default, so
+		// an entry asserting false would pass with the variable unread.
+		{"OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", "true", func(c *serverConfig) any { return &c.InsecureAllowWorldReadableKeys }, true},
+		{"OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", "true", func(c *serverConfig) any { return &c.InsecureAllowUnsafeAutosignPath }, true},
+		{"OPENVOX_CA_INSECURE_ALLOW_PLAIN_HTTP_GENERATE", "true", func(c *serverConfig) any { return &c.InsecureAllowPlainHTTPGenerate }, true},
+		// And false for this one, which defaults to true.
+		{"OPENVOX_CA_PROMOTE_CN_TO_SAN", "false", func(c *serverConfig) any { return &c.PromoteCNToSAN }, false},
+		{"OPENVOX_CA_ALLOW_SUBJECT_ALT_NAMES", "true", func(c *serverConfig) any { return &c.AllowSubjectAltNames }, true},
+		{"OPENVOX_CA_ALLOW_DUPLICATE_CERTS", "true", func(c *serverConfig) any { return &c.AllowDuplicateCerts }, true},
+		{"OPENVOX_CA_PUPPET_DATETIME_FORMAT", "true", func(c *serverConfig) any { return &c.PuppetDateTimeFormat }, true},
+		{"OPENVOX_CA_SERIAL_NUMBER_FORMAT", "hex", func(c *serverConfig) any { return &c.SerialNumberFormat }, "hex"},
+		// Defaults to true, so false is the value that tells.
+		{"OPENVOX_CA_REVOKE_ON_AUTO_RENEW", "false", func(c *serverConfig) any { return &c.RevokeOnAutoRenew }, false},
+		// Distinct values, because these two are adjacent ints with adjacent
+		// names: swapping the destinations would turn a 12-hour overlap window
+		// into a 12-hour sweep interval on a 90-second delay, and both would
+		// still "work".
+		{"OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "43200", func(c *serverConfig) any { return &c.SupersededCertRevokeAfterSec }, 43200},
+		{"OPENVOX_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC", "90", func(c *serverConfig) any { return &c.SupersededCertSweepIntervalSec }, 90},
+		{"OPENVOX_CA_LEAF_BACKDATE_SEC", "120", func(c *serverConfig) any { return &c.LeafBackdateSec }, 120},
+		{"OPENVOX_CA_MANAGED_CERT_INTERVAL_SEC", "1800", func(c *serverConfig) any { return &c.ManagedCertIntervalSec }, 1800},
+		{"OPENVOX_CA_KEY_PASSPHRASE_FILE", "/creds/passphrase", func(c *serverConfig) any { return &c.CAKeyPassphraseFile }, "/creds/passphrase"},
+		{"OPENVOX_CA_STORAGE_BACKEND", "postgres", func(c *serverConfig) any { return &c.StorageBackend }, "postgres"},
+		// The list variables also pin splitAndTrim: spaces after the commas
+		// are trimmed and the empty element is dropped.
+		{"OPENVOX_CA_ETCD_ENDPOINTS", "https://etcd-1:2379, https://etcd-2:2379,", func(c *serverConfig) any { return &c.EtcdEndpoints }, []string{"https://etcd-1:2379", "https://etcd-2:2379"}},
+		{"OPENVOX_CA_ETCD_KEY_PREFIX", "/ca-etcd/", func(c *serverConfig) any { return &c.EtcdKeyPrefix }, "/ca-etcd/"},
+		{"OPENVOX_CA_ETCD_USERNAME", "etcd-user", func(c *serverConfig) any { return &c.EtcdUsername }, "etcd-user"},
+		{"OPENVOX_CA_ETCD_PASSWORD", "fake-etcd-password", func(c *serverConfig) any { return &c.EtcdPassword }, "fake-etcd-password"},
+		{"OPENVOX_CA_ETCD_DIAL_TIMEOUT_SEC", "11", func(c *serverConfig) any { return &c.EtcdDialTimeoutSec }, 11},
+		{"OPENVOX_CA_ETCD_REQUEST_TIMEOUT_SEC", "12", func(c *serverConfig) any { return &c.EtcdRequestTimeoutSec }, 12},
+		// The three TLS files of each client get distinct values, so a CA
+		// bundle and a client key swapped between fields fails.
+		{"OPENVOX_CA_ETCD_TLS_CA_FILE", "/tls/etcd-ca.pem", func(c *serverConfig) any { return &c.EtcdTLSCAFile }, "/tls/etcd-ca.pem"},
+		{"OPENVOX_CA_ETCD_TLS_CERT_FILE", "/tls/etcd-cert.pem", func(c *serverConfig) any { return &c.EtcdTLSCertFile }, "/tls/etcd-cert.pem"},
+		{"OPENVOX_CA_ETCD_TLS_KEY_FILE", "/tls/etcd-key.pem", func(c *serverConfig) any { return &c.EtcdTLSKeyFile }, "/tls/etcd-key.pem"},
+		{"OPENVOX_CA_REDIS_ADDRS", "redis-1:6379, redis-2:6379", func(c *serverConfig) any { return &c.RedisAddrs }, []string{"redis-1:6379", "redis-2:6379"}},
+		{"OPENVOX_CA_REDIS_SENTINEL_MASTER_NAME", "ca-primary", func(c *serverConfig) any { return &c.RedisSentinelMasterName }, "ca-primary"},
+		{"OPENVOX_CA_REDIS_SENTINEL_ADDRS", "sentinel-1:26379, sentinel-2:26379", func(c *serverConfig) any { return &c.RedisSentinelAddrs }, []string{"sentinel-1:26379", "sentinel-2:26379"}},
+		{"OPENVOX_CA_REDIS_SENTINEL_USERNAME", "sentinel-user", func(c *serverConfig) any { return &c.RedisSentinelUsername }, "sentinel-user"},
+		{"OPENVOX_CA_REDIS_SENTINEL_PASSWORD", "fake-sentinel-password", func(c *serverConfig) any { return &c.RedisSentinelPassword }, "fake-sentinel-password"},
+		{"OPENVOX_CA_REDIS_DB", "3", func(c *serverConfig) any { return &c.RedisDB }, 3},
+		{"OPENVOX_CA_REDIS_USERNAME", "redis-user", func(c *serverConfig) any { return &c.RedisUsername }, "redis-user"},
+		{"OPENVOX_CA_REDIS_PASSWORD", "fake-redis-password", func(c *serverConfig) any { return &c.RedisPassword }, "fake-redis-password"},
+		{"OPENVOX_CA_REDIS_KEY_PREFIX", "ca-redis:", func(c *serverConfig) any { return &c.RedisKeyPrefix }, "ca-redis:"},
+		{"OPENVOX_CA_REDIS_DIAL_TIMEOUT_SEC", "13", func(c *serverConfig) any { return &c.RedisDialTimeoutSec }, 13},
+		{"OPENVOX_CA_REDIS_REQUEST_TIMEOUT_SEC", "14", func(c *serverConfig) any { return &c.RedisRequestTimeoutSec }, 14},
+		{"OPENVOX_CA_REDIS_LOCK_TTL_SEC", "15", func(c *serverConfig) any { return &c.RedisLockTTLSec }, 15},
+		{"OPENVOX_CA_REDIS_TLS_CA_FILE", "/tls/redis-ca.pem", func(c *serverConfig) any { return &c.RedisTLSCAFile }, "/tls/redis-ca.pem"},
+		{"OPENVOX_CA_REDIS_TLS_CERT_FILE", "/tls/redis-cert.pem", func(c *serverConfig) any { return &c.RedisTLSCertFile }, "/tls/redis-cert.pem"},
+		{"OPENVOX_CA_REDIS_TLS_KEY_FILE", "/tls/redis-key.pem", func(c *serverConfig) any { return &c.RedisTLSKeyFile }, "/tls/redis-key.pem"},
+		{"OPENVOX_CA_SQL_DSN", "postgres://ca:fake-sql-password@db.invalid/ca", func(c *serverConfig) any { return &c.SQLDSN }, "postgres://ca:fake-sql-password@db.invalid/ca"},
+		{"OPENVOX_CA_SQL_DSN_FILE", "/creds/sql-dsn", func(c *serverConfig) any { return &c.SQLDSNFile }, "/creds/sql-dsn"},
+		{"OPENVOX_CA_SQL_REQUEST_TIMEOUT_SEC", "16", func(c *serverConfig) any { return &c.SQLRequestTimeoutSec }, 16},
+		{"OPENVOX_CA_SQL_MIGRATION_TIMEOUT_SEC", "17", func(c *serverConfig) any { return &c.SQLMigrationTimeoutSec }, 17},
+		// Distinct for the transposition reason above: idle above open is a
+		// pool that never keeps what it opens.
+		{"OPENVOX_CA_SQL_MAX_OPEN_CONNS", "18", func(c *serverConfig) any { return &c.SQLMaxOpenConns }, 18},
+		{"OPENVOX_CA_SQL_MAX_IDLE_CONNS", "9", func(c *serverConfig) any { return &c.SQLMaxIdleConns }, 9},
+		{"OPENVOX_CA_SQL_TLS_CA_FILE", "/tls/sql-ca.pem", func(c *serverConfig) any { return &c.SQLTLSCAFile }, "/tls/sql-ca.pem"},
+		{"OPENVOX_CA_SQL_TLS_CERT_FILE", "/tls/sql-cert.pem", func(c *serverConfig) any { return &c.SQLTLSCertFile }, "/tls/sql-cert.pem"},
+		{"OPENVOX_CA_SQL_TLS_KEY_FILE", "/tls/sql-key.pem", func(c *serverConfig) any { return &c.SQLTLSKeyFile }, "/tls/sql-key.pem"},
+		{"OPENVOX_CA_CA_CERT_FILE", "/ca/ca_crt.pem", func(c *serverConfig) any { return &c.CACertFile }, "/ca/ca_crt.pem"},
+		{"OPENVOX_CA_CA_KEY_FILE", "/ca/ca_key.pem", func(c *serverConfig) any { return &c.CAKeyFile }, "/ca/ca_key.pem"},
+		// CA key provider selection and OpenBao settings. Distinct values
+		// throughout, so a wrong target (role-id <-> secret-id, or tls_cert <->
+		// tls_key, both security-relevant) fails rather than passing silently.
+		{"OPENVOX_CA_CA_KEY_PROVIDER", "openbao", func(c *serverConfig) any { return &c.CAKeyProvider }, "openbao"},
+		{"OPENVOX_CA_OPENBAO_ADDR", "https://bao:8200", func(c *serverConfig) any { return &c.OpenBao.Addr }, "https://bao:8200"},
+		{"OPENVOX_CA_OPENBAO_TRANSIT_MOUNT", "transit-x", func(c *serverConfig) any { return &c.OpenBao.TransitMount }, "transit-x"},
+		{"OPENVOX_CA_OPENBAO_KEY_NAME", "ca-key", func(c *serverConfig) any { return &c.OpenBao.KeyName }, "ca-key"},
+		{"OPENVOX_CA_OPENBAO_TLS_CA_FILE", "/tls/ca.pem", func(c *serverConfig) any { return &c.OpenBao.TLSCAFile }, "/tls/ca.pem"},
+		{"OPENVOX_CA_OPENBAO_TLS_CERT_FILE", "/tls/cert.pem", func(c *serverConfig) any { return &c.OpenBao.TLSCertFile }, "/tls/cert.pem"},
+		{"OPENVOX_CA_OPENBAO_TLS_KEY_FILE", "/tls/key.pem", func(c *serverConfig) any { return &c.OpenBao.TLSKeyFile }, "/tls/key.pem"},
+		{"OPENVOX_CA_OPENBAO_AUTH_METHOD", "kubernetes", func(c *serverConfig) any { return &c.OpenBao.AuthMethod }, "kubernetes"},
+		{"OPENVOX_CA_OPENBAO_APPROLE_MOUNT", "approle-x", func(c *serverConfig) any { return &c.OpenBao.AppRoleMount }, "approle-x"},
+		{"OPENVOX_CA_OPENBAO_APPROLE_ROLE_ID", "role-id-val", func(c *serverConfig) any { return &c.OpenBao.AppRoleRoleID }, "role-id-val"},
+		{"OPENVOX_CA_OPENBAO_APPROLE_ROLE_ID_FILE", "/creds/role-id", func(c *serverConfig) any { return &c.OpenBao.AppRoleRoleIDFile }, "/creds/role-id"},
+		{"OPENVOX_CA_OPENBAO_APPROLE_SECRET_ID_FILE", "/creds/secret-id", func(c *serverConfig) any { return &c.OpenBao.AppRoleSecretIDFile }, "/creds/secret-id"},
+		{"OPENVOX_CA_OPENBAO_TOKEN_FILE", "/creds/token", func(c *serverConfig) any { return &c.OpenBao.TokenFile }, "/creds/token"},
+		{"OPENVOX_CA_OPENBAO_KUBERNETES_MOUNT", "k8s-x", func(c *serverConfig) any { return &c.OpenBao.KubernetesMount }, "k8s-x"},
+		{"OPENVOX_CA_OPENBAO_KUBERNETES_ROLE", "k8s-role", func(c *serverConfig) any { return &c.OpenBao.KubernetesRole }, "k8s-role"},
+		{"OPENVOX_CA_OPENBAO_KUBERNETES_JWT_FILE", "/creds/sa.jwt", func(c *serverConfig) any { return &c.OpenBao.KubernetesJWTFile }, "/creds/sa.jwt"},
+	}
+}
+
+// serverEnvBindingEntries is one table entry per binding, named for its
+// variable.
+func serverEnvBindingEntries() []TableEntry {
+	var entries []TableEntry
+	for _, b := range serverEnvBindings() {
+		entries = append(entries, Entry(b.name, b))
+	}
+	return entries
+}
+
 var _ = Describe("applyServerEnv each variable", func() {
+	// Through loadServerConfig, the path the server takes, and against its
+	// defaults rather than a zero config, so a sample value that happens to
+	// be a default is caught. The assertion is on the whole config: the
+	// variable must land in its own field and change nothing else.
+	DescribeTable("binds the variable to its field, and only that field",
+		func(b serverEnvBinding) {
+			clearServerEnv()
+			want, err := loadServerConfig("")
+			Expect(err).NotTo(HaveOccurred())
+			field := reflect.ValueOf(b.field(want)).Elem()
+			Expect(reflect.TypeOf(b.want)).To(Equal(field.Type()), "%s: want is not of the field's type", b.name)
+			Expect(field.Interface()).NotTo(Equal(b.want),
+				"%s's sample value is the field's default, so this entry would pass with the variable unread", b.name)
+			field.Set(reflect.ValueOf(b.want))
+
+			GinkgoT().Setenv(b.name, b.value)
+			got, err := loadServerConfig("")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(*got).To(Equal(*want), "%s did not set exactly its own field", b.name)
+		},
+		serverEnvBindingEntries(),
+	)
+
+	// A spelling of true the entries above do not use.
 	DescribeTable("applies the variable to the config",
 		func(envKey, envVal string, check func(*serverConfig) bool, desc string) {
 			clearServerEnv()
@@ -966,186 +1163,8 @@ var _ = Describe("applyServerEnv each variable", func() {
 			Expect(applyServerEnv(cfg)).To(Succeed())
 			Expect(check(cfg)).To(BeTrue(), "%s not applied from %s=%s", desc, envKey, envVal)
 		},
-		Entry("CADIR", "OPENVOX_CA_CADIR", "/some/dir",
-			func(c *serverConfig) bool { return c.CADir == "/some/dir" }, "CADir"),
-		// Ten bindings no other spec named. Each was rewritten onto
-		// config.EnvBool or config.EnvInt, which takes a field pointer, so a
-		// pointer to the wrong field would compile; these pin the field.
-		Entry("ALLOW_PUBLIC_STATUS", "OPENVOX_CA_ALLOW_PUBLIC_STATUS", "true",
-			func(c *serverConfig) bool { return c.AllowPublicStatus }, "AllowPublicStatus"),
-		Entry("PROMOTE_CN_TO_SAN", "OPENVOX_CA_PROMOTE_CN_TO_SAN", "true",
-			func(c *serverConfig) bool { return c.PromoteCNToSAN }, "PromoteCNToSAN"),
-		Entry("PUPPET_DATETIME_FORMAT", "OPENVOX_CA_PUPPET_DATETIME_FORMAT", "true",
-			func(c *serverConfig) bool { return c.PuppetDateTimeFormat }, "PuppetDateTimeFormat"),
-		Entry("CRL_VALIDITY_DAYS", "OPENVOX_CA_CRL_VALIDITY_DAYS", "7",
-			func(c *serverConfig) bool { return c.CRLValidityDays == 7 }, "CRLValidityDays"),
-		Entry("ETCD_DIAL_TIMEOUT_SEC", "OPENVOX_CA_ETCD_DIAL_TIMEOUT_SEC", "11",
-			func(c *serverConfig) bool { return c.EtcdDialTimeoutSec == 11 }, "EtcdDialTimeoutSec"),
-		Entry("ETCD_REQUEST_TIMEOUT_SEC", "OPENVOX_CA_ETCD_REQUEST_TIMEOUT_SEC", "12",
-			func(c *serverConfig) bool { return c.EtcdRequestTimeoutSec == 12 }, "EtcdRequestTimeoutSec"),
-		Entry("REDIS_DB", "OPENVOX_CA_REDIS_DB", "3",
-			func(c *serverConfig) bool { return c.RedisDB == 3 }, "RedisDB"),
-		Entry("REDIS_DIAL_TIMEOUT_SEC", "OPENVOX_CA_REDIS_DIAL_TIMEOUT_SEC", "13",
-			func(c *serverConfig) bool { return c.RedisDialTimeoutSec == 13 }, "RedisDialTimeoutSec"),
-		Entry("REDIS_REQUEST_TIMEOUT_SEC", "OPENVOX_CA_REDIS_REQUEST_TIMEOUT_SEC", "14",
-			func(c *serverConfig) bool { return c.RedisRequestTimeoutSec == 14 }, "RedisRequestTimeoutSec"),
-		Entry("REDIS_LOCK_TTL_SEC", "OPENVOX_CA_REDIS_LOCK_TTL_SEC", "15",
-			func(c *serverConfig) bool { return c.RedisLockTTLSec == 15 }, "RedisLockTTLSec"),
-		// true is the distinguishing value: false is the zero value, so an entry
-		// asserting false would pass with the variable unread or the field
-		// misnamed.
-		Entry("INSECURE_ALLOW_WORLD_READABLE_KEYS", "OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS", "true",
-			func(c *serverConfig) bool { return c.InsecureAllowWorldReadableKeys },
-			"InsecureAllowWorldReadableKeys"),
-		Entry("INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", "OPENVOX_CA_INSECURE_ALLOW_UNSAFE_AUTOSIGN_PATH", "true",
-			func(c *serverConfig) bool { return c.InsecureAllowUnsafeAutosignPath },
-			"InsecureAllowUnsafeAutosignPath"),
-		Entry("INSECURE_ALLOW_PLAIN_HTTP_GENERATE", "OPENVOX_CA_INSECURE_ALLOW_PLAIN_HTTP_GENERATE", "true",
-			func(c *serverConfig) bool { return c.InsecureAllowPlainHTTPGenerate },
-			"InsecureAllowPlainHTTPGenerate"),
-		Entry("CLIENT_REVOCATION_POLICY", "OPENVOX_CA_CLIENT_REVOCATION_POLICY", "check",
-			func(c *serverConfig) bool { return c.ClientRevocationPolicy == "check" }, "ClientRevocationPolicy"),
-		Entry("CLIENT_CRL_REFRESH_INTERVAL_SEC", "OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", "300",
-			func(c *serverConfig) bool { return c.ClientCRLRefreshIntervalSec == 300 },
-			"ClientCRLRefreshIntervalSec"),
-		Entry("AUTOSIGN_CONFIG", "OPENVOX_CA_AUTOSIGN_CONFIG", "true",
-			func(c *serverConfig) bool { return c.AutosignConfig == "true" }, "AutosignConfig"),
-		Entry("HOST", "OPENVOX_CA_HOST", "1.2.3.4",
-			func(c *serverConfig) bool { return c.Host == "1.2.3.4" }, "Host"),
-		Entry("PORT", "OPENVOX_CA_PORT", "9999",
-			func(c *serverConfig) bool { return c.Port == 9999 }, "Port"),
-		Entry("HOSTNAME", "OPENVOX_CA_HOSTNAME", "puppet.test",
-			func(c *serverConfig) bool { return c.Hostname == "puppet.test" }, "Hostname"),
-		Entry("VERBOSITY", "OPENVOX_CA_VERBOSITY", "2",
-			func(c *serverConfig) bool { return c.Verbosity == 2 }, "Verbosity"),
-		Entry("LOGFILE", "OPENVOX_CA_LOGFILE", "/var/log/puppet.log",
-			func(c *serverConfig) bool { return c.LogFile == "/var/log/puppet.log" }, "LogFile"),
-		Entry("TLS_CERT", "OPENVOX_CA_TLS_CERT", "/etc/tls/cert.pem",
-			func(c *serverConfig) bool { return c.TLSCert == "/etc/tls/cert.pem" }, "TLSCert"),
-		Entry("TLS_KEY", "OPENVOX_CA_TLS_KEY", "/etc/tls/key.pem",
-			func(c *serverConfig) bool { return c.TLSKey == "/etc/tls/key.pem" }, "TLSKey"),
-		Entry("PUPPET_SERVER", "OPENVOX_CA_PUPPET_SERVER", "puppet-master",
-			func(c *serverConfig) bool { return c.PuppetServer == "puppet-master" }, "PuppetServer"),
-		Entry("PUPPET_SERVER_FILE", "OPENVOX_CA_PUPPET_SERVER_FILE", "/etc/openvox-ca/servers.txt",
-			func(c *serverConfig) bool { return c.PuppetServerFile == "/etc/openvox-ca/servers.txt" }, "PuppetServerFile"),
-		Entry("NO_PP_CLI_AUTH_true", "OPENVOX_CA_NO_PP_CLI_AUTH", "true",
-			func(c *serverConfig) bool { return c.NoPpCliAuth }, "NoPpCliAuth=true"),
-		Entry("NO_TLS_REQUIRED_true", "OPENVOX_CA_NO_TLS_REQUIRED", "true",
-			func(c *serverConfig) bool { return c.NoTLSRequired }, "NoTLSRequired=true"),
 		Entry("NO_TLS_REQUIRED_1", "OPENVOX_CA_NO_TLS_REQUIRED", "1",
 			func(c *serverConfig) bool { return c.NoTLSRequired }, "NoTLSRequired=1"),
-		Entry("OCSP_URL", "OPENVOX_CA_OCSP_URL", "http://ocsp.example.com",
-			func(c *serverConfig) bool { return c.OCSPUrl == "http://ocsp.example.com" }, "OCSPUrl"),
-		Entry("SHUTDOWN_TIMEOUT_SEC", "OPENVOX_CA_SHUTDOWN_TIMEOUT_SEC", "45",
-			func(c *serverConfig) bool { return c.ShutdownTimeoutSec == 45 }, "ShutdownTimeoutSec"),
-		// Distinct values for the two reservations: they are adjacent same-typed
-		// fields with near-identical names, so a transposition would leave both
-		// "working" and silently make the documented remedy for a large fleet
-		// raise the launcher's share instead of the signer's.
-		Entry("MEMORY_RESERVE_LAUNCHER", "OPENVOX_CA_MEMORY_RESERVE_LAUNCHER", "16MiB",
-			func(c *serverConfig) bool { return c.MemoryReserveLauncher == "16MiB" }, "MemoryReserveLauncher"),
-		Entry("MEMORY_RESERVE_SIGNER", "OPENVOX_CA_MEMORY_RESERVE_SIGNER", "64MiB",
-			func(c *serverConfig) bool { return c.MemoryReserveSigner == "64MiB" }, "MemoryReserveSigner"),
-		Entry("MEMORY_BUDGET_PERCENT", "OPENVOX_CA_MEMORY_BUDGET_PERCENT", "75",
-			func(c *serverConfig) bool { return c.MemoryBudgetPercent == 75 }, "MemoryBudgetPercent"),
-		Entry("CA_KEY_ALGO", "OPENVOX_CA_CA_KEY_ALGO", "ecdsa",
-			func(c *serverConfig) bool { return c.CAKeyAlgo == "ecdsa" }, "CAKeyAlgo"),
-		Entry("CA_KEY_SIZE", "OPENVOX_CA_CA_KEY_SIZE", "384",
-			func(c *serverConfig) bool { return c.CAKeySize == 384 }, "CAKeySize"),
-		Entry("LEAF_KEY_ALGO", "OPENVOX_CA_LEAF_KEY_ALGO", "rsa",
-			func(c *serverConfig) bool { return c.LeafKeyAlgo == "rsa" }, "LeafKeyAlgo"),
-		Entry("LEAF_KEY_SIZE", "OPENVOX_CA_LEAF_KEY_SIZE", "3072",
-			func(c *serverConfig) bool { return c.LeafKeySize == 3072 }, "LeafKeySize"),
-		Entry("CA_SUBJECT_ORG", "OPENVOX_CA_CA_SUBJECT_ORG", "Example Org",
-			func(c *serverConfig) bool { return c.CASubjectOrg == "Example Org" }, "CASubjectOrg"),
-		Entry("CA_SUBJECT_OU", "OPENVOX_CA_CA_SUBJECT_OU", "IT",
-			func(c *serverConfig) bool { return c.CASubjectOU == "IT" }, "CASubjectOU"),
-		Entry("CA_SUBJECT_COUNTRY", "OPENVOX_CA_CA_SUBJECT_COUNTRY", "US",
-			func(c *serverConfig) bool { return c.CASubjectCountry == "US" }, "CASubjectCountry"),
-		Entry("CA_SUBJECT_LOCALITY", "OPENVOX_CA_CA_SUBJECT_LOCALITY", "Springfield",
-			func(c *serverConfig) bool { return c.CASubjectLocality == "Springfield" }, "CASubjectLocality"),
-		Entry("CA_SUBJECT_PROVINCE", "OPENVOX_CA_CA_SUBJECT_PROVINCE", "IL",
-			func(c *serverConfig) bool { return c.CASubjectProvince == "IL" }, "CASubjectProvince"),
-		Entry("CA_PATH_LENGTH_0", "OPENVOX_CA_CA_PATH_LENGTH", "0",
-			func(c *serverConfig) bool { return c.CAPathLength == 0 }, "CAPathLength=0"),
-		Entry("CA_PATH_LENGTH_1", "OPENVOX_CA_CA_PATH_LENGTH", "1",
-			func(c *serverConfig) bool { return c.CAPathLength == 1 }, "CAPathLength=1"),
-		Entry("CA_PATH_LENGTH_neg1", "OPENVOX_CA_CA_PATH_LENGTH", "-1",
-			func(c *serverConfig) bool { return c.CAPathLength == -1 }, "CAPathLength=-1 (unconstrained)"),
-		Entry("CA_VALIDITY_DAYS", "OPENVOX_CA_CA_VALIDITY_DAYS", "3650",
-			func(c *serverConfig) bool { return c.CAValidityDays == 3650 }, "CAValidityDays"),
-		Entry("LEAF_VALIDITY_DAYS", "OPENVOX_CA_LEAF_VALIDITY_DAYS", "1825",
-			func(c *serverConfig) bool { return c.LeafValidityDays == 1825 }, "LeafValidityDays"),
-		Entry("DISABLE_CRL_REFRESH", "OPENVOX_CA_DISABLE_CRL_REFRESH", "true",
-			func(c *serverConfig) bool { return c.DisableCRLRefresh }, "DisableCRLRefresh"),
-		Entry("CRL_REFRESH_INTERVAL_SEC", "OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC", "900",
-			func(c *serverConfig) bool { return c.CRLRefreshIntervalSec == 900 }, "CRLRefreshIntervalSec"),
-		Entry("CRL_REFRESH_BEFORE_SEC", "OPENVOX_CA_CRL_REFRESH_BEFORE_SEC", "86400",
-			func(c *serverConfig) bool { return c.CRLRefreshBeforeSec == 86400 }, "CRLRefreshBeforeSec"),
-		Entry("CRL_SYNC_INTERVAL_SEC", "OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", "15",
-			func(c *serverConfig) bool { return c.CRLSyncIntervalSec == 15 }, "CRLSyncIntervalSec"),
-		Entry("OCSP_INDEX_SYNC_INTERVAL_SEC", "OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "300",
-			func(c *serverConfig) bool { return c.OCSPIndexSyncIntervalSec == 300 }, "OCSPIndexSyncIntervalSec"),
-		// The zero value of RevokeOnAutoRenew is already false, so assert the
-		// env var flips it to true — a value distinct from the zero value —
-		// which proves the env key is parsed and wired to the right field. A
-		// typo in the env key would then leave it false and fail this entry.
-		Entry("REVOKE_ON_AUTO_RENEW", "OPENVOX_CA_REVOKE_ON_AUTO_RENEW", "true",
-			func(c *serverConfig) bool { return c.RevokeOnAutoRenew }, "RevokeOnAutoRenew"),
-		// Same reasoning as above: false is the zero value, so assert the env
-		// var flips it to true. A typo in the key leaves it false and fails.
-		Entry("ALLOW_SUBJECT_ALT_NAMES", "OPENVOX_CA_ALLOW_SUBJECT_ALT_NAMES", "true",
-			func(c *serverConfig) bool { return c.AllowSubjectAltNames }, "AllowSubjectAltNames"),
-		Entry("SERIAL_NUMBER_FORMAT", "OPENVOX_CA_SERIAL_NUMBER_FORMAT", "hex",
-			func(c *serverConfig) bool { return c.SerialNumberFormat == "hex" }, "SerialNumberFormat"),
-		Entry("ALLOW_DUPLICATE_CERTS", "OPENVOX_CA_ALLOW_DUPLICATE_CERTS", "true",
-			func(c *serverConfig) bool { return c.AllowDuplicateCerts }, "AllowDuplicateCerts"),
-		// Distinct values, because these two are adjacent ints with adjacent
-		// names: swapping the destinations would turn a 12-hour overlap window
-		// into a 12-hour sweep interval on a 90-second delay, and both would
-		// still "work".
-		Entry("SUPERSEDED_CERT_REVOKE_AFTER_SEC", "OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "43200",
-			func(c *serverConfig) bool { return c.SupersededCertRevokeAfterSec == 43200 },
-			"SupersededCertRevokeAfterSec"),
-		Entry("SUPERSEDED_CERT_SWEEP_INTERVAL_SEC", "OPENVOX_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC", "90",
-			func(c *serverConfig) bool { return c.SupersededCertSweepIntervalSec == 90 },
-			"SupersededCertSweepIntervalSec"),
-		// CA key provider selection and OpenBao settings. Each entry uses a
-		// distinct value and asserts the specific destination field, so a
-		// wrong target (e.g. role-id <-> secret-id, or tls_cert <-> tls_key —
-		// both security-relevant) fails rather than passing silently.
-		Entry("CA_KEY_PROVIDER", "OPENVOX_CA_CA_KEY_PROVIDER", "openbao",
-			func(c *serverConfig) bool { return c.CAKeyProvider == "openbao" }, "CAKeyProvider"),
-		Entry("OPENBAO_ADDR", "OPENVOX_CA_OPENBAO_ADDR", "https://bao:8200",
-			func(c *serverConfig) bool { return c.OpenBao.Addr == "https://bao:8200" }, "OpenBao.Addr"),
-		Entry("OPENBAO_TRANSIT_MOUNT", "OPENVOX_CA_OPENBAO_TRANSIT_MOUNT", "transit-x",
-			func(c *serverConfig) bool { return c.OpenBao.TransitMount == "transit-x" }, "OpenBao.TransitMount"),
-		Entry("OPENBAO_KEY_NAME", "OPENVOX_CA_OPENBAO_KEY_NAME", "ca-key",
-			func(c *serverConfig) bool { return c.OpenBao.KeyName == "ca-key" }, "OpenBao.KeyName"),
-		Entry("OPENBAO_TLS_CA_FILE", "OPENVOX_CA_OPENBAO_TLS_CA_FILE", "/tls/ca.pem",
-			func(c *serverConfig) bool { return c.OpenBao.TLSCAFile == "/tls/ca.pem" }, "OpenBao.TLSCAFile"),
-		Entry("OPENBAO_TLS_CERT_FILE", "OPENVOX_CA_OPENBAO_TLS_CERT_FILE", "/tls/cert.pem",
-			func(c *serverConfig) bool { return c.OpenBao.TLSCertFile == "/tls/cert.pem" }, "OpenBao.TLSCertFile"),
-		Entry("OPENBAO_TLS_KEY_FILE", "OPENVOX_CA_OPENBAO_TLS_KEY_FILE", "/tls/key.pem",
-			func(c *serverConfig) bool { return c.OpenBao.TLSKeyFile == "/tls/key.pem" }, "OpenBao.TLSKeyFile"),
-		Entry("OPENBAO_AUTH_METHOD", "OPENVOX_CA_OPENBAO_AUTH_METHOD", "kubernetes",
-			func(c *serverConfig) bool { return c.OpenBao.AuthMethod == "kubernetes" }, "OpenBao.AuthMethod"),
-		Entry("OPENBAO_APPROLE_MOUNT", "OPENVOX_CA_OPENBAO_APPROLE_MOUNT", "approle-x",
-			func(c *serverConfig) bool { return c.OpenBao.AppRoleMount == "approle-x" }, "OpenBao.AppRoleMount"),
-		Entry("OPENBAO_APPROLE_ROLE_ID", "OPENVOX_CA_OPENBAO_APPROLE_ROLE_ID", "role-id-val",
-			func(c *serverConfig) bool { return c.OpenBao.AppRoleRoleID == "role-id-val" }, "OpenBao.AppRoleRoleID"),
-		Entry("OPENBAO_APPROLE_ROLE_ID_FILE", "OPENVOX_CA_OPENBAO_APPROLE_ROLE_ID_FILE", "/creds/role-id",
-			func(c *serverConfig) bool { return c.OpenBao.AppRoleRoleIDFile == "/creds/role-id" }, "OpenBao.AppRoleRoleIDFile"),
-		Entry("OPENBAO_APPROLE_SECRET_ID_FILE", "OPENVOX_CA_OPENBAO_APPROLE_SECRET_ID_FILE", "/creds/secret-id",
-			func(c *serverConfig) bool { return c.OpenBao.AppRoleSecretIDFile == "/creds/secret-id" }, "OpenBao.AppRoleSecretIDFile"),
-		Entry("OPENBAO_TOKEN_FILE", "OPENVOX_CA_OPENBAO_TOKEN_FILE", "/creds/token",
-			func(c *serverConfig) bool { return c.OpenBao.TokenFile == "/creds/token" }, "OpenBao.TokenFile"),
-		Entry("OPENBAO_KUBERNETES_MOUNT", "OPENVOX_CA_OPENBAO_KUBERNETES_MOUNT", "k8s-x",
-			func(c *serverConfig) bool { return c.OpenBao.KubernetesMount == "k8s-x" }, "OpenBao.KubernetesMount"),
-		Entry("OPENBAO_KUBERNETES_ROLE", "OPENVOX_CA_OPENBAO_KUBERNETES_ROLE", "k8s-role",
-			func(c *serverConfig) bool { return c.OpenBao.KubernetesRole == "k8s-role" }, "OpenBao.KubernetesRole"),
-		Entry("OPENBAO_KUBERNETES_JWT_FILE", "OPENVOX_CA_OPENBAO_KUBERNETES_JWT_FILE", "/creds/sa.jwt",
-			func(c *serverConfig) bool { return c.OpenBao.KubernetesJWTFile == "/creds/sa.jwt" }, "OpenBao.KubernetesJWTFile"),
 	)
 
 	// A value that does not parse refuses startup, naming the variable. It
@@ -1207,18 +1226,13 @@ var _ = Describe("applyServerEnv each variable", func() {
 			func(c *serverConfig) *int { return &c.SupersededCertRevokeAfterSec }, 0),
 		Entry("LEAF_BACKDATE_SEC applies -1 (no gate)", "OPENVOX_CA_LEAF_BACKDATE_SEC", "-1",
 			func(c *serverConfig) *int { return &c.LeafBackdateSec }, -1),
+		// 0 is a leaf-only CA and -1 an unconstrained one, so a gate that
+		// dropped either would quietly change what the CA may sign.
+		Entry("CA_PATH_LENGTH applies 0 (no gate)", "OPENVOX_CA_CA_PATH_LENGTH", "0",
+			func(c *serverConfig) *int { return &c.CAPathLength }, 0),
+		Entry("CA_PATH_LENGTH applies -1 (no gate)", "OPENVOX_CA_CA_PATH_LENGTH", "-1",
+			func(c *serverConfig) *int { return &c.CAPathLength }, -1),
 	)
-
-	// The direction that matters for a setting that defaults to true: the
-	// environment turning it off. An entry above asserting false would pass
-	// with the variable unread, which is why this starts from the default.
-	It("lets the environment turn off a setting that defaults to true", func() {
-		clearServerEnv()
-		setEnv("OPENVOX_CA_REVOKE_ON_AUTO_RENEW", "false")
-		cfg, err := loadServerConfig("")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.RevokeOnAutoRenew).To(BeFalse())
-	})
 
 	It("reports every malformed variable, not only the first", func() {
 		clearServerEnv()
