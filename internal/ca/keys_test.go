@@ -20,7 +20,9 @@ package ca_test
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -55,6 +57,61 @@ var _ = DescribeTable("ValidateKeyConfig invalid configs",
 	Entry("RSA non-standard size", ca.KeyConfig{Algo: ca.KeyAlgoRSA, Size: 3000}),
 	Entry("ECDSA unsupported curve size", ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 192}),
 	Entry("unknown algorithm", ca.KeyConfig{Algo: "ed25519", Size: 256}),
+)
+
+// --- NewKeyLike ---
+
+// The size an RSA key comes back at is the smallest one this CA generates that
+// is not smaller than the original, so a key below policy is raised to the
+// floor rather than reproduced.
+var _ = DescribeTable("NewKeyLike follows the key it is given",
+	func(gen func() any, wantPEMType string, check func(key any)) {
+		pub := gen()
+		key, keyPEM, err := ca.NewKeyLike(pub)
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(keyPEM)
+		Expect(block).NotTo(BeNil())
+		Expect(block.Type).To(Equal(wantPEMType))
+		check(key)
+	},
+	Entry("RSA below the floor comes back at 2048", func() any {
+		k, err := rsa.GenerateKey(rand.Reader, 1024)
+		Expect(err).NotTo(HaveOccurred())
+		return &k.PublicKey
+	}, "RSA PRIVATE KEY", func(key any) {
+		Expect(key.(*rsa.PrivateKey).N.BitLen()).To(Equal(2048))
+	}),
+	Entry("RSA between sizes rounds up", func() any {
+		k, err := rsa.GenerateKey(rand.Reader, 2304)
+		Expect(err).NotTo(HaveOccurred())
+		return &k.PublicKey
+	}, "RSA PRIVATE KEY", func(key any) {
+		Expect(key.(*rsa.PrivateKey).N.BitLen()).To(Equal(3072))
+	}),
+	Entry("ECDSA keeps its curve", func() any {
+		k, err := ecdsa.GenerateKey(elliptic.P521(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		return &k.PublicKey
+	}, "EC PRIVATE KEY", func(key any) {
+		Expect(key.(*ecdsa.PrivateKey).Curve).To(Equal(elliptic.P521()))
+	}),
+)
+
+var _ = DescribeTable("NewKeyLike refuses a key this CA would not certify",
+	func(gen func() any) {
+		_, _, err := ca.NewKeyLike(gen())
+		Expect(err).To(MatchError(ca.ErrKeyPolicy))
+	},
+	Entry("Ed25519", func() any {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		return pub
+	}),
+	Entry("an unapproved ECDSA curve", func() any {
+		k, err := ecdsa.GenerateKey(elliptic.P224(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		return &k.PublicKey
+	}),
 )
 
 var _ = Describe("Default key config constants", func() {

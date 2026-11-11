@@ -83,7 +83,7 @@ const (
 //   - tierPublic: no client cert required (bootstrap endpoints)
 //   - tierOwnClient: a client certificate this CA itself issued
 //   - tierSelfOrAdmin: own cert or admin CN
-//   - tierAdminOnly: admin CN only (signing, revocation, generation, status reads)
+//   - tierAdminOnly: admin CN only (signing, revocation, generation, operator renewal, status reads)
 //
 // tierOwnClient was tierAnyClient ("any certificate that chains to our trust
 // anchor"). The two only ever coincided because there was a single issuer; once

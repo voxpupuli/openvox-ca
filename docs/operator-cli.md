@@ -181,6 +181,42 @@ openvox-ca-ctl generate --certname agent.example.com --dns alt.example.com --out
 openvox-ca-ctl generate --certname agent.example.com --dns a.example.com,b.example.com
 openvox-ca-ctl generate --certname agent.example.com --dns a.example.com --dns b.example.com
 
+# Renew a certificate whose holder runs no agent to renew it -- a CA-only host,
+# or a component certificate made with generate. It goes through the running
+# server (POST /renew/{subject}, admin only), and the new certificate carries
+# the same subject and extensions as the one it replaces. That one stays valid
+# for the server's superseded_cert_revoke_after_sec (24 hours by default), so
+# whatever holds it can pick up the replacement first.
+#
+# By default a new key of the same algorithm as the current one is generated
+# here (an RSA key below 2048 bits comes back at 2048), written to
+# --out-dir/<certname>_key.pem exactly as generate writes its key, and never
+# sent anywhere. The certificate goes to stdout and everything else to stderr.
+# Nothing is written if the server refuses; if the key cannot be written after
+# the server has renewed, run renew again.
+#
+# A key already at that path is overwritten in place once the server has
+# renewed, and renew says so. If it is the key a service is still using with
+# the old certificate, install the new certificate beside it straight away:
+# the overlap window keeps the old certificate valid for whoever verifies it,
+# but the old key is gone from the file. Point --out-dir elsewhere to keep both.
+openvox-ca-ctl renew --certname component.example.com --out-dir /etc/ssl > component.pem
+
+# Renew onto a key the holder generated itself, from its CSR
+openvox-ca-ctl renew --certname component.example.com --csr component.csr > component.pem
+
+# Reissue over the current key. Needs no private key, so it works for a
+# certificate whose key you do not hold, and it is the only way to renew a
+# certificate carrying pp_cli_auth: the server refuses to re-key one, because
+# that would hand an administrator credential to a new key.
+openvox-ca-ctl renew --certname component.example.com --keep-key > component.pem
+
+# The server refuses (409) a certificate that is revoked, already superseded,
+# expired (clean it and generate a new one), or one it manages itself
+# (managed_certs, or its own serving certificate),
+# and refuses a name it has no certificate for (404). See docs/api.md,
+# "Renewal by an operator".
+
 # Import a certificate issued outside this CA's normal flow (e.g. migrated
 # from a legacy CA sharing this CA's key)
 openvox-ca-ctl import-cert --certname legacy-node.example.com --cert-file legacy-node_cert.pem
@@ -767,6 +803,17 @@ says so: you may be revoking the certificate the server is currently serving.
 
 `--force` revokes the serial of the certificate in storage, which is not
 necessarily every live serial for the name — see the withdrawal note below.
+
+**To replace a certificate while the server runs, use `openvox-ca-ctl renew`
+instead** (see [subcommands](#subcommands)). The two are not alternatives:
+`renew` is online, keeps the certificate's names and extensions, and leaves the
+old certificate valid for the server's overlap window; `--force` is offline,
+issues whatever this invocation asks for, and revokes the old certificate at
+once. On the filesystem and SQLite backends `generate` already refuses while a
+server holds the store, and under `--force` that refusal names `renew`. A
+backend with distributed locking has no such lock, so nothing can tell whether
+a server is running: there `--force` goes ahead and prints a note naming
+`renew`, for the case where one is.
 
 #### Administrator credentials
 

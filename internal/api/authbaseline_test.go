@@ -627,6 +627,23 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 			fingerprint: "8c543c73b603d38c",
 			baseline:    "b384bfaa38f960fd",
 		},
+		{
+			// Admin-only via lookupTier's default arm (#247). Recorded because
+			// what it issues carries whatever the stored certificate carries,
+			// pp_cli_auth included when reissued over the same key, so a
+			// widening here would let a non-admin extend an admin credential.
+			name: "admin: renew a stored certificate", method: "POST",
+			path: "/renew/no-such-node",
+			denied: map[string]bool{
+				"none": true, "own-ca-plain": true, "own-ca-allowlisted": false,
+				"own-ca-pp-cli-auth": false, "own-ca-admin-both": false, "own-ca-issued": true,
+				"own-ca-expired": true, "own-ca-revoked": true, "own-ca-server-eku": true,
+				"own-ca-pp-cli-auth-false": true, "untrusted-ca": true,
+				"client-ca-plain": true,
+			},
+			fingerprint: "021408dd530f086f",
+			baseline:    "81880de2e07bd2a5",
+		},
 	}
 
 	// probe runs one route against one client class at pathPrefix and reports
@@ -1169,6 +1186,7 @@ var expectedRoutes = []string{
 	"admin: sign all pending",
 	"admin: reissue the CRL",
 	"admin: revoke a specific serial",
+	"admin: renew a stored certificate",
 }
 
 // rowDigest hashes what a row records. Sorted so it does not depend on map

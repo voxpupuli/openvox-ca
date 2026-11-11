@@ -339,7 +339,7 @@ It is also asked *again* once the per-subject lock is held, immediately before t
 
 The re-read is best-effort in one direction: if the storage read itself fails, the check falls back to the CRL already in memory rather than refusing every renewal in the fleet over a storage blip. A renewal in that window is then bounded by the same propagation window as everything else, not by the stronger guarantee above. `openvoxca_crl_sync_failures_total` counts those failures — see [metrics](metrics.md#crl). See also [Revocation across replicas](configuration.md#revocation-across-replicas).
 
-`revoke_on_auto_renew` (env `OPENVOX_CA_REVOKE_ON_AUTO_RENEW`, default `true`) controls whether the certificate replaced by an auto-renewal (empty body) is revoked. The default keeps only the newest serial per subject valid. Set to `false` to match OpenVox Server's own (Clojure) CA exactly, which leaves the replaced certificate valid — for the same key — until it naturally expires. This setting has no effect on the CSR-body (re-key) path, which always retires the certificate it replaces. It is a *whether*, not a *when*: [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession) decides how long the replaced certificate stays valid first, on both paths, and with `revoke_on_auto_renew: false` the auto-renewal path records nothing at all rather than deferring anything.
+`revoke_on_auto_renew` (env `OPENVOX_CA_REVOKE_ON_AUTO_RENEW`, default `true`) controls whether the certificate replaced by an auto-renewal (empty body) is revoked, and likewise for an operator's empty-body [`POST /renew/{subject}`](#renewal-by-an-operator). The default keeps only the newest serial per subject valid. Set to `false` to match OpenVox Server's own (Clojure) CA exactly, which leaves the replaced certificate valid — for the same key — until it naturally expires. This setting has no effect on the CSR-body (re-key) path, which always retires the certificate it replaces. It is a *whether*, not a *when*: [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession) decides how long the replaced certificate stays valid first, on both paths, and with `revoke_on_auto_renew: false` the auto-renewal path records nothing at all rather than deferring anything.
 
 > **CRL growth:** with the default `true`, every auto-renewal appends the retired serial to the CRL, and the entry stays there until the certificate expires. Entries are only pruned by the expired-certificate cleanup job, which is off by default — enable `enable_expired_cert_cleanup` to bound CRL size on busy CAs, and watch `openvoxca_crl_revoked_certificates` to keep an eye on it. Revocation is best-effort (a failure never fails the renewal), and which counter sees a failure depends on which path retired the certificate. Retiring it *immediately* — the default, with no overlap window configured — puts a CRL that could not be read, re-signed or written into `openvoxca_crl_update_failures_total`, so that counter catches most, but not all, of them: a CRL lock the renewal could not take is logged only. Retiring it *later*, with [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession) set, puts every failure to record the supersession into `openvoxca_supersede_failures_total` instead — the lock acquisition included, because a supersession that was never recorded is lost outright rather than merely missing from the CRL. See [delayed supersession](metrics.md#delayed-supersession). A superseded certificate left valid this way is reachable only by [revocation by serial](#revocation-by-serial): asking for its subject would revoke the replacement instead. See [Authorization tiers](#authorization-tiers) for the same distinction on the clean path.
 
@@ -354,6 +354,33 @@ The supersession condition can only *refuse* where an overlap window is configur
 The issuer condition is reachable as soon as a `client_ca` entry is configured — see [trusting client certificates from another CA](configuration.md#trusting-client-certificates-from-another-ca). Renewal is scoped to domain zero, this CA's own: a foreign certificate authenticates and may hold admin authority in its own domain, but it has no standing to renew, because renewal reissues under our authority using the presented certificate's own subject, which is only safe for names we assigned. It is answered `403 certificate not eligible for renewal`. With no `client_ca` configured there is one trust domain and the condition stays unreachable, as it always was.
 
 The subject condition cannot be reached from HTTP at all, because the handler derives the subject from the presented certificate; it guards future callers of the internal API.
+
+## Renewal by an operator
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/renew/{subject}` | Renew the certificate stored for `{subject}`; body: raw CSR PEM, or empty; returns the new certificate PEM. Admin only. openvox-ca's own route: OpenVox Server has no equivalent |
+
+For a certificate whose holder runs no agent to renew it — a CA-only host, or a component certificate minted with `POST /generate/{subject}` — this renews it on the caller's authority rather than its own. [`openvox-ca-ctl renew`](operator-cli.md#subcommands) drives it.
+
+It behaves as [`POST /certificate_renewal`](#certificate-renewal) would if the stored certificate had presented itself:
+
+- **Empty body:** the stored certificate's own public key is reissued with a fresh serial and validity. That needs no private key, so it works for a certificate whose key the operator does not hold.
+- **CSR body (re-key):** the CSR's key is certified instead. Its Common Name must be `{subject}`, and the key is the only thing taken from it.
+
+Either way the new certificate recreates the stored one exactly as an agent renewal does: same subject, every extension carried forward, nothing added. The certificate it replaces is retired as the matching agent path retires it — always on a re-key, and on an empty body only while `revoke_on_auto_renew` is on — and [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession) decides whether that is at once or after the overlap window, so both certificates verify while whatever holds the old one picks up the new.
+
+| Status | When |
+| --- | --- |
+| `400 Bad Request` | An invalid subject, or a CSR that does not parse, whose signature does not verify, or whose Common Name is not `{subject}` |
+| `404 Not Found` | No certificate is stored for `{subject}` |
+| `409 Conflict` | The certificate is revoked, already superseded, expired, not issued by this CA, or managed by this CA (a [`managed_certs`](configuration.md) entry or the CA's own self-provisioned serving certificate, which the CA renews itself); or the request is a re-key of a certificate carrying an authorisation-arc extension such as `pp_cli_auth` |
+| `422 Unprocessable Entity` | The key, stored or in the CSR, falls below the CA key-strength policy |
+| `503 Service Unavailable` | The CA has not finished initialising |
+
+**An expired certificate cannot be renewed.** An agent's renewal never meets one, because the mTLS layer refuses an expired certificate before it can ask; a stored certificate passes no such check, so this route makes its own. Clean a lapsed certificate and generate a new one instead.
+
+**A certificate carrying `pp_cli_auth` can be renewed only over its own key.** Renewal carries authorisation-arc extensions forward, so a re-key here would hand a CA administrator credential to whoever holds the new key, which no other route can do. The same-key reissue extends the credential only for the key that already held it. A new administrator credential still takes [`openvox-ca generate --pp-cli-auth`](operator-cli.md#generate-minting-a-certificate-offline).
 
 ## Bulk signing
 
@@ -502,7 +529,7 @@ When mTLS is enabled — TLS configured by any route: `--tls-cert`/`--tls-key`, 
 | **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
 | **Own client** | A cert **this CA** issued, with `clientAuth` EKU | `POST /certificate_renewal` — restricted to certificates this CA issued (see [renewal eligibility](#renewal-eligibility)); renewal reissues under our authority using that certificate's own subject, which is only safe for names we assigned. Both paths carry that certificate's subject and extensions forward unchanged, authorization-arc OIDs included; the CSR path takes only a new key from the CSR (see [Certificate renewal](#certificate-renewal)) |
 | **Self or admin** | Cert CN matches path subject **and was issued by this CA**, OR cert is admin | `GET /certificate_request/{subject}` |
-| **Admin** | Cert is admin (see below) | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca`, `PUT /certificate/{subject}`, `PUT /certificate_status_by_serial/{serial}` |
+| **Admin** | Cert is admin (see below) | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `POST /renew/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca`, `PUT /certificate/{subject}`, `PUT /certificate_status_by_serial/{serial}` |
 
 Above the public tier, a presented certificate must also be **currently valid,
 not revoked, and carry the `clientAuth` extended key usage**: an expired

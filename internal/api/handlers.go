@@ -211,6 +211,7 @@ func (s *Server) Routes() http.Handler {
 		{"PUT", "/clean", s.handlePutClean},
 		{"POST", "/generate/{subject}", s.handlePostGenerate},
 		{"POST", "/certificate_renewal", s.handlePostCertificateRenewal},
+		{"POST", "/renew/{subject}", s.handlePostRenew},
 	}
 
 	prefixes := []string{"", "/puppet-ca/v1"}
@@ -1804,6 +1805,86 @@ func (s *Server) handlePostCertificateRenewal(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	w.Header().Set("Content-Type", "text/plain")
+	w.Write(certPEM)
+}
+
+// --- Operator renewal ---
+
+// handlePostRenew renews the certificate stored for {subject} on the caller's
+// authority, for a holder that runs no agent to renew itself (#247). It is
+// admin-only, through lookupTier's default arm.
+//
+// The body mirrors POST /certificate_renewal: empty reissues over the stored
+// certificate's own key, a CSR re-keys onto the CSR's. Nothing else in the
+// request reaches the certificate -- see CA.RenewStored for what is carried
+// and what is refused.
+func (s *Server) handlePostRenew(w http.ResponseWriter, r *http.Request) {
+	subject := r.PathValue("subject")
+	if err := ca.ValidateSubject(subject); err != nil {
+		http.Error(w, "invalid subject", http.StatusBadRequest)
+		return
+	}
+	client := clientOf(r)
+	slog.Debug("POST renew", "subject", subject, "client", client)
+
+	// SECURITY: Limit body to 1 MiB, as on the agent renewal route.
+	// NIST 800-53: SC-5 (Denial-of-Service Protection)
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		slog.Error("read renew body failed", "client", client, "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	var csrPEM []byte
+	if strings.TrimSpace(string(body)) != "" {
+		csrPEM = body
+	}
+
+	certPEM, err := s.CA.RenewStored(r.Context(), subject, csrPEM)
+	if err != nil {
+		// Every refusal below is about the state of a subject the caller named,
+		// so the bodies are fixed text; the detail goes to the log.
+		status, msg := http.StatusInternalServerError, "internal server error"
+		switch {
+		case errors.Is(err, ca.ErrNotFound):
+			status, msg = http.StatusNotFound, "no certificate is stored for this subject"
+		case errors.Is(err, ca.ErrRenewalCSR):
+			// Names only what the caller's own CSR holds, so it is safe to echo.
+			status, msg = http.StatusBadRequest, err.Error()
+		case errors.Is(err, ca.ErrManagedSubject):
+			status, msg = http.StatusConflict, "certificate is managed by this CA and renewed by it"
+		case errors.Is(err, ca.ErrRekeyAuthorised):
+			status, msg = http.StatusConflict, "certificate carries authorisation extensions; "+
+				"renew it over its own key, without a CSR"
+		// Superseded before revoked: ErrCertSuperseded wraps ErrCertRevoked, so
+		// the other order would answer every superseded certificate as revoked.
+		case errors.Is(err, ca.ErrCertSuperseded):
+			status, msg = http.StatusConflict, "certificate has already been superseded"
+		case errors.Is(err, ca.ErrCertRevoked):
+			status, msg = http.StatusConflict, "certificate is revoked"
+		case errors.Is(err, ca.ErrRenewalExpired):
+			status, msg = http.StatusConflict, "certificate has expired; clean it and generate a new one"
+		case errors.Is(err, ca.ErrForeignCertificate):
+			status, msg = http.StatusConflict, "stored certificate was not issued by this CA"
+		case errors.Is(err, ca.ErrKeyPolicy):
+			status, msg = http.StatusUnprocessableEntity, "key does not meet policy; renew with a new key"
+		case errors.Is(err, ca.ErrNotInitialized):
+			status, msg = http.StatusServiceUnavailable, "CA not ready"
+		}
+		if status == http.StatusInternalServerError {
+			slog.Error("Renew failed", "subject", subject, "client", client, "error", err)
+		} else {
+			slog.Warn("Renew refused", "subject", subject, "client", client, "status", status, "error", err)
+		}
+		http.Error(w, msg, status)
+		return
+	}
+
+	// Not counted with the destructive operations (revoke, clean): a renewal
+	// leaves the subject a working certificate, and a same-key one with
+	// revoke_on_auto_renew off retires nothing at all.
+	slog.Info("Certificate renewed by operator", "subject", subject, "client", client, "rekey", csrPEM != nil)
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write(certPEM)
 }
