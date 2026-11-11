@@ -109,8 +109,9 @@ compares the selected material with the file:
   the filesystem backend and point the export at a path the packages had linked
   into the old CA directory.
 - **Anything else** at the path (a directory, a FIFO, a device) is refused and
-  left in place. A FIFO is never opened, since reading one would block the
-  export.
+  left in place. A FIFO is never read, since reading one would block the
+  export, and the comparison judges the file it actually opened, so a FIFO or
+  link swapped in after the check is refused too.
 
 The export does not create directories, change the mode or owner of an existing
 file, or remove a file.
@@ -153,8 +154,8 @@ for `cadir`:
 ```ini
 # /etc/systemd/system/openvox-ca.service.d/file-export.conf
 [Service]
-ReadWritePaths=/etc/puppetlabs/puppet/ssl /srv/trust
-ReadOnlyPaths=/etc/puppetlabs/puppet/ssl/private_keys
+ReadWritePaths=-/etc/puppetlabs/puppet/ssl -/srv/trust
+ReadOnlyPaths=-/etc/puppetlabs/puppet/ssl/private_keys
 ```
 
 That covers all three targets in the example above: `/etc/puppetlabs/puppet/ssl`
@@ -162,6 +163,12 @@ holds `crl.pem` and, below it, `certs/ca.pem`. The writable path has to be the
 **directory**, not the file: each write creates a temporary file beside the
 target and renames it into place. Without the drop-in every sync fails with a
 read-only filesystem error, and the alert below fires.
+
+Keep the `-` in front of each path. It tells systemd to skip a path that does
+not exist, so a directory missing on one host fails only the export that
+needed it. Without it, systemd refuses to start the CA at all (status
+`226/NAMESPACE`), which is a much larger failure than the one the export is
+designed to have (checked on systemd 257).
 
 The drop-in lifts systemd's read-only mount and nothing more. The shipped unit
 runs as `User=puppet`, so each target's directory must also let that user
