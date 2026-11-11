@@ -18,6 +18,10 @@
 package fileexport_test
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -50,6 +54,22 @@ var _ = Describe("Config", func() {
 		It("uses interval_sec when set", func() {
 			Expect((&fileexport.Config{IntervalSec: 30}).Interval()).To(Equal(30 * time.Second))
 		})
+	})
+
+	// fileExportStaleAfterSeconds in the mixin assumes the CA never syncs less
+	// often than every MaxIntervalSec: at twice the ceiling, two attempts must
+	// fail before a target looks stale. Both sides state that coupling and
+	// neither can see the other, so raising the ceiling alone would page on
+	// every slow sync. This reads the mixin's default and fails if they part.
+	It("keeps the interval ceiling at most half the mixin's stale threshold", func() {
+		cfg, err := os.ReadFile(filepath.Join("..", "..", "mixin", "config.libsonnet"))
+		Expect(err).NotTo(HaveOccurred())
+		m := regexp.MustCompile(`(?m)^\s*fileExportStaleAfterSeconds:\s*(\d+),`).FindSubmatch(cfg)
+		Expect(m).NotTo(BeNil(), "fileExportStaleAfterSeconds not found in mixin/config.libsonnet")
+		staleAfter, err := strconv.Atoi(string(m[1]))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(staleAfter).To(BeNumerically(">=", 2*fileexportconfig.MaxIntervalSec),
+			"the stale threshold must span at least two syncs at the longest interval accepted")
 	})
 
 	Describe("Validate", func() {
