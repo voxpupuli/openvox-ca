@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 )
@@ -143,6 +144,26 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// rateLimitKey is what the per-IP limiters count r under: the client's IPv4
+// address, or its IPv6 address masked to prefixLen bits, so that one host
+// holding a routed prefix cannot claim a fresh budget per source address. An
+// IPv4-mapped IPv6 address counts as the IPv4 address it carries, and a zone
+// is dropped. A prefixLen outside 1-127 keys on the whole address, which is
+// the default. A peer address that does not parse is used as it stands.
+// NIST 800-53: SC-5 (Denial-of-Service Protection)
+func rateLimitKey(r *http.Request, prefixLen int) string {
+	host := clientIP(r)
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	addr = addr.Unmap().WithZone("")
+	if addr.Is4() || prefixLen <= 0 || prefixLen >= 128 {
+		return addr.String()
+	}
+	return netip.PrefixFrom(addr, prefixLen).Masked().String()
 }
 
 // destructiveOpTracker is a fixed-window per-identity counter for destructive

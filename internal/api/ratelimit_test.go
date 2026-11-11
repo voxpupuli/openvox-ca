@@ -20,6 +20,7 @@ package api
 import (
 	"bytes"
 	"log/slog"
+	"net/http/httptest"
 	"strings"
 	"time"
 
@@ -202,6 +203,25 @@ var _ = Describe("ipRateLimiter", func() {
 		})
 	})
 })
+
+var _ = DescribeTable("rateLimitKey",
+	func(remoteAddr string, prefixLen int, want string) {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = remoteAddr
+		Expect(rateLimitKey(r, prefixLen)).To(Equal(want))
+	},
+	Entry("IPv4 is per address", "192.0.2.10:1234", 64, "192.0.2.10"),
+	Entry("IPv6 at 128 is per address", "[2001:db8:1:2::10]:1234", 128, "2001:db8:1:2::10"),
+	Entry("IPv6 at the zero value is per address", "[2001:db8:1:2::10]:1234", 0, "2001:db8:1:2::10"),
+	Entry("IPv6 at 64 is its /64", "[2001:db8:1:2::10]:1234", 64, "2001:db8:1:2::/64"),
+	Entry("IPv6 at 48 is its /48", "[2001:db8:1:2::10]:1234", 48, "2001:db8:1::/48"),
+	// An IPv4 client reaching a dual-stack socket arrives mapped. It must
+	// count as the IPv4 address, not as one of 2^32 addresses in ::ffff:0:0/96
+	// that a short prefix would put in one budget.
+	Entry("IPv4-mapped IPv6 counts as IPv4", "[::ffff:192.0.2.10]:1234", 64, "192.0.2.10"),
+	Entry("a zone is dropped", "[fe80::1%eth0]:1234", 128, "fe80::1"),
+	Entry("an unparsable peer is used as it stands", "pipe", 64, "pipe"),
+)
 
 // The saturation warning names the limiter, and that name is the only thing
 // in it telling an operator which endpoint is refusing new clients.

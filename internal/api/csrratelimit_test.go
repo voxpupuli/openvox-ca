@@ -152,6 +152,18 @@ var _ = Describe("CSR rate limit reporting", func() {
 			)))
 		})
 
+		// Under a prefix length an IPv6 client is refused for its prefix's
+		// use, not its own, so the Warn has to say which prefix.
+		It("names the prefix it counted when IPv6 addresses share a budget", func() {
+			srv.RateLimitIPv6PrefixLength = 64
+			allow("[2001:db8::1]:1000")
+			refuse("[2001:db8::2]:1000")
+			Expect(warnLines()).To(ConsistOf(SatisfyAll(
+				ContainSubstring("client_ip=2001:db8::2"),
+				ContainSubstring("rate_limit_key=2001:db8::/64"),
+			)))
+		})
+
 		It("logs the refusals between Warns at Debug", func() {
 			allow("192.0.2.1:1000")
 			for range 3 {

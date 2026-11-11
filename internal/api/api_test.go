@@ -2255,6 +2255,27 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Code).To(Equal(http.StatusTooManyRequests))
 		})
 
+		// The prefix length is shared with the OCSP limiter: CSR submission
+		// has the same per-address bypass from a routed /64.
+		It("counts addresses in one IPv6 /64 against one budget when the prefix length is 64", func() {
+			limitedServer := api.New(myCA)
+			limitedServer.CSRRateLimit = 1
+			limitedServer.RateLimitIPv6PrefixLength = 64
+			limitedMux := limitedServer.Routes()
+
+			put := func(remoteAddr string) int {
+				csrPEM, err := testutil.GenerateCSR("rl6-node")
+				Expect(err).NotTo(HaveOccurred())
+				req := httptest.NewRequest("PUT", "/certificate_request/rl6-node", bytes.NewReader(csrPEM))
+				req.RemoteAddr = remoteAddr
+				rr := httptest.NewRecorder()
+				limitedMux.ServeHTTP(rr, req)
+				return rr.Code
+			}
+			Expect(put("[2001:db8:1:2::1]:1000")).NotTo(Equal(http.StatusTooManyRequests))
+			Expect(put("[2001:db8:1:2::2]:1000")).To(Equal(http.StatusTooManyRequests))
+		})
+
 		It("should not rate-limit when CSRRateLimit is zero (default)", func() {
 			// The shared server has no rate limit set; submit many requests.
 			for range 5 {
