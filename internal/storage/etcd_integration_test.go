@@ -2180,3 +2180,61 @@ var _ = Describe("EtcdBackendSubjectBlobLifecycle", func() {
 		subjectBlobLifecycle(newBackend(cli, "/test-subject-blobs"))
 	})
 })
+
+// Rows and head in one Txn: a replica verifying while a peer appends must
+// never read the append as tampering (see inventory_snapshot_test.go).
+var _ = Describe("EtcdInventoryEntriesWithHead", func() {
+	It("returns the rows and the head the store holds, from one read", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		svc, b := newEtcdInventoryService(cli, "/test-ewh")
+		for _, line := range sampleInventoryLines {
+			Expect(svc.AppendInventory(ctx, line)).To(Succeed())
+		}
+
+		entries, head, present, err := b.EntriesWithHead(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(present).To(BeTrue())
+		Expect(entries).To(HaveLen(len(sampleInventoryLines)))
+		stored, err := svc.backend.Get(ctx, KeyInventoryHMAC)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(head).To(Equal(stored))
+	})
+
+	It("reports a store with no head as having none", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		b := newBackend(cli, "/test-ewh-none")
+		Expect(NewWithBackend(b, "").TouchInventory(ctx)).To(Succeed())
+
+		_, head, present, err := b.EntriesWithHead(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(present).To(BeFalse())
+		Expect(head).To(BeNil())
+	})
+
+	It("refuses a head it cannot decode rather than reading it as absent", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		ctx := context.Background()
+		_, b := newEtcdInventoryService(cli, "/test-ewh-bad")
+		_, err := cli.Put(ctx, b.invPhys(etcdInvHMACSub), "x")
+		Expect(err).NotTo(HaveOccurred())
+
+		_, _, _, err = b.EntriesWithHead(ctx)
+		Expect(err).To(MatchError(ContainSubstring("decoding inventory head")))
+	})
+})
+
+var _ = Describe("EtcdInventoryVerificationBesidePeerAppends", func() {
+	It("never reads a peer's append as tampering", func() {
+		cli, stop := startEmbeddedEtcd()
+		defer stop()
+		reader, _ := newEtcdInventoryService(cli, "/test-snapshot")
+		writer, _ := newEtcdInventoryService(cli, "/test-snapshot")
+
+		expectVerificationBesidePeerAppends(reader, writer)
+	})
+})

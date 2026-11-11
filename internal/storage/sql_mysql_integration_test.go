@@ -345,3 +345,23 @@ var _ = Describe("MySQL subject CSR and certificate lifecycle", func() {
 		subjectBlobLifecycle(newMySQLBackend())
 	})
 })
+
+// Rows and head in one REPEATABLE READ transaction: a replica verifying while
+// a peer appends must never read the append as tampering. Read as two separate
+// statements, outside a transaction, each took its own snapshot, whatever
+// InnoDB's isolation (see inventory_snapshot_test.go).
+var _ = Describe("MySQL inventory verification beside a peer's appends", func() {
+	It("never reads a peer's append as tampering", func() {
+		ctx := context.Background()
+		reader := NewWithBackend(newMySQLBackend(), "")
+		Expect(reader.TouchInventory(ctx)).To(Succeed())
+		Expect(reader.InitHMAC(ctx)).To(Succeed())
+		peer, err := NewSQLBackend(SQLConfig{Dialect: SQLMySQL, DSN: mysqlDSNFromEnv()})
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = peer.Close() })
+		writer := NewWithBackend(peer, "")
+		Expect(writer.InitHMAC(ctx)).To(Succeed())
+
+		expectVerificationBesidePeerAppends(reader, writer)
+	})
+})

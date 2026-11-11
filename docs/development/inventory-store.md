@@ -89,9 +89,17 @@ type InventoryStore interface {
     // below); only its canonical InventoryEntry fields feed the chain.
     AppendEntry(ctx context.Context, rec CertRecord, newHead func(prev []byte) []byte) error
 
-    // Entries returns every entry in issuance order, for the OCSP index build
-    // and for chain verification.
+    // Entries returns every entry in issuance order, for the unverified
+    // lookups (SerialExists, SubjectForSerial) and for computing a head to
+    // write. A verifying read, the OCSP index build included, uses
+    // EntriesWithHead.
     Entries(ctx context.Context) ([]InventoryEntry, error)
+
+    // EntriesWithHead returns the entries and the stored integrity head from
+    // one snapshot (one transaction, Txn or MULTI/EXEC), so that a peer's
+    // append or prune cannot land between the two reads and look like
+    // tampering. headPresent is false when no head is stored.
+    EntriesWithHead(ctx context.Context) (entries []InventoryEntry, head []byte, headPresent bool, err error)
 
     // LatestSerialForSubject returns the most recently issued serial for
     // subject, wrapping fs.ErrNotExist when the subject has no entry.
@@ -116,9 +124,13 @@ type InventoryStore interface {
   bytes from `ReadInventory` (the logic moved out of `ca.findSerialForSubject`).
 - **`computeInventoryHMAC`** → structured: fold the chain over `Entries`; blob:
   HMAC over the blob bytes (unchanged).
+- **`InventoryEntries`, `VerifyInventoryHMAC` and `InventoryIntegrityReport`**
+  → structured: fold the chain over `EntriesWithHead` and compare with the head
+  it returned, never a head fetched separately; blob: the blob and the stored
+  value, read apart, which only the single-instance filesystem backend does.
 - **`ReadInventory` / `TouchInventory` / `HasInventory`** keep using the blob
   path; for structured backends they are served by the render/parse shim
-  (below), which keeps migration and the OCSP index build working unchanged.
+  (below), which keeps migration working unchanged.
 
 ### Integrity: a hash chain
 

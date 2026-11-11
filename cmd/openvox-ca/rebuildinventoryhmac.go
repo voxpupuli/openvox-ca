@@ -479,12 +479,16 @@ func reportInventoryIntegrity(w io.Writer, rep storage.InventoryIntegrityReport)
 		_, _ = fmt.Fprintf(w, "  verifies:      no baseline stored yet, which is not a mismatch\n")
 	default:
 		_, _ = fmt.Fprintf(w, "  verifies:      NO\n")
-		// The caveat belongs beside the verdict, not only in the documentation:
-		// this report takes no store-wide lock and reads the inventory and the
-		// stored value separately, so a NO read against a running CA can be a
-		// torn read rather than a real mismatch.
-		_, _ = fmt.Fprintf(w, "                 (if the server is running, re-check with it stopped:\n"+
-			"                 this report is two reads and takes no store-wide lock)\n")
+		// The caveat belongs beside the verdict, not only in the documentation,
+		// and only where it is true. Under the whole-blob scheme this report
+		// takes no store-wide lock and reads the inventory and the stored value
+		// separately, so a NO read against a running CA can be a torn read
+		// rather than a real mismatch. The structured backends read both from
+		// one snapshot, so their NO is a real one.
+		if rep.Scheme == storage.InventorySchemeWholeBlob {
+			_, _ = fmt.Fprintf(w, "                 (if the server is running, re-check with it stopped:\n"+
+				"                 this report is two reads and takes no store-wide lock)\n")
+		}
 	}
 }
 

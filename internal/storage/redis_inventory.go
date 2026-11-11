@@ -460,7 +460,8 @@ return {'ok'}
 // readInventorySnapshot returns every stored record in issuance order together
 // with the sequence-counter value and the integrity head payload, read
 // atomically in one MULTI/EXEC so a mutation cannot land between the three.
-func (b *RedisBackend) readInventorySnapshot(ctx context.Context) (recs []indexedRecord, seq string, head []byte, err error) {
+// headPresent is false when no head is stored.
+func (b *RedisBackend) readInventorySnapshot(ctx context.Context) (recs []indexedRecord, seq string, head []byte, headPresent bool, err error) {
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
 
@@ -475,33 +476,34 @@ func (b *RedisBackend) readInventorySnapshot(ctx context.Context) (recs []indexe
 		headCmd = p.Get(ctx, b.invPhys(redisInvHMACSub))
 		return nil
 	}); err != nil && !errors.Is(err, redis.Nil) {
-		return nil, "", nil, err
+		return nil, "", nil, false, err
 	}
 
 	seq = "0"
 	if v, err := seqCmd.Result(); err == nil {
 		seq = v
 	} else if !errors.Is(err, redis.Nil) {
-		return nil, "", nil, err
+		return nil, "", nil, false, err
 	}
 
 	fields, err := entriesCmd.Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
-		return nil, "", nil, err
+		return nil, "", nil, false, err
 	}
 	recs, err = decodeEntryFields(fields)
 	if err != nil {
-		return nil, "", nil, err
+		return nil, "", nil, false, err
 	}
 
 	if raw, err := headCmd.Bytes(); err == nil {
 		if _, head, err = decodeBlob(raw); err != nil {
-			return nil, "", nil, fmt.Errorf("decoding inventory head: %w", err)
+			return nil, "", nil, false, fmt.Errorf("decoding inventory head: %w", err)
 		}
+		headPresent = true
 	} else if !errors.Is(err, redis.Nil) {
-		return nil, "", nil, err
+		return nil, "", nil, false, err
 	}
-	return recs, seq, head, nil
+	return recs, seq, head, headPresent, nil
 }
 
 // decodeEntryFields turns an inventory:entries HGETALL into records sorted by
@@ -526,11 +528,21 @@ func decodeEntryFields(fields map[string]string) ([]indexedRecord, error) {
 
 // Entries returns every inventory entry in issuance order.
 func (b *RedisBackend) Entries(ctx context.Context) ([]InventoryEntry, error) {
-	recs, _, _, err := b.readInventorySnapshot(ctx)
+	recs, _, _, _, err := b.readInventorySnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return entriesOf(recs), nil
+}
+
+// EntriesWithHead returns every inventory entry in issuance order and the
+// stored integrity head, from the one MULTI/EXEC readInventorySnapshot issues.
+func (b *RedisBackend) EntriesWithHead(ctx context.Context) ([]InventoryEntry, []byte, bool, error) {
+	recs, _, head, present, err := b.readInventorySnapshot(ctx)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return entriesOf(recs), head, present, nil
 }
 
 // LatestSerialForSubject returns the most recently issued serial for subject,
@@ -657,7 +669,7 @@ func (b *RedisBackend) PruneEntries(ctx context.Context, keep func(InventoryEntr
 	defer b.appendMu.Unlock()
 
 	for attempt := range redisMaxRetries {
-		recs, seq, head, err := b.readInventorySnapshot(ctx)
+		recs, seq, head, _, err := b.readInventorySnapshot(ctx)
 		if err != nil {
 			return nil, err
 		}
