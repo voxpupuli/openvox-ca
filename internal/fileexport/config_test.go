@@ -46,7 +46,9 @@ var _ = Describe("Config", func() {
 	})
 
 	Describe("Interval", func() {
-		It("defaults to the CRL sync interval's default when unset", func() {
+		// That this equals crl_sync_interval_sec's default, as the docs say, is
+		// pinned in cmd/openvox-ca, the one package that can see both constants.
+		It("defaults to sixty seconds when unset", func() {
 			Expect((&fileexport.Config{}).Interval()).To(Equal(fileexportconfig.DefaultInterval))
 			Expect(fileexportconfig.DefaultInterval).To(Equal(60 * time.Second))
 		})
