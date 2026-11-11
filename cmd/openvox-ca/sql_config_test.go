@@ -19,9 +19,9 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -140,20 +140,29 @@ var _ = Describe("--sql-dsn and --sql-dsn-file", func() {
 				logFile = filepath.Join(GinkgoT().TempDir(), "ca.log")
 			})
 
-			// execute runs the root command, bounded so that a refusal which
+			// executeWith runs the root command, bounded so that a refusal which
 			// regressed fails the spec rather than hanging it.
-			execute := func(args ...string) error {
+			executeWith := func(args ...string) error {
 				GinkgoHelper()
 				cmd := newRootCmd()
 				cmd.SetOut(GinkgoWriter)
 				cmd.SetErr(GinkgoWriter)
-				cmd.SetArgs(append([]string{"--config", emptyConfig, "--cadir", caDir,
-					"--sql-dsn", "postgres://ca:" + secret + "@db/ca"}, args...))
+				cmd.SetArgs(append([]string{"--config", emptyConfig, "--cadir", caDir}, args...))
 				done := make(chan error, 1)
 				go func() { done <- cmd.Execute() }()
 				var err error
 				Eventually(done, "30s").Should(Receive(&err))
 				return err
+			}
+
+			// execute runs it with the password-bearing --sql-dsn. The backend
+			// is postgres because a DSN on the filesystem backend is refused
+			// before any role configures its logger (#484). Only the signer gets
+			// as far as connecting, and 127.0.0.1:1 refuses it at once.
+			execute := func(args ...string) error {
+				GinkgoHelper()
+				return executeWith(append([]string{"--storage-backend", "postgres",
+					"--sql-dsn", "postgres://ca:" + secret + "@127.0.0.1:1/ca"}, args...)...)
 			}
 
 			// The TLS refusal comes straight after a server role configures
@@ -191,11 +200,12 @@ var _ = Describe("--sql-dsn and --sql-dsn-file", func() {
 			})
 
 			It("is not said by the signer, which carries the same argv", func() {
-				// Without a launcher the signer fails for its own reasons --
-				// there is no socket to serve -- after configuring its logger.
-				bootstrapCAInDir(caDir, "puppet.example.com")
+				// The signer configures its logger, then fails at its first use
+				// of the store, which is the database execute names and nothing
+				// is listening on.
 				setEnv("OPENVOX_CA_ROLE", "signer")
-				Expect(execute("--host", "127.0.0.1", "--port", "0", "--logfile", logFile)).To(HaveOccurred())
+				Expect(execute("--host", "127.0.0.1", "--port", "0", "--logfile", logFile)).To(
+					MatchError(ContainSubstring("sql database not reachable")))
 
 				Expect(buf.String()).NotTo(ContainSubstring(warning))
 				logged, readErr := os.ReadFile(logFile)
@@ -206,15 +216,17 @@ var _ = Describe("--sql-dsn and --sql-dsn-file", func() {
 			})
 
 			It("is said by a --daemon parent before it forks, whose child's stderr is discarded", func() {
-				// Holding the store makes the parent refuse before the fork,
-				// the way a second instance would; the warning must already
-				// have been said by then.
-				ul, err := storage.New(caDir).AcquireInstanceLock(context.Background())
-				Expect(err).NotTo(HaveOccurred())
-				DeferCleanup(func() { _ = ul.Unlock() })
+				// A DSN with no storage_backend makes the parent refuse before
+				// the fork (#484); the warning must already have been said by
+				// then. The fork is stubbed so that, were the refusal to
+				// regress, this would fail rather than fork the test binary.
+				orig := startDaemonChild
+				startDaemonChild = func(*exec.Cmd) error { return errStubbedFork }
+				DeferCleanup(func() { startDaemonChild = orig })
 
-				err = execute("--host", "127.0.0.1", "--port", "0", "--daemon")
-				Expect(err).To(MatchError(ContainSubstring("already running against this store")))
+				err := executeWith("--sql-dsn", "postgres://ca:"+secret+"@db/ca",
+					"--host", "127.0.0.1", "--port", "0", "--daemon")
+				Expect(err).To(MatchError(ContainSubstring("storage_backend is not set")))
 				Expect(buf.String()).To(ContainSubstring("--sql-dsn contains a database password"))
 				Expect(buf.String()).NotTo(ContainSubstring(secret))
 			})

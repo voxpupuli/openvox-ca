@@ -18,7 +18,10 @@
 package config
 
 import (
+	"fmt"
 	"path/filepath"
+	"reflect"
+	"strings"
 
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
@@ -98,11 +101,17 @@ type StorageConfig struct {
 // fields. localDir is the operational directory on local disk: the backend
 // root for the filesystem backend, and the location of per-subject generated
 // private keys for every backend. It returns an error for an unknown backend
-// name.
+// name, and for a filesystem backend given settings only another backend reads
+// (see refuseFilesystemWithBackendSettings).
 func (c StorageConfig) ToBackendSpec(localDir string) (storage.BackendSpec, error) {
 	kind, err := storage.ParseBackendKind(c.StorageBackend)
 	if err != nil {
 		return storage.BackendSpec{}, err
+	}
+	if kind == storage.BackendFilesystem {
+		if err := c.refuseFilesystemWithBackendSettings(); err != nil {
+			return storage.BackendSpec{}, err
+		}
 	}
 	spec := storage.BackendSpec{
 		Kind:       kind,
@@ -155,6 +164,104 @@ func (c StorageConfig) ToBackendSpec(localDir string) (storage.BackendSpec, erro
 		}
 	}
 	return spec, nil
+}
+
+// backendSettingPrefixes are the key prefixes of the settings that only a
+// backend other than the filesystem one reads. Every other StorageConfig key
+// (storage_backend itself, ca_cert_file, ca_key_file) applies to every backend.
+var backendSettingPrefixes = []string{"etcd_", "redis_", "sql_"}
+
+// refuseFilesystemWithBackendSettings refuses a configuration that resolves to
+// the filesystem backend while setting anything only another backend reads.
+//
+// The filesystem backend ignores those settings, so such a configuration
+// starts on whatever store is under cadir. Where cadir is not persistent and
+// everything durable lives in a database, that is an empty store: the CA
+// comes up ready, knows of no issued certificates and no revocations, and
+// serves an empty CRL, so clients checking it accept revoked certificates.
+// storage_backend goes missing without an error in ordinary ways — a Helm
+// values file that sets the DSN and leaves the key out, a misspelt
+// environment variable name — and an explicit `filesystem` beside a DSN is as
+// likely a leftover as a choice, so both are refused.
+//
+// The settings are found by key prefix rather than listed, so a setting added
+// to an existing backend is covered without anyone remembering to add it here.
+func (c StorageConfig) refuseFilesystemWithBackendSettings() error {
+	set := c.backendSettingsSet()
+	if len(set) == 0 {
+		return nil
+	}
+	return &BackendSettingsError{StorageBackend: c.StorageBackend, Keys: set}
+}
+
+// BackendSettingsError is the refusal ToBackendSpec returns for a filesystem
+// backend given settings only another backend reads.
+//
+// It names each setting by its config-file key. A caller whose configuration
+// also reads the environment sets EnvPrefix, so that the message names each
+// setting's variable too: an operator whose DSN arrives as OPENVOX_CA_SQL_DSN
+// finds no sql_dsn to remove in the config file.
+type BackendSettingsError struct {
+	// StorageBackend is storage_backend as configured, empty when unset.
+	StorageBackend string
+	// Keys are the settings found, by config-file key, in declaration order.
+	Keys []string
+	// EnvPrefix, when set, names each key's environment variable as well:
+	// EnvPrefix followed by the key in upper case.
+	EnvPrefix string
+}
+
+func (e *BackendSettingsError) Error() string {
+	selected := "storage_backend is not set, so the filesystem backend is selected"
+	if e.StorageBackend != "" {
+		// Quoted: it may have come from the environment.
+		selected = fmt.Sprintf("storage_backend is %q, the filesystem backend", e.StorageBackend)
+	}
+	names := make([]string, len(e.Keys))
+	for i, key := range e.Keys {
+		names[i] = key
+		if e.EnvPrefix != "" {
+			names[i] += " or " + e.EnvPrefix + strings.ToUpper(key)
+		}
+	}
+	return fmt.Sprintf("%s, but settings only another backend reads are set (%s): "+
+		"the filesystem backend would ignore them and use the store under cadir, "+
+		"so set storage_backend to the backend they configure, or remove them",
+		selected, strings.Join(names, ", "))
+}
+
+// backendSettingsSet returns, in declaration order, the keys of the settings
+// with a backendSettingPrefixes prefix that hold a value. A zero number or an
+// empty string or list counts as unset, since nothing distinguishes it from a
+// key left out.
+func (c StorageConfig) backendSettingsSet() []string {
+	v := reflect.ValueOf(c)
+	t := v.Type()
+	var set []string
+	for i := range t.NumField() {
+		key, _, _ := strings.Cut(t.Field(i).Tag.Get("yaml"), ",")
+		if !hasBackendSettingPrefix(key) {
+			continue
+		}
+		f := v.Field(i)
+		if f.Kind() == reflect.Slice {
+			if f.Len() > 0 {
+				set = append(set, key)
+			}
+		} else if !f.IsZero() {
+			set = append(set, key)
+		}
+	}
+	return set
+}
+
+func hasBackendSettingPrefix(key string) bool {
+	for _, p := range backendSettingPrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // absIfSet returns filepath.Abs(p) when p is non-empty, otherwise "".

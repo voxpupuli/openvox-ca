@@ -297,6 +297,11 @@ All four read the **server's** configuration, not `openvox-ca-ctl`'s: `--config`
 `ctl.yaml` has no effect on them. `--cadir` overrides the configured storage
 directory for a one-off run.
 
+They refuse what the server refuses: a configuration that sets another
+backend's settings, such as `sql_dsn`, while the backend resolves to filesystem
+is refused before anything is opened — see the [filesystem
+backend](storage-backends.md#filesystem-backend-default).
+
 ```bash
 # Emit a certificate signing request for the CA's own key, for an external
 # parent CA to sign. Works for every ca_key_provider.

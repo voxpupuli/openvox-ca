@@ -44,6 +44,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/config"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
 	"github.com/voxpupuli/openvox-ca/internal/sdnotify"
@@ -428,8 +429,19 @@ func shellQuote(s string) string {
 // signer, single-process), ensuring backend selection happens in one place.
 // The backend-selection logic is shared with the operator CLI's migrate
 // command via config.StorageConfig.ToBackendSpec.
+//
+// A refusal of another backend's settings on the filesystem backend names
+// each setting's environment variable as well as its key, since the server,
+// unlike migrate, reads them from the environment too.
 func buildBackendSpec(cfg *serverConfig, absCADir string) (storage.BackendSpec, error) {
-	return cfg.StorageConfig.ToBackendSpec(absCADir)
+	spec, err := cfg.StorageConfig.ToBackendSpec(absCADir)
+	var bse *config.BackendSettingsError
+	if errors.As(err, &bse) {
+		named := *bse
+		named.EnvPrefix = "OPENVOX_CA_" // applyServerEnv's prefix for every one of them
+		return spec, &named
+	}
+	return spec, err
 }
 
 // buildAuthConfig assembles the API's authorisation configuration: the admin CN
