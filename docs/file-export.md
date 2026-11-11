@@ -163,6 +163,16 @@ holds `crl.pem` and, below it, `certs/ca.pem`. The writable path has to be the
 target and renames it into place. Without the drop-in every sync fails with a
 read-only filesystem error, and the alert below fires.
 
+The drop-in lifts systemd's read-only mount and nothing more. The shipped unit
+runs as `User=puppet`, so each target's directory must also let that user
+create files in it, as a [managed certificate's `files`
+store](configuration.md#managed-certificates) does; either missing fails the
+same way. On a host where openvox-agent created `/etc/puppetlabs/puppet/ssl` and
+`certs/` as root, making them writable by `puppet` hands that account the
+agent's own trust anchor, which is a decision to take knowingly (see [why
+`puppet` and not a private account](systemd.md#why-puppet-and-not-a-private-account)).
+A directory of the CA's own avoids the question.
+
 `ReadWritePaths=` lifts the read-only mount for the whole tree below each path,
 so granting `/etc/puppetlabs/puppet/ssl` alone would leave only file
 permissions between the CA's user and everything else in it, the host's own
