@@ -971,7 +971,10 @@ type serverEnvBinding struct {
 }
 
 // serverEnvBindings is every variable applyServerEnv reads, one entry each, in
-// the order it reads them.
+// the order it reads them. The names are literals, but they cannot drift on
+// their own: "the server's environment variables" in envbinding_test.go
+// requires them to be exactly the names applyServerEnv reads and the docs
+// tables list, so a rename on either side without the other fails there.
 //
 // Each sample value differs from the field's default, and the spec checks
 // that, because an entry whose value is the default passes with the variable
