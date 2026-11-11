@@ -118,6 +118,14 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		// component's material -- is refused by servingChainCollision, because
 		// internal/certstore only refuses it within one block.
 		"serving_cert.store.files.ca": "chain files are shareable by design; see the shared-chain rule",
+
+		// A file export target is a writer, like a managed certificate's store,
+		// and is checked the same way: checkFileExport compares each one against
+		// everything caOwnedPaths returns plus every managed and serving store
+		// path. That one check refuses a collision whichever block the operator
+		// wrote second, so reserving the target here as well would only refuse
+		// the same pair twice under the managed_certs name.
+		"file_export.targets[].path": "the export's own target, which checkFileExport compares against",
 	}
 
 	// pathShaped decides which YAML keys name a filesystem location.

@@ -924,6 +924,21 @@ func (c Config) CheckReservedPathsIn(block Block, reserved []ReservedPath) error
 	return nil
 }
 
+// Covers reports whether r covers path: equality for a file, containment for a
+// tree. Both sides are cleaned first, and a relative r covers nothing -- the
+// caller is expected to have resolved it, as caOwnedPaths does.
+//
+// Exported for file_export, whose targets are checked against the same reserved
+// set in cmd/openvox-ca, so the two checks cannot disagree about what "inside
+// cadir" means.
+func (r ReservedPath) Covers(path string) bool {
+	root, p := cleanPath(r.Path), cleanPath(path)
+	if root == "" || p == "" || !filepath.IsAbs(root) {
+		return false
+	}
+	return reservedCovers(root, r.Tree, p)
+}
+
 // reservedCovers reports whether a reserved path covers a store path: equality
 // for a file, and containment for a tree.
 //
