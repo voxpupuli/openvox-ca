@@ -66,8 +66,19 @@ func checkFileExport(cfg *serverConfig, absCADir, configPath string) error {
 		return err
 	}
 	reserved = append(reserved, managedStorePaths(cfg)...)
-	for i := range cfg.FileExport.Targets {
-		t := &cfg.FileExport.Targets[i]
+	return checkTargetsAgainst(cfg.FileExport.Targets, reserved)
+}
+
+// checkTargetsAgainst refuses the first target that lands on a reserved path.
+//
+// Apart from checkFileExport so that the relative-path refusal can be driven by
+// a spec. Both producers of the reserved set resolve every path with
+// filepath.Abs, so no configuration reaches that branch today; it stands
+// against a future producer that forgets to, and a refusal nothing can reach is
+// one nothing notices being deleted.
+func checkTargetsAgainst(targets []fileexport.Target, reserved []certstore.ReservedPath) error {
+	for i := range targets {
+		t := &targets[i]
 		for _, r := range reserved {
 			if strings.TrimSpace(r.Path) == "" {
 				continue
@@ -184,10 +195,16 @@ func runFileExporter(ctx context.Context, exporter *fileexport.Exporter, interva
 }
 
 // syncFilesOnce runs a single sync. Per-target failures are already logged by
-// SyncAll, which names each one; this logs only that the cycle had some.
+// SyncAll, which names each one with its error; this logs only how many there
+// were. Repeating the joined error here would print every failure twice, once a
+// minute, for as long as a misconfiguration lasts.
 func syncFilesOnce(ctx context.Context, exporter *fileexport.Exporter) {
 	if err := exporter.SyncAll(ctx); err != nil {
-		slog.Warn("File export cycle completed with errors", "error", err)
+		failed := 1
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			failed = len(joined.Unwrap())
+		}
+		slog.Warn("File export cycle completed with errors", "failed_targets", failed)
 		return
 	}
 	slog.Debug("File export cycle complete")

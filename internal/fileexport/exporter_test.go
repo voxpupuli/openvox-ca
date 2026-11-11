@@ -321,6 +321,56 @@ var _ = Describe("Exporter", func() {
 			Expect(syncs(crlPath, "error")).To(Equal(1.0))
 		})
 
+		// The two ways a target can fail to be inspected. Each decides what
+		// happens to a file the CA cannot see into, and the answer has to be
+		// "leave it": treating either as "differs" would rename a fresh file
+		// over one an operator locked down, and count it a success.
+		It("keeps a file it cannot read to compare, and counts the failure", func() {
+			if os.Geteuid() == 0 {
+				Skip("root reads through a 0000 mode")
+			}
+			// Same length as the material, so the size check cannot settle it
+			// and the read has to happen.
+			other := upstreamCRL + ownCRL
+			Expect(len(other)).To(Equal(len(crlChain)))
+			Expect(os.WriteFile(crlPath, []byte(other), 0o600)).To(Succeed())
+			Expect(os.Chmod(crlPath, 0o000)).To(Succeed())
+			DeferCleanup(os.Chmod, crlPath, fs.FileMode(0o600))
+			before, err := os.Stat(crlPath)
+			Expect(err).NotTo(HaveOccurred())
+
+			exp := newExporter(fileexport.Target{Path: crlPath, Material: "crl"})
+			Expect(exp.SyncAll(ctx)).To(MatchError(ContainSubstring("to compare it")))
+
+			after, err := os.Stat(crlPath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.SameFile(before, after)).To(BeTrue(), "the unreadable file must not have been replaced")
+			Expect(after.Mode().Perm()).To(Equal(fs.FileMode(0o000)))
+			Expect(syncs(crlPath, "error")).To(Equal(1.0))
+			Expect(syncs(crlPath, "success")).To(Equal(0.0))
+		})
+
+		It("fails a target whose path cannot be inspected at all, and writes nothing", func() {
+			if os.Geteuid() == 0 {
+				Skip("root searches a directory without its search bit")
+			}
+			locked := filepath.Join(dir, "locked")
+			Expect(os.Mkdir(locked, 0o755)).To(Succeed())
+			target := filepath.Join(locked, "crl.pem")
+			Expect(os.WriteFile(target, []byte(ownCRL), 0o644)).To(Succeed())
+			// Readable but not searchable: Lstat on anything inside fails with
+			// EACCES, which is neither "absent" nor an answer.
+			Expect(os.Chmod(locked, 0o600)).To(Succeed())
+			DeferCleanup(os.Chmod, locked, fs.FileMode(0o755))
+
+			exp := newExporter(fileexport.Target{Path: target, Material: "crl"})
+			Expect(exp.SyncAll(ctx)).To(MatchError(ContainSubstring("checking " + target)))
+			Expect(syncs(target, "error")).To(Equal(1.0))
+
+			Expect(os.Chmod(locked, 0o755)).To(Succeed())
+			Expect(readFile(target)).To(Equal(ownCRL))
+		})
+
 		It("reports a missing directory rather than creating it, and still writes the rest", func() {
 			missing := filepath.Join(dir, "absent", "crl.pem")
 			exp := newExporter(

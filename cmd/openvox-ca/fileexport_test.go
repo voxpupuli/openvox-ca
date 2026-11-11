@@ -22,11 +22,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,6 +115,19 @@ var _ = Describe("checkFileExport", func() {
 		Entry("a managed chain file", "ca"),
 	)
 
+	// No producer of the reserved set hands back a relative path today, so this
+	// branch is reached only through the helper. It refuses rather than
+	// skipping: a relative path can never equal an absolute target, and
+	// skipping would be a gap that reads as a pass.
+	It("refuses to compare against a reserved path that is not absolute", func() {
+		targets := []fileexport.Target{{Path: filepath.Join(out, "crl.pem"), Material: "crl"}}
+		err := checkTargetsAgainst(targets, []certconfig.ReservedPath{
+			{Setting: "some_setting", Path: "relative/ca_crt.pem"},
+		})
+		Expect(err).To(MatchError(And(
+			ContainSubstring("some_setting"), ContainSubstring("not an absolute path"))))
+	})
+
 	DescribeTable("refuses a target over the CA's serving certificate store",
 		func(field, setting string) {
 			files := &certconfig.FilesConfig{
@@ -163,12 +178,17 @@ var _ = Describe("runFileExporter", func() {
 		exp := fileexport.New(cfg, src, nil)
 
 		ctx, cancel := context.WithCancel(context.Background())
-		DeferCleanup(cancel)
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
 			runFileExporter(ctx, exp, 50*time.Millisecond, 1)
 		}()
+		// Waits as well as cancels, so that a failed Eventually below cannot
+		// leave the loop writing into a TempDir that cleanup is removing.
+		DeferCleanup(func() {
+			cancel()
+			Eventually(done).WithTimeout(5 * time.Second).Should(BeClosed())
+		})
 
 		Eventually(func() (string, error) {
 			b, err := os.ReadFile(path)
@@ -185,6 +205,35 @@ var _ = Describe("runFileExporter", func() {
 
 		cancel()
 		Eventually(done).WithTimeout(5 * time.Second).Should(BeClosed())
+	})
+
+	It("logs a failed cycle by count, leaving each error to the line that names its target", func() {
+		dir := GinkgoT().TempDir()
+		cfg := fileexport.Config{Targets: []fileexport.Target{
+			{Path: filepath.Join(dir, "absent", "crl.pem"), Material: "crl"},
+			{Path: filepath.Join(dir, "gone", "crl.pem"), Material: "crl"},
+		}}
+		Expect(cfg.Validate()).To(Succeed())
+		exp := fileexport.New(cfg, &stubMaterial{crl: []byte("CRL")}, nil)
+
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		DeferCleanup(func() { slog.SetDefault(orig) })
+
+		syncFilesOnce(context.Background(), exp)
+
+		var cycle []string
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if strings.Contains(line, "File export cycle completed with errors") {
+				cycle = append(cycle, line)
+			}
+		}
+		Expect(cycle).To(HaveLen(1))
+		Expect(cycle[0]).To(ContainSubstring("failed_targets=2"))
+		Expect(cycle[0]).NotTo(ContainSubstring("absent"),
+			"the cycle line must not repeat the per-target errors logged above it")
+		Expect(strings.Count(buf.String(), `msg="File export failed for target"`)).To(Equal(2))
 	})
 
 	// An hour's interval, so the write the spec waits for cannot be a tick's:
