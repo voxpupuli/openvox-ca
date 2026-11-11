@@ -203,10 +203,10 @@ func New(c *ca.CA) *Server {
 // so the Go CA can be used directly or behind a stripping proxy.
 func (s *Server) Routes() http.Handler {
 	if s.CSRRateLimit > 0 {
-		s.csrLimiter = newIPRateLimiter(s.CSRRateLimit, time.Minute)
+		s.csrLimiter = newIPRateLimiter("csr", s.CSRRateLimit, time.Minute)
 	}
 	if s.OCSPEnabled && s.OCSPRateLimit > 0 {
-		s.ocspLimiter = newIPRateLimiter(s.OCSPRateLimit, time.Minute)
+		s.ocspLimiter = newIPRateLimiter("ocsp", s.OCSPRateLimit, time.Minute)
 	}
 
 	mux := http.NewServeMux()

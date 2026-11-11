@@ -18,6 +18,7 @@
 package api
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -26,17 +27,34 @@ import (
 
 // ipRateLimiter is a fixed-window per-IP rate limiter.
 // Each IP address is allowed at most maxReqs requests per window duration.
-// Old windows are evicted lazily on access so memory stays bounded over time.
+//
+// Memory is bounded by maxEntries tracked addresses. Expired windows are
+// swept only when the map is full, and then no more than once per tenth of a
+// window, so a flood of new addresses costs one map scan per sweep interval
+// rather than one per request. A new address that arrives while the map is
+// full is refused, as if it were over its limit, unless a sweep is due and
+// frees room; between sweeps that holds even for windows that have expired
+// since the last one. Past the cap the choice is between refusing new clients
+// and not limiting them, and on an endpoint this protects the second is the
+// flood winning.
 //
 // SECURITY: Applied, as two separate limiters, to the unauthenticated
 // PUT /certificate_request endpoint to prevent CSR flooding, and to the OCSP
 // responder, where a nonced request costs a CA-key signature.
 // NIST 800-53: SC-5 (Denial-of-Service Protection)
 type ipRateLimiter struct {
-	mu      sync.Mutex
-	window  time.Duration
-	maxReqs int
-	entries map[string]*rlEntry
+	mu sync.Mutex
+	// name identifies the limiter in its saturation warning.
+	name       string
+	window     time.Duration
+	maxReqs    int
+	maxEntries int
+	entries    map[string]*rlEntry
+	// nextSweep is the earliest time a full map may be swept again.
+	nextSweep time.Time
+	// now returns the current time. It defaults to time.Now and is overridden
+	// in tests to drive window expiry deterministically without sleeping.
+	now func() time.Time
 }
 
 type rlEntry struct {
@@ -44,11 +62,14 @@ type rlEntry struct {
 	count int
 }
 
-func newIPRateLimiter(maxReqs int, window time.Duration) *ipRateLimiter {
+func newIPRateLimiter(name string, maxReqs int, window time.Duration) *ipRateLimiter {
 	return &ipRateLimiter{
-		window:  window,
-		maxReqs: maxReqs,
-		entries: make(map[string]*rlEntry),
+		name:       name,
+		window:     window,
+		maxReqs:    maxReqs,
+		maxEntries: maxRateLimitEntries,
+		entries:    make(map[string]*rlEntry),
+		now:        time.Now,
 	}
 }
 
@@ -57,25 +78,46 @@ func newIPRateLimiter(maxReqs int, window time.Duration) *ipRateLimiter {
 const maxRateLimitEntries = 100_000
 
 // Allow reports whether the request from ip should be allowed.
-// Returns false when the per-window request count has been exceeded.
+// Returns false when the per-window request count has been exceeded, or when
+// ip is not tracked, the limiter is already tracking maxEntries addresses, and
+// either no sweep is due (at most window/10 since the last) or the sweep frees
+// nothing.
+//
+// A sweep that frees nothing logs a warning: from then on every new client is
+// refused, though none has exceeded its own budget, and nothing else on the
+// server says so. Sweeps are rationed, so the warning is too. It is written
+// after the mutex is released, since every request waits on it.
 func (l *ipRateLimiter) Allow(ip string) bool {
-	now := time.Now()
+	now := l.now()
+	var saturated bool
+	defer func() {
+		if saturated {
+			slog.Warn("Per-IP rate limiter is full; refusing every new client address until windows expire",
+				"limiter", l.name, "tracked", l.maxEntries, "window", l.window)
+		}
+	}()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	e, ok := l.entries[ip]
-	if !ok || now.Sub(e.start) >= l.window {
-		// Evict stale entries periodically to bound memory usage.
-		if len(l.entries) >= maxRateLimitEntries {
-			l.evictExpired(now)
+	if ok && now.Sub(e.start) < l.window {
+		if e.count >= l.maxReqs {
+			return false
 		}
-		l.entries[ip] = &rlEntry{start: now, count: 1}
+		e.count++
 		return true
 	}
-	if e.count >= l.maxReqs {
-		return false
+	if !ok && len(l.entries) >= l.maxEntries {
+		if !now.Before(l.nextSweep) {
+			l.evictExpired(now)
+			l.nextSweep = now.Add(l.window / 10)
+			saturated = len(l.entries) >= l.maxEntries
+		}
+		if len(l.entries) >= l.maxEntries {
+			return false
+		}
 	}
-	e.count++
+	l.entries[ip] = &rlEntry{start: now, count: 1}
 	return true
 }
 

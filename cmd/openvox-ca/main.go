@@ -670,8 +670,10 @@ func newOCSPRateLimitedCounter(reg prometheus.Registerer) prometheus.Counter {
 		Subsystem: "ocsp",
 		Name:      "rate_limited_total",
 		Help: "Total OCSP requests refused with RFC 6960 tryLater over HTTP 429 because their " +
-			"client address was over ocsp_rate_limit. Unlike openvoxca_ca_signing_shed_total, " +
-			"which counts the responder at capacity, this counts clients over their own budget.",
+			"client address was over ocsp_rate_limit, or was new while the limiter was already " +
+			"tracking its maximum of addresses and no sweep freed room. Unlike " +
+			"openvoxca_ca_signing_shed_total, which counts the responder at capacity, this " +
+			"counts clients over their own budget.",
 	})
 	reg.MustRegister(c)
 	return c
