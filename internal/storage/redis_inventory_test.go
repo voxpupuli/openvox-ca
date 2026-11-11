@@ -1509,3 +1509,55 @@ var _ = Describe("RedisMigrateFromFilesystem", func() {
 		Expect(serial).To(Equal("3"), "the subject index must be built during import")
 	})
 })
+
+var _ = Describe("RedisInventoryEntriesWithHead", func() {
+	It("returns the rows and the head the store holds, from one read", func() {
+		svc, b, _, stop := newRedisInventoryService()
+		defer stop()
+		ctx := context.Background()
+
+		entries, head, present, err := b.EntriesWithHead(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(present).To(BeTrue())
+		Expect(entries).To(HaveLen(len(sampleInventoryLines)))
+		stored, err := svc.backend.Get(ctx, KeyInventoryHMAC)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(head).To(Equal(stored))
+	})
+
+	It("reports a store with no head as having none", func() {
+		ctx := context.Background()
+		_, cli, stop := newMiniredis()
+		defer stop()
+		b := newRedisBackend(cli, redisTestPrefix)
+		Expect(NewWithBackend(b, "").TouchInventory(ctx)).To(Succeed())
+
+		_, head, present, err := b.EntriesWithHead(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(present).To(BeFalse())
+		Expect(head).To(BeNil())
+	})
+
+	It("refuses a head it cannot decode rather than reading it as absent", func() {
+		_, b, _, stop := newRedisInventoryService()
+		defer stop()
+		ctx := context.Background()
+		Expect(b.client.Set(ctx, b.invPhys(redisInvHMACSub), "x", 0).Err()).To(Succeed())
+
+		_, _, _, err := b.EntriesWithHead(ctx)
+		Expect(err).To(MatchError(ContainSubstring("decoding inventory head")))
+	})
+
+	It("never reads a peer's append as tampering", func() {
+		ctx := context.Background()
+		_, cli, stop := newMiniredis()
+		defer stop()
+		reader := NewWithBackend(newRedisBackend(cli, redisTestPrefix), "")
+		Expect(reader.TouchInventory(ctx)).To(Succeed())
+		Expect(reader.InitHMAC(ctx)).To(Succeed())
+		writer := NewWithBackend(newRedisBackend(cli, redisTestPrefix), "")
+		Expect(writer.InitHMAC(ctx)).To(Succeed())
+
+		expectVerificationBesidePeerAppends(reader, writer)
+	})
+})

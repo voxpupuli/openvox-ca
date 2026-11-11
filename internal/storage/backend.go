@@ -459,9 +459,24 @@ type InventoryStore interface {
 	// CertRecord).
 	AppendEntry(ctx context.Context, rec CertRecord, newHead func(prev []byte) []byte) error
 
-	// Entries returns every entry in issuance order, for the OCSP index build
-	// and for chain verification.
+	// Entries returns every entry in issuance order, for the unverified lookups
+	// (SerialExists, SubjectForSerial) and for computing a head to write. A
+	// read that verifies against the stored head, the OCSP index build
+	// included, uses EntriesWithHead instead.
 	Entries(ctx context.Context) ([]InventoryEntry, error)
+
+	// EntriesWithHead returns what Entries returns together with the stored
+	// integrity head, read in one snapshot: one transaction, Txn or MULTI, so
+	// that an append or prune another replica commits cannot land between the
+	// two reads. headPresent is false when no head is stored at all.
+	//
+	// Verification must use this rather than Entries followed by a separate
+	// read of KeyInventoryHMAC. The two reads see different states whenever a
+	// peer writes in between, and the fold over one state's rows then
+	// mismatches the other state's head, which reads as tampering. AppendEntry
+	// and PruneEntries already write rows and head together; this is the read
+	// half of the same contract.
+	EntriesWithHead(ctx context.Context) (entries []InventoryEntry, head []byte, headPresent bool, err error)
 
 	// LatestSerialForSubject returns the most recently issued serial for
 	// subject. Wraps os.ErrNotExist when the subject has no entry.
