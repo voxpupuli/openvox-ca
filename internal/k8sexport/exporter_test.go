@@ -704,8 +704,9 @@ var _ = Describe("Export scopes", func() {
 		Expect(cm.Data["ca.crt"]).To(ContainSubstring("Uk9PVA=="))
 		Expect(cm.Data["ca.crt"]).NotTo(ContainSubstring("SU5URVJNRURJQVRF"))
 		// A narrowing crl_scope, not "chain": ScopeChain short-circuits inside
-		// scoped() and returns the blob untouched, so asserting it would hold
-		// with the CRL scoping deleted from the ConfigMap path entirely.
+		// exportconfig.Scoped and returns the blob untouched, so asserting it
+		// would hold with the CRL scoping deleted from the ConfigMap path
+		// entirely.
 		Expect(cm.Data["ca.crl"]).To(ContainSubstring("T1VSUw=="))
 		Expect(cm.Data["ca.crl"]).NotTo(ContainSubstring("VVBTVFJFQU0="),
 			"crl_scope: self must narrow the ConfigMap the same way it narrows a Secret")
@@ -727,7 +728,7 @@ var _ = Describe("Export scopes", func() {
 	)
 
 	It("publishes block 0 for self even when block 0 is not this CA's", func() {
-		// scoped is positional: self takes blocks[0] and root takes the last.
+		// Scoped is positional: self takes blocks[0] and root takes the last.
 		// That rests on an invariant enforced in another package -- orderCRLChain
 		// puts this CA's own CRL first -- and that invariant is knowingly
 		// violable: a CA whose stored block 0 is an ancestor's CRL starts and
@@ -750,12 +751,13 @@ var _ = Describe("Export scopes", func() {
 		Expect(string(data["ca.crl"])).NotTo(ContainSubstring("T1VSUw=="))
 	})
 
-	// scoped() and validate() have to agree about what an unset scope means, and
-	// only validate() is exercised by everything above -- every other spec here
-	// calls Validate() first, which fills the scopes in. A Target built in code
-	// and exported without validation is the case where scoped() answers alone,
-	// and answering "self" there would narrow silently: the failure the chain
-	// default exists to prevent, reachable by a missed Validate() call.
+	// exportconfig.Scoped and validate() have to agree about what an unset
+	// scope means, and only validate() is exercised by everything above --
+	// every other spec here calls Validate() first, which fills the scopes in.
+	// A Target built in code and exported without validation is the case where
+	// Scoped answers alone, and answering "self" there would narrow silently:
+	// the failure the chain default exists to prevent, reachable by a missed
+	// Validate() call.
 	It("publishes the whole chain for a target whose scopes were never validated", func() {
 		cfg := k8sexport.Config{Targets: []k8sexport.Target{{
 			Kind:     "Secret",
