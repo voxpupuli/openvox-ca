@@ -8,8 +8,8 @@
 # These cover the rules whose firing behaviour is not obvious from reading the
 # PromQL:
 #
-#   * OpenVoxCACRLStale, the only expression in the mixin built from set
-#     operators (`or`, `unless`, `and on(...)`). Its two arms exist for
+#   * OpenVoxCACRLStale, built from set operators (`or`, `unless`,
+#     `and on(...)`) like several rules below. Its two arms exist for
 #     different failure shapes and the qualifier on the second exists to keep it
 #     quiet during a third.
 #   * The upstream CRL chain rules, which turn on a timing argument rather than

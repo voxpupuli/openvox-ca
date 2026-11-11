@@ -748,6 +748,40 @@ kubernetes_export:
 		Expect(cfg.KubernetesExport.Targets[1].CRLKey).To(Equal("ca.crl")) // defaulted
 	})
 
+	// Every file_export spec but the serve one builds the block in Go, and that
+	// one sets only path and material. So these tags are pinned here: a renamed
+	// interval_sec or scope tag would be refused by DecodeStrict, but only at
+	// an operator's next restart.
+	It("parses a file_export block", func() {
+		clearServerEnv()
+
+		content := `
+cadir: /tmp/myca
+file_export:
+  interval_sec: 30
+  targets:
+    - path: /srv/trust/root.pem
+      material: cert
+      scope: root
+    - path: /srv/trust/crl.pem
+      material: crl
+`
+		cfgFile := writeTempConfig(content)
+		cfg, err := loadServerConfig(cfgFile)
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+
+		Expect(cfg.FileExport.Enabled()).To(BeTrue())
+		Expect(cfg.FileExport.IntervalSec).To(Equal(30))
+		Expect(cfg.FileExport.Targets).To(HaveLen(2))
+		Expect(cfg.FileExport.Targets[0].Path).To(Equal("/srv/trust/root.pem"))
+		Expect(cfg.FileExport.Targets[0].Material).To(Equal("cert"))
+		Expect(cfg.FileExport.Targets[0].Scope).To(Equal("root"))
+
+		Expect(cfg.FileExport.Validate()).To(Succeed())
+		Expect(cfg.FileExport.Interval()).To(Equal(30 * time.Second))
+		Expect(cfg.FileExport.Targets[1].Scope).To(Equal("chain")) // defaulted
+	})
+
 	It("rejects an invalid kubernetes_export block", func() {
 		clearServerEnv()
 

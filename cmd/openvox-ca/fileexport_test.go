@@ -236,6 +236,33 @@ var _ = Describe("runFileExporter", func() {
 		Expect(strings.Count(buf.String(), `msg="File export failed for target"`)).To(Equal(2))
 	})
 
+	// startFileExport is the one place the configured interval reaches the
+	// timer; the specs around this one hand runFileExporter an interval
+	// directly. A one-second interval_sec has to carry a change to the file well
+	// inside five seconds, which the sixty-second default cannot.
+	It("runs the loop at the configured interval_sec, not the default", func() {
+		path := filepath.Join(GinkgoT().TempDir(), "crl.pem")
+		cfg := fileexport.Config{IntervalSec: 1, Targets: []fileexport.Target{{Path: path, Material: "crl"}}}
+		Expect(cfg.Validate()).To(Succeed())
+		src := &stubMaterial{crl: []byte("FIRST")}
+
+		g := newGoroutineGroup(context.Background())
+		DeferCleanup(g.Stop)
+		startFileExport(g, cfg, src, nil)
+
+		Eventually(func() (string, error) {
+			b, err := os.ReadFile(path)
+			return string(b), err
+		}).WithTimeout(5 * time.Second).Should(Equal("FIRST"))
+
+		src.set("SECOND")
+		Eventually(func() (string, error) {
+			b, err := os.ReadFile(path)
+			return string(b), err
+		}).WithTimeout(5*time.Second).Should(Equal("SECOND"),
+			"a change must reach the file within the configured one-second interval")
+	})
+
 	// An hour's interval, so the write the spec waits for cannot be a tick's:
 	// it has to be the startup sync.
 	It("writes before the first tick", func() {
