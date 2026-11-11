@@ -20,9 +20,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 
@@ -268,8 +272,15 @@ var _ = Describe("a server whose file_export writes into its own cadir", func() 
 // The wiring itself. Every spec above drives a function; this drives the serve
 // command, so deleting the block in main.go that starts the job -- or putting
 // it on a path the single-process server does not reach -- fails here.
+//
+// With the metrics exporter on, because the metrics are wired on a branch of
+// their own (fileexport.NewMetrics only when the exporter exists) and they are
+// the only input OpenVoxCAFileExportStale has. A serve run without
+// metrics_listen skips that branch, so dropping it, passing nil, or a
+// registration that collides and panics would all pass a spec that only
+// checked the files.
 var _ = Describe("the serve command with file_export configured", func() {
-	It("writes the stored CRL and CA certificate to the configured files", func() {
+	It("writes the stored CRL and CA certificate, and reports each sync on /metrics", func() {
 		clearServerEnv()
 		caDir := GinkgoT().TempDir()
 		bootstrapCAInDir(caDir, "ca.example.com")
@@ -278,13 +289,11 @@ var _ = Describe("the serve command with file_export configured", func() {
 		certPath := filepath.Join(outDir, "ca.pem")
 
 		configPath := serveConfig(caDir, "", "127.0.0.1", freeLoopbackPort(), false)
-		f, err := os.OpenFile(configPath, os.O_APPEND|os.O_WRONLY, 0)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = f.WriteString("file_export:\n  targets:\n" +
-			"    - {path: " + crlPath + ", material: crl}\n" +
-			"    - {path: " + certPath + ", material: cert}\n")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(f.Close()).To(Succeed())
+		metricsAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort())
+		appendConfig(configPath, "metrics_listen: "+metricsAddr+"\n"+
+			"file_export:\n  targets:\n"+
+			"    - {path: "+crlPath+", material: crl}\n"+
+			"    - {path: "+certPath+", material: cert}\n")
 
 		// The stored material, read before the server takes the instance lock.
 		wantCRL, err := os.ReadFile(filepath.Join(caDir, "ca_crl.pem"))
@@ -298,5 +307,23 @@ var _ = Describe("the serve command with file_export configured", func() {
 			WithTimeout(10 * time.Second).Should(Equal(wantCRL))
 		Eventually(func() ([]byte, error) { return os.ReadFile(certPath) }).
 			WithTimeout(10 * time.Second).Should(Equal(wantCert))
+
+		scrape := func() (string, error) {
+			resp, err := http.Get("http://" + metricsAddr + "/metrics")
+			if err != nil {
+				return "", err
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			return string(body), err
+		}
+		for _, p := range []string{crlPath, certPath} {
+			Eventually(scrape).WithTimeout(10*time.Second).Should(MatchRegexp(
+				`(?m)^openvoxca_file_export_syncs_total\{path="%s",result="success"\} [1-9]`,
+				regexp.QuoteMeta(p)), "the sync of %s must be counted on the CA's own registry", p)
+			Eventually(scrape).WithTimeout(10 * time.Second).Should(MatchRegexp(
+				`(?m)^openvoxca_file_export_last_success_timestamp_seconds\{path="%s"\} `,
+				regexp.QuoteMeta(p)))
+		}
 	})
 })

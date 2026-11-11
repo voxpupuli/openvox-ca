@@ -162,7 +162,8 @@
     // every file_export.interval_sec (60s by default, 300s at most) and a
     // success is stamped whether or not the file needed rewriting, so this
     // only has to outlast a couple of attempts at the longest interval the CA
-    // accepts. Keep it above twice that ceiling.
+    // accepts. Keep it at least twice that ceiling; internal/fileexport's
+    // specs fail if it drops below.
     fileExportStaleAfterSeconds: 600,
 
     // Dwell on top of that. Short, because the threshold above already

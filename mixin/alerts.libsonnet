@@ -689,7 +689,7 @@
             // matches per target and per scrape target, for the reason
             // OpenVoxCAKubernetesExportNotRunning gives at length.
             //
-            // fileExportStaleAfterSeconds must stay above twice the largest
+            // fileExportStaleAfterSeconds must stay at least twice the largest
             // interval the CA accepts (file_export.interval_sec, capped at
             // 300s), or one slow sync on a long interval looks like an outage.
             // fileexportconfig.MaxIntervalSec carries the same argument from

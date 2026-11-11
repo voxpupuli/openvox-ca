@@ -18,9 +18,11 @@
 package fileexport_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -137,6 +139,19 @@ var _ = Describe("Exporter", func() {
 		return metricValue(reg, "openvoxca_file_export_"+name, map[string]string{"path": path})
 	}
 
+	// captureLogs sends slog to a buffer until the spec ends. Call it after the
+	// fixture is built, so that what it holds is what the sync under test
+	// logged and nothing else. SyncAll runs on the spec's own goroutine, so the
+	// buffer needs no lock.
+	captureLogs := func() *bytes.Buffer {
+		GinkgoHelper()
+		var buf bytes.Buffer
+		orig := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		DeferCleanup(func() { slog.SetDefault(orig) })
+		return &buf
+	}
+
 	Describe("writing", func() {
 		It("writes a missing file with the whole chain, world-readable and no wider", func() {
 			exp := newExporter(
@@ -150,8 +165,12 @@ var _ = Describe("Exporter", func() {
 			for _, p := range []string{crlPath, certPath} {
 				info, err := os.Stat(p)
 				Expect(err).NotTo(HaveOccurred())
+				// World-readable, because the material is public. That the umask
+				// cannot narrow it is AtomicWriteFile's property, pinned under a
+				// planted umask in internal/storage/atomicwrite_test.go; under
+				// the usual 022 this assertion could not tell the two apart.
 				Expect(info.Mode().Perm()).To(Equal(fs.FileMode(0o644)),
-					"the mode is set on the descriptor, so the umask must not change it")
+					"an exported CA certificate or CRL is public and written world-readable")
 			}
 		})
 
@@ -228,10 +247,17 @@ var _ = Describe("Exporter", func() {
 			src.crlErr = errors.New("storage down")
 
 			exp := newExporter(fileexport.Target{Path: crlPath, Material: "crl"})
+			logs := captureLogs()
 			Expect(exp.SyncAll(ctx)).To(MatchError(And(
 				ContainSubstring(crlPath), ContainSubstring("storage down"))))
 
 			Expect(readFile(crlPath)).To(Equal(ownCRL), "a stale copy must be kept, not removed")
+			// The alert's annotation and docs/file-export.md tell an operator to
+			// grep for this message, so it is part of the runbook.
+			Expect(logs.String()).To(And(
+				ContainSubstring(`level=WARN msg="File export failed for target"`),
+				ContainSubstring("path="+crlPath),
+				ContainSubstring("storage down")))
 			Expect(syncs(crlPath, "error")).To(Equal(1.0))
 			Expect(syncs(crlPath, "success")).To(Equal(0.0))
 			_, found := gauge("last_success_timestamp_seconds", crlPath)
@@ -241,18 +267,34 @@ var _ = Describe("Exporter", func() {
 			Expect(v).To(BeNumerically(">", 0))
 		})
 
-		It("fails only the targets that asked for the material that could not be read", func() {
-			src.crlErr = errors.New("storage down")
-			exp := newExporter(
-				fileexport.Target{Path: crlPath, Material: "crl"},
-				fileexport.Target{Path: certPath, Material: "cert"},
-			)
-			Expect(exp.SyncAll(ctx)).To(HaveOccurred())
+		DescribeTable("fails only the targets that asked for the material that could not be read",
+			func(failCert bool) {
+				failed, written, want := crlPath, certPath, certChain
+				if failCert {
+					src.certErr = errors.New("storage down")
+					failed, written, want = certPath, crlPath, crlChain
+				} else {
+					src.crlErr = errors.New("storage down")
+				}
+				exp := newExporter(
+					fileexport.Target{Path: crlPath, Material: "crl"},
+					fileexport.Target{Path: certPath, Material: "cert"},
+				)
+				// The storage error, not "refusing to export an empty ...": the
+				// empty-material guard would also keep the old file, but would
+				// name the symptom instead of the read that caused it.
+				Expect(exp.SyncAll(ctx)).To(MatchError(And(
+					ContainSubstring(failed), ContainSubstring("storage down"),
+					Not(ContainSubstring("refusing to export an empty")))))
 
-			Expect(readFile(certPath)).To(Equal(certChain))
-			Expect(syncs(certPath, "success")).To(Equal(1.0))
-			Expect(syncs(crlPath, "error")).To(Equal(1.0))
-		})
+				Expect(readFile(written)).To(Equal(want))
+				Expect(syncs(written, "success")).To(Equal(1.0))
+				Expect(syncs(failed, "error")).To(Equal(1.0))
+				Expect(failed).NotTo(BeAnExistingFile())
+			},
+			Entry("the CRL", false),
+			Entry("the CA certificate", true),
+		)
 
 		It("refuses to replace a file with an empty material", func() {
 			Expect(os.WriteFile(crlPath, []byte(ownCRL), 0o644)).To(Succeed())
@@ -325,6 +367,7 @@ var _ = Describe("Exporter", func() {
 			Expect(os.Symlink(elsewhere, crlPath)).To(Succeed())
 
 			exp := newExporter(fileexport.Target{Path: crlPath, Material: "crl"})
+			logs := captureLogs()
 			Expect(exp.SyncAll(ctx)).To(Succeed())
 
 			info, err := os.Lstat(crlPath)
@@ -332,6 +375,12 @@ var _ = Describe("Exporter", func() {
 			Expect(info.Mode().IsRegular()).To(BeTrue(), "the link itself must have been replaced")
 			Expect(readFile(crlPath)).To(Equal(crlChain))
 			Expect(readFile(elsewhere)).To(Equal("NOT OURS"), "the link's target must be untouched")
+			// A link someone placed is being undone, so the operator is told,
+			// and told where it pointed.
+			Expect(logs.String()).To(And(
+				ContainSubstring(`level=WARN msg="File export is replacing a symbolic link`),
+				ContainSubstring("path="+crlPath),
+				ContainSubstring("link_target="+elsewhere)))
 		})
 
 		It("replaces a link even when its target already holds the material", func() {
