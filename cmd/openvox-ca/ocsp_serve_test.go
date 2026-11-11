@@ -19,6 +19,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -28,6 +29,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
+	xocsp "golang.org/x/crypto/ocsp"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
@@ -105,10 +107,85 @@ var _ = Describe("the serve command's /ocsp", func() {
 		resp := postOCSP(addr)
 		Expect(resp.StatusCode).To(Equal(http.StatusBadRequest))
 		Expect(resp.Header.Get("Content-Type")).To(Equal("application/ocsp-response"))
-		Expect(serverLog()).To(ContainSubstring("OCSP responder enabled"))
+		// The default limit, which also pins that the resolved value reaches
+		// the server rather than the -1 sentinel.
+		Expect(serverLog()).To(ContainSubstring(`"msg":"OCSP responder enabled at /ocsp","rate_limit_per_minute":300`))
 		Expect(serverLog()).NotTo(ContainSubstring("ocsp_url is set but enable_ocsp is not"))
 	})
+
+	// 0 turns the limit off, and the startup line must not read as "zero
+	// requests allowed".
+	It("says at startup when ocsp_rate_limit turns the limit off", func() {
+		addr := startServe(config("enable_ocsp: true\nocsp_rate_limit: 0\n"))
+
+		Expect(postOCSP(addr).StatusCode).To(Equal(http.StatusBadRequest))
+		Expect(serverLog()).To(ContainSubstring("OCSP responder enabled at /ocsp without a rate limit"))
+		// Scoped to the responder's own record: other startup lines may
+		// carry keys with the same suffix.
+		Expect(serverLog()).NotTo(ContainSubstring(`"msg":"OCSP responder enabled at /ocsp","rate_limit_per_minute"`))
+	})
+
+	Context("with a metrics listener", func() {
+		var metricsAddr string
+
+		BeforeEach(func() { metricsAddr = fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort()) })
+
+		// Takes a Gomega so that Eventually retries a refused connection:
+		// the exporter binds in its own goroutine, unordered against READY=1.
+		// A direct call passes Default.
+		scrape := func(g Gomega) string {
+			resp, err := plainClient().Get("http://" + metricsAddr + "/metrics")
+			g.Expect(err).NotTo(HaveOccurred())
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			g.Expect(err).NotTo(HaveOccurred())
+			return string(body)
+		}
+
+		// Through the flag, which pins its overlay; the file and the
+		// environment are pinned in config_test.go.
+		It("refuses a client over --ocsp-rate-limit with tryLater over 429, and counts it", func() {
+			addr := startServe(config("enable_ocsp: true\nmetrics_listen: "+metricsAddr+"\n"), "--ocsp-rate-limit=1")
+
+			Expect(postOCSP(addr).StatusCode).To(Equal(http.StatusBadRequest),
+				"precondition: the first request is within the limit and reaches the responder")
+			resp := postOCSP(addr)
+			Expect(resp.StatusCode).To(Equal(http.StatusTooManyRequests))
+			body, err := io.ReadAll(resp.Body)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(body).To(Equal(xocsp.TryLaterErrorResponse))
+
+			Eventually(scrape).Should(ContainSubstring("\nopenvoxca_ocsp_rate_limited_total 1\n"))
+			// The served responder keeps its index series, which pins the
+			// exporter's options from the other side.
+			Expect(scrape(Default)).To(ContainSubstring("openvoxca_ocsp_index_serials"))
+		})
+
+		It("exports no rate-limit counter while the responder is off", func() {
+			startServe(config("metrics_listen: " + metricsAddr + "\n"))
+
+			Eventually(scrape).Should(ContainSubstring("openvoxca_ca_ready"),
+				"precondition: the exporter is serving")
+			Expect(scrape(Default)).NotTo(ContainSubstring("openvoxca_ocsp_rate_limited_total"))
+			// The exporter is built with metricsOptions(cfg), not bare: the
+			// metricsOptions table pins the mapping, this its call site.
+			Expect(scrape(Default)).NotTo(ContainSubstring("openvoxca_ocsp_index_serials"))
+			Expect(scrape(Default)).NotTo(ContainSubstring("openvoxca_ocsp_index_sync_failures_total"))
+		})
+	})
 })
+
+var _ = DescribeTable("resolveOCSPRateLimit",
+	func(configured, want int) {
+		Expect(resolveOCSPRateLimit(configured)).To(Equal(want))
+	},
+	Entry("the unset sentinel takes the default", -1, defaultOCSPRateLimit),
+	// Any negative value, not only the sentinel: the setting has no lower
+	// bound, and passing -5 through would disable the limit in Routes.
+	Entry("any other negative value takes the default", -5, defaultOCSPRateLimit),
+	Entry("an explicit zero disables the limit", 0, 0),
+	Entry("a positive value passes through", 5, 5),
+)
 
 var _ = DescribeTable("ocspURLWithoutResponderNotice",
 	func(cfg *serverConfig, warns bool) {

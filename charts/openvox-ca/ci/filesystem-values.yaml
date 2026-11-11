@@ -35,6 +35,7 @@ config:
   crl_url: https://ca.example.com/puppet-ca/v1/certificate_revocation_list/ca
   ocsp_url: https://ca.example.com/puppet-ca/v1/ocsp
   enable_ocsp: true
+  ocsp_rate_limit: 600
 
 gateway:
   tlsRoute:

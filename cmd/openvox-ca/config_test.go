@@ -1005,6 +1005,8 @@ var _ = Describe("applyServerEnv each variable", func() {
 			"InsecureAllowPlainHTTPGenerate"),
 		Entry("ENABLE_OCSP", "OPENVOX_CA_ENABLE_OCSP", "true",
 			func(c *serverConfig) bool { return c.EnableOCSP }, "EnableOCSP"),
+		Entry("OCSP_RATE_LIMIT", "OPENVOX_CA_OCSP_RATE_LIMIT", "17",
+			func(c *serverConfig) bool { return c.OCSPRateLimit == 17 }, "OCSPRateLimit"),
 		Entry("CLIENT_REVOCATION_POLICY", "OPENVOX_CA_CLIENT_REVOCATION_POLICY", "check",
 			func(c *serverConfig) bool { return c.ClientRevocationPolicy == "check" }, "ClientRevocationPolicy"),
 		Entry("CLIENT_CRL_REFRESH_INTERVAL_SEC", "OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", "300",
@@ -1528,6 +1530,35 @@ var _ = Describe("enable_ocsp wiring", func() {
 		cfg, err := loadServerConfig(writeTempConfig("enable_ocsp: true\n"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.EnableOCSP).To(BeTrue())
+	})
+})
+
+var _ = Describe("ocsp_rate_limit wiring", func() {
+	BeforeEach(func() { clearServerEnv() })
+
+	It("is the unset sentinel by default", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.OCSPRateLimit).To(Equal(-1))
+	})
+
+	// An explicit 0 must survive loading: it is the off switch, and the
+	// sentinel is what takes the default.
+	It("reads an explicit zero from the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("ocsp_rate_limit: 0\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.OCSPRateLimit).To(Equal(0))
+	})
+
+	// The interval variables beside it drop a non-positive value; this one
+	// must not, or the documented way to hand limiting to a proxy would
+	// silently leave the default in force.
+	It("reads an explicit zero from the environment, and resolves it to off", func() {
+		setEnv("OPENVOX_CA_OCSP_RATE_LIMIT", "0")
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.OCSPRateLimit).To(Equal(0))
+		Expect(resolveOCSPRateLimit(cfg.OCSPRateLimit)).To(Equal(0))
 	})
 })
 

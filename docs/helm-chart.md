@@ -627,7 +627,12 @@ An **HTTPRoute** (`gateway.httpRoute`) is also available, but it makes the
 Gateway terminate TLS. Reserve it for the anonymous endpoints — CRL
 distribution, OCSP, health — where no client certificate is involved. OCSP is
 served only with `config.enable_ocsp` set; see
-[serving OCSP](configuration.md#serving-ocsp):
+[serving OCSP](configuration.md#serving-ocsp). Through an HTTPRoute every
+verifier arrives from the Gateway's address and shares one `ocsp_rate_limit`
+budget on each CA replica it reaches, 300 a minute by default, so size it for
+the whole fleet behind the Gateway, or
+set it to `0` and limit at the Gateway; see
+[rate limit](configuration.md#rate-limit):
 
 ```yaml
 gateway:

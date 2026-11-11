@@ -49,6 +49,8 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 		Port:         8140,
 		CAPathLength: -1, // unconstrained; 0 = leaf-only, N = N levels of intermediates
 		CSRRateLimit: -1, // unset sentinel; 0 disables, -1 falls back to defaultCSRRateLimit
+		// Same sentinel convention; see resolveOCSPRateLimit.
+		OCSPRateLimit: -1,
 		// Same sentinel convention; see resolveSigningConcurrency.
 		CASigningConcurrency: -1,
 		PromoteCNToSAN:       true, // RFC 2818: add CN as SAN when CSR has no SANs
@@ -519,6 +521,7 @@ func applyServerEnv(cfg *serverConfig) error {
 	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", &cfg.CRLSyncIntervalSec, config.Positive))
 	errs = append(errs, config.EnvInt("OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", &cfg.OCSPIndexSyncIntervalSec, config.Positive))
 	errs = append(errs, config.EnvBool("OPENVOX_CA_ENABLE_OCSP", &cfg.EnableOCSP))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_OCSP_RATE_LIMIT", &cfg.OCSPRateLimit, nil))
 	errs = append(errs, config.EnvBool("OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP", &cfg.EnableExpiredCertCleanup))
 	errs = append(errs, config.EnvInt("OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC", &cfg.ExpiredCertRetentionSec, config.Positive))
 	errs = append(errs, config.EnvInt("OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", &cfg.ExpiredCertCleanupIntervalSec, config.Positive))

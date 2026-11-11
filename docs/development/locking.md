@@ -821,11 +821,20 @@ state when the document was last updated and is not guaranteed exhaustive.
   outage; it does not reduce the load on the signer itself. The coalescing
   sub-bullet at the end of this entry is also still open.
 
+  **#431 took the other end** as well: the responder is served only with
+  `enable_ocsp` (off by default), and `ocsp_rate_limit` caps each client
+  address's request rate in front of the handler, outside every lock and
+  ahead of the signing bound. It is a separate `ipRateLimiter` from the CSR
+  one, so neither path spends the other's budget, and it caps one client
+  rather than the total, which remains the bound's job.
+
   **The rest of this entry is retained as the reasoning, and is now history in
-  two places**: "The missing half is a cap on concurrent signing … deliberately
-  not attempted" describes what #197 left rather than what is missing today,
-  and "No metric covers either of these" is no longer true of concurrent
-  signing (it remains true of the raced cache write).
+  three places**: "The missing half is a cap on concurrent signing … deliberately
+  not attempted" describes what #197 left rather than what is missing today;
+  "No metric covers either of these" is no longer true of concurrent
+  signing (it remains true of the raced cache write); and "the package's only
+  rate limiter is CSR-only" and the rate limit "declined" below are what #431
+  changed.
 
   Before #197, `c.mu` capped CA-key use at **one signature in flight
   process-wide**: every `CAKey.Sign` call site — `issueLeafLocked`,

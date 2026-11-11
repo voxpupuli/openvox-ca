@@ -513,12 +513,12 @@ func (c *CA) AnswerOCSP(ctx context.Context, reqDER []byte) (OCSPAnswer, error) 
 	// bypasses the cache outright and always signed, which is a second route to
 	// the same place, but it is not the argument — this one is.)
 	//
-	// Note there is no rate limit in front of /ocsp: the limiter in this package
-	// is CSR-only. Putting one there, or a bounded negative cache with a TTL far
-	// shorter than an index sync interval, would be a real improvement and is
-	// deliberately not attempted here — a negative cache is what this commit
-	// removes, and reintroducing one carelessly restores the staleness the index
-	// refresh exists to end.
+	// The per-address rate limit in front of /ocsp (ocsp_rate_limit, in
+	// internal/api) caps how often one client can reach this path; it does not
+	// change what a miss costs. A bounded negative cache with a TTL far shorter
+	// than an index sync interval would, and is deliberately not attempted
+	// here — a negative cache is what this commit removes, and reintroducing one
+	// carelessly restores the staleness the index refresh exists to end.
 	//
 	// One consequence for an operator running an external key provider: an
 	// unnonced query about a serial this replica has not yet indexed now signs

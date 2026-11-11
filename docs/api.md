@@ -206,7 +206,7 @@ it names no entries, so a caller on this unauthenticated endpoint cannot use it
 to discover which names the CA would issue; the refused entries go to the CA's
 log at `WARN`. Anything else is a `500`, whose message is withheld for the same
 reason — except a submission refused by
-[`csr_rate_limit`](configuration.md), which answers `429 Too Many Requests`
+[`csr_rate_limit`](configuration.md#rate-limit), which answers `429 Too Many Requests`
 before the CSR is read at all.
 
 `DELETE /certificate_request/{subject}` is an operator rejecting a request
@@ -475,7 +475,7 @@ Response:
 | `POST` | `/ocsp` | RFC 6960 OCSP request; body is DER-encoded `OCSPRequest` |
 | `GET` | `/ocsp/{request}` | RFC 6960 GET form; `{request}` is standard or URL-safe base64-encoded DER |
 
-Served only when [`enable_ocsp`](configuration.md#serving-ocsp) is set; otherwise both paths answer `404`, as they would from OpenVox Server, which has no responder. Both paths are also served under `/puppet-ca/v1/`. Responses are signed by the CA key directly (`Content-Type: application/ocsp-response`). The AIA extension is embedded in issued certificates when `--ocsp-url` is set, which neither requires nor implies `enable_ocsp`.
+Served only when [`enable_ocsp`](configuration.md#serving-ocsp) is set; otherwise both paths answer `404`, as they would from OpenVox Server, which has no responder. A client address over [`ocsp_rate_limit`](configuration.md#rate-limit) (300 requests a minute by default, counted across both methods and both paths) is answered RFC 6960 `tryLater` over HTTP `429` before its request is read. The responder at its CA-key signing bound also answers `tryLater`, over HTTP `503`. Both paths are also served under `/puppet-ca/v1/`. Responses are signed by the CA key directly (`Content-Type: application/ocsp-response`). The AIA extension is embedded in issued certificates when `--ocsp-url` is set, which neither requires nor implies `enable_ocsp`.
 
 The responder answers only for certificates issued by this CA's own certificate — the first in `ca_crt.pem`, not the ancestors of an imported chain. A request whose issuer name hash or issuer key hash does not match that certificate is answered with RFC 6960 `unauthorized` over HTTP 403, whatever the serial. The hashes are checked with whichever algorithm the request used (SHA-1, SHA-256, SHA-384 or SHA-512), and the response names the certificate with that same algorithm, so a client that matches the two — `openssl ocsp` does — finds its answer; a request using any other algorithm is answered `malformedRequest` over HTTP 400. With `openssl ocsp`, an `unauthorized` usually means `-issuer` named the root or another intermediate rather than this CA.
 

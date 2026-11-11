@@ -358,8 +358,11 @@ deployment's signer, and the two answers look different:
   signer has capacity to spare → the limit is too low. Raise it.
 - Shedding in bursts that correlate with request volume rather than with
   issuance → something is driving `/ocsp` harder than this responder is sized
-  for. That is either growth to provision for or a caller to rate-limit
-  upstream.
+  for. That is either growth to provision for or a caller to rate-limit. One
+  address driving it is what [`ocsp_rate_limit`](configuration.md#rate-limit)
+  is for: check it is enabled and sized, and compare with
+  `openvoxca_ocsp_rate_limited_total`. A flood spread across many addresses
+  needs limiting upstream.
 
 `openvoxca_ca_signing_limit` is worth an alert of its own where an operator
 intends signing to be bounded, because `0` is a legitimate configured value and
@@ -379,13 +382,15 @@ sum the series across the job to see what the signer actually faces.
 | --- | --- |
 | `openvoxca_ocsp_index_serials` | Number of certificate serials **this replica's** responder recognises. A serial it does not hold is answered `unknown`, before the CRL is consulted. |
 | `openvoxca_ocsp_index_sync_failures_total` | Counter of failures to reload the inventory into that index — an unreadable inventory, or one whose integrity MAC no longer verifies. While it rises the replica keeps whatever index it already held. Resets to `0` on process restart. |
+| `openvoxca_ocsp_rate_limited_total` | Counter of OCSP requests refused with `tryLater` over HTTP `429` because their client address was over [`ocsp_rate_limit`](configuration.md#rate-limit). Not the same as `openvoxca_ca_signing_shed_total`, which counts the responder at capacity rather than one client over its budget. A steady rise with no flood behind it means a legitimate verifier needs a higher limit, or several share one address through a proxy. Resets to `0` on process restart. |
 
-Both are exported only while [`enable_ocsp`](configuration.md#serving-ocsp)
-serves the responder. With it off nothing reads or refreshes the index, so the
-series are absent rather than a frozen startup count and a constant zero, and
-`OpenVoxCAOCSPIndexSyncFailing` has nothing to evaluate.
+All three are exported only while [`enable_ocsp`](configuration.md#serving-ocsp)
+serves the responder. With it off nothing answers from the index and no sync
+refreshes it from peers, so the series would describe nothing an operator acts
+on, and `OpenVoxCAOCSPIndexSyncFailing` has nothing to evaluate. No shipped alert reads
+the rate-limit counter.
 
-Both are per-process, like the two CRL series above, and that is the point:
+The two index series are per-process, like the two CRL series above, and that is the point:
 every replica sharing a backend should converge on the same
 `openvoxca_ocsp_index_serials` within one `ocsp_index_sync_interval_sec` (5m by
 default). One persistently below the others is reporting valid certificates as

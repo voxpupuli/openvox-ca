@@ -77,6 +77,7 @@ commonAnnotations: {}
 #     insecure_allow_unsafe_autosign_path: false  # true runs an autosign plugin others could replace
 #     insecure_allow_plain_http_generate: false  # true lets POST /generate return keys without TLS
 #     enable_ocsp: false  # true serves the unauthenticated OCSP responder at /ocsp; ocsp_url does not
+#     ocsp_rate_limit: 300  # OCSP requests per client IP per minute; behind a proxy every client shares one budget
 #     # Certificates openvox-ca issues and renews for OpenVox components. Each
 #     # entry needs a store: a Kubernetes Secret or a local file pair, never
 #     # inferred. The Secret holding OpenVox Server's key is a CA admin
@@ -768,7 +769,9 @@ gateway:
 
   # HTTPRoute terminates TLS at the Gateway, so the CA sees no client
   # certificate. Only useful for the anonymous endpoints (CRL distribution,
-  # health, OCSP) or alongside config.no_tls_required.
+  # health, OCSP) or alongside config.no_tls_required. OCSP is served only with
+  # config.enable_ocsp, and through the route every client shares one
+  # ocsp_rate_limit budget; see docs/helm-chart.md.
   httpRoute:
     enabled: false
     apiVersion: gateway.networking.k8s.io/v1

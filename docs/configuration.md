@@ -35,7 +35,8 @@ re-asserting inventory integrity on a CA that will not start.
 | `--insecure-allow-unsafe-autosign-path` | `false` | Run the autosign executable even when someone other than root or the CA's own user could replace it, warning instead of refusing. See [the autosign executable's path](#the-autosign-executables-path) |
 | `--insecure-allow-plain-http-generate` | `false` | Let `POST /generate` return private keys when the server has no TLS, to any caller. See [server-side key generation without TLS](#server-side-key-generation-without-tls) |
 | `--ca-key-passphrase-file` | `""` | Path to file containing the CA key passphrase (first line used) |
-| `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables) |
+| `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables). Keyed and bounded as [rate limit](#rate-limit) describes |
+| `--ocsp-rate-limit` | `300` | Max OCSP requests per IP per minute while `--enable-ocsp` serves `/ocsp` (0 disables). See [serving OCSP](#serving-ocsp) |
 | `--ca-signing-concurrency` | `max(4, GOMAXPROCS)` | Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound) |
 | `--single-process` | `false` | Disable CA key isolation (run signer and frontend in a single process) |
 | `--storage-backend` | `filesystem` | Storage backend for CA state: `filesystem`, `sqlite`, `postgres`, `mysql`, `etcd`, or `redis`. See [storage backends](storage-backends.md) |
@@ -149,7 +150,8 @@ promote_cn_to_san: true # add the CN as a DNS SAN when a CSR carries none (RFC 2
 allow_subject_alt_names: false # let a CSR request SANs of its own; see "Subject alternative names requested by a CSR"
 allow_duplicate_certs: false # let a CSR replace a pending one or queue beside a certificate; see "Duplicate certificate requests"
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
-csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting
+csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting; see "Rate limit"
+ocsp_rate_limit: 300  # max OCSP requests per IP per minute while enable_ocsp is set; 0 = disable
 # Caps concurrent CA-key signatures across issuance, CRL re-signing and the OCSP
 # responder together. Unset uses max(4, GOMAXPROCS); 0 disables the bound.
 # Lower it to a remote signer's capacity — see "Bounding CA-key signing" below.
@@ -257,6 +259,7 @@ Environment variables mirror the CLI flags:
 | `--crl-url` | `OPENVOX_CA_CRL_URL` |
 | `--metrics-listen` | `OPENVOX_CA_METRICS_LISTEN` |
 | `--csr-rate-limit` | `OPENVOX_CA_CSR_RATE_LIMIT` |
+| `--ocsp-rate-limit` | `OPENVOX_CA_OCSP_RATE_LIMIT` |
 | `--ca-signing-concurrency` | `OPENVOX_CA_SIGNING_CONCURRENCY` |
 | `--encrypt-ca-key` | `OPENVOX_CA_ENCRYPT_CA_KEY` |
 | `--insecure-allow-world-readable-keys` | `OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS` |
@@ -906,6 +909,55 @@ OCSP index sync job is not started on any backend and the
 `openvoxca_ocsp_index_*` series are not exported. See
 [OCSP status across replicas](#ocsp-status-across-replicas).
 
+### Rate limit
+
+While the responder is served, `ocsp_rate_limit` caps the OCSP requests each
+client IP address may make per minute. The default is 300, five a second. How a
+client is identified and how its budget behaves behind a proxy apply to
+`csr_rate_limit` as well, which is the only per-IP limit a deployment without
+OCSP has.
+
+```yaml
+ocsp_rate_limit: 300   # -1/unset = 300; 0 = no limit
+```
+
+Every request counts, whatever it holds: nonced, nonce-free, malformed, and
+either method on either path. The nonced ones are the reason for the limit,
+since each costs a signature, and counting a malformed one keeps a flood from
+going uncounted for being malformed. A client over its budget is answered RFC
+6960 `tryLater` over HTTP `429 Too Many Requests` until its minute is up, which
+costs no CA-key work. The budget is separate from `csr_rate_limit`'s, so
+verifier traffic from an address does not spend its agents' CSR submissions.
+
+Five a second is far above what a stapling server or an occasional `openssl
+ocsp` needs, and holds one anonymous address to at most five CA-key signatures
+a second on each replica. Raise it for a verifier that checks every connection
+without caching, which a limit hit shows as `openvoxca_ocsp_rate_limited_total`
+rising.
+
+The budget is kept in memory by each replica, so behind a load balancer a
+client's ceiling is `ocsp_rate_limit` times the number of replicas it can
+reach. Size the setting, or a limit at the proxy, with that in mind.
+
+The address is the TCP peer's. `X-Forwarded-For` and similar headers are not
+trusted, because the server takes direct connections and has no trusted-proxy
+setting. So behind a proxy that does not preserve the client's address (an
+`HTTPRoute`, a TLS-terminating ingress, or a passthrough load balancer without
+PROXY protocol), every client behind it shares one budget, and the limit
+becomes one for the whole fleet. Size it for that, or turn it off with `0` and
+limit at the proxy instead. `csr_rate_limit` behaves the same way.
+
+Each IPv6 address is its own client. A host holding a routed `/64` can send
+from as many addresses as it likes and get a budget for each, so against such
+a client the limit does not bound the signatures it can provoke; the signing
+bound below still caps the total.
+
+The limit and the [CA-key signing bound](#bounding-ca-key-signing) answer
+different questions. The bound caps signatures in flight across every client
+together, and the limit caps one address's request rate. Without the limit, one
+address could keep the bound full by itself and leave every other verifier
+answered `tryLater`.
+
 ## OCSP status across replicas
 
 Everything in this section applies only while `enable_ocsp` serves the
@@ -993,10 +1045,11 @@ ca_signing_concurrency: -1   # -1/unset = max(4, GOMAXPROCS); 0 = unbounded
 
 ### Why there is a bound at all
 
-While `enable_ocsp` serves it, `/ocsp` is unauthenticated, the rate limiter in
-front of the API covers CSR submissions only, and an OCSP cache miss signs. Without a cap, an anonymous
-caller can drive as many concurrent signatures as it can open connections,
-against the same key and the same signer that issuance uses.
+While `enable_ocsp` serves it, `/ocsp` is unauthenticated and an OCSP cache
+miss signs. [`ocsp_rate_limit`](#rate-limit) caps each client address's request
+rate, but not the total across addresses. Without a cap, anonymous callers can
+drive as many concurrent signatures as they can open connections, against the
+same key and the same signer that issuance uses.
 
 ### Issuance waits; OCSP is refused
 
