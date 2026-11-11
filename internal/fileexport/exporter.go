@@ -22,9 +22,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
+	"syscall"
 
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport/exportconfig"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
@@ -152,14 +154,17 @@ func (e *Exporter) fetchMaterials(ctx context.Context) materials {
 //     at the Puppet-compatible path the packages had linked into the old CA
 //     directory.
 //   - Anything else -- a directory, a FIFO, a device -- is refused. A FIFO in
-//     particular is never opened, since reading one would block this loop.
+//     particular is never read, since reading one would block this loop.
 //
 // The parent directory must already exist; nothing here creates one.
 //
-// The Lstat and the read are two steps, so something swapped in between them
-// is read as whatever it is by then. That is not a boundary worth closing:
-// whoever can replace files in the operator's export directory can already
-// write the copy any consumer reads.
+// The Lstat that classifies the path and the read that compares it are two
+// steps, and whoever can write the export directory can swap the path between
+// them. The integrity of the copy is not at stake -- that person could write
+// the copy directly -- but the CA's availability would be: a FIFO swapped in
+// would block this loop for good, and a link to /dev/zero would read until the
+// frontend ran out of memory. So sameContent judges the descriptor it actually
+// reads, not the path; see there.
 func syncTarget(t *Target, want []byte) error {
 	// Never write an empty material. It would replace a still-valid CA
 	// certificate or CRL with nothing, which every consumer reads as a failure
@@ -200,13 +205,38 @@ func syncTarget(t *Target, want []byte) error {
 }
 
 // sameContent reports whether the regular file at path already holds want.
-// The size is compared first, so a file of the wrong length -- including one an
-// operator pointed this at by mistake, however large -- is never read.
+// The size from the Lstat is compared first, so a file of the wrong length --
+// including one an operator pointed this at by mistake, however large -- is
+// never opened.
+//
+// What is opened is then judged by its descriptor, so that the path cannot
+// change between the judging and the reading. O_NOFOLLOW refuses a link
+// swapped in since the Lstat, O_NONBLOCK keeps a FIFO's open from waiting for
+// a writer, and the fstat refuses anything that is not a regular file of the
+// right size. The read is bounded too, so a file growing under it cannot grow
+// the buffer. Any of these is an error, which keeps the file and counts the
+// failure, rather than a difference, which would replace it.
 func sameContent(path string, info fs.FileInfo, want []byte) (bool, error) {
 	if info.Size() != int64(len(want)) {
 		return false, nil
 	}
-	have, err := os.ReadFile(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return false, fmt.Errorf("reading %s to compare it: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	opened, err := f.Stat()
+	if err != nil {
+		return false, fmt.Errorf("reading %s to compare it: %w", path, err)
+	}
+	if !opened.Mode().IsRegular() {
+		return false, fmt.Errorf("reading %s to compare it: it changed while being checked "+
+			"and is no longer a regular file (%s)", path, opened.Mode().Type())
+	}
+	if opened.Size() != int64(len(want)) {
+		return false, nil
+	}
+	have, err := io.ReadAll(io.LimitReader(f, int64(len(want))+1))
 	if err != nil {
 		return false, fmt.Errorf("reading %s to compare it: %w", path, err)
 	}
