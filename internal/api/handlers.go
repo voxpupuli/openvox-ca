@@ -170,6 +170,11 @@ type Server struct {
 	// OnOCSPRateLimited, when set, is called once for each request
 	// OCSPRateLimit refuses. The server points it at a Prometheus counter.
 	OnOCSPRateLimited func()
+	// RateLimitIPv6PrefixLength is how many leading bits of an IPv6 client
+	// address CSRRateLimit and OCSPRateLimit count together, so that a host
+	// holding a routed prefix shares one budget across it. Zero (the default)
+	// and 128 both key on the whole address. IPv4 is always per address.
+	RateLimitIPv6PrefixLength int
 	// PlainHTTP is set when the server is running without TLS and the
 	// operator has not set insecure_allow_plain_http_generate. The /generate
 	// endpoint refuses to serve private keys when this is true.
@@ -845,7 +850,7 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 	// SECURITY: Per-IP rate limiting on the unauthenticated CSR submission
 	// endpoint. Prevents CSR flooding denial-of-service attacks.
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
-	if s.csrLimiter != nil && !s.csrLimiter.Allow(clientIP(r)) {
+	if s.csrLimiter != nil && !s.csrLimiter.Allow(rateLimitKey(r, s.RateLimitIPv6PrefixLength)) {
 		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}

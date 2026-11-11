@@ -190,6 +190,10 @@ type ServerConfig struct {
 	// while enable_ocsp serves the responder. Same three-state convention as
 	// CSRRateLimit: 0 disables, -1/unset = built-in default (300).
 	OCSPRateLimit int `yaml:"ocsp_rate_limit"`
+	// RateLimitIPv6PrefixLength is how many leading bits of an IPv6 client
+	// address csr_rate_limit and ocsp_rate_limit count as one client
+	// (default 128, the whole address; 1-128). IPv4 is always per address.
+	RateLimitIPv6PrefixLength int `yaml:"rate_limit_ipv6_prefix_length"`
 
 	// Background expired-certificate cleanup. Disabled by default: when enabled,
 	// a job periodically removes certificates that expired more than the

@@ -171,6 +171,36 @@ var _ = Describe("OCSP rate limit", func() {
 		})
 	})
 
+	// One host with a routed /64 can source from any address in it. With the
+	// prefix length set, those addresses are one client.
+	Context("with RateLimitIPv6PrefixLength 64", func() {
+		BeforeEach(func() {
+			srv.OCSPRateLimit = 2
+			srv.RateLimitIPv6PrefixLength = 64
+		})
+
+		It("counts addresses in one /64 against one budget", func() {
+			Expect(do("POST", "/ocsp", "[2001:db8:1:2::1]:1000", nonced()).Code).To(Equal(http.StatusOK))
+			Expect(do("POST", "/ocsp", "[2001:db8:1:2::2]:1000", nonced()).Code).To(Equal(http.StatusOK))
+			expectLimited(do("POST", "/ocsp", "[2001:db8:1:2::3]:1000", nonced()))
+		})
+
+		It("keeps a separate budget for another /64", func() {
+			for range 2 {
+				do("POST", "/ocsp", "[2001:db8:1:2::1]:1000", nonced())
+			}
+			Expect(do("POST", "/ocsp", "[2001:db8:1:3::1]:1000", nonced()).Code).To(Equal(http.StatusOK))
+		})
+	})
+
+	// The default, and what the setting's absence must keep meaning.
+	It("keys each IPv6 address separately by default", func() {
+		srv.OCSPRateLimit = 1
+		handler = srv.Routes()
+		Expect(do("POST", "/ocsp", "[2001:db8:1:2::1]:1000", nonced()).Code).To(Equal(http.StatusOK))
+		Expect(do("POST", "/ocsp", "[2001:db8:1:2::2]:1000", nonced()).Code).To(Equal(http.StatusOK))
+	})
+
 	It("does not limit at all when OCSPRateLimit is zero", func() {
 		for range 5 {
 			Expect(do("POST", "/ocsp", "192.0.2.1:1000", nonced()).Code).To(Equal(http.StatusOK))

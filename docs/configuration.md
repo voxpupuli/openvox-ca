@@ -37,6 +37,7 @@ re-asserting inventory integrity on a CA that will not start.
 | `--ca-key-passphrase-file` | `""` | Path to file containing the CA key passphrase (first line used) |
 | `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables). Keyed and bounded as [rate limit](#rate-limit) describes |
 | `--ocsp-rate-limit` | `300` | Max OCSP requests per IP per minute while `--enable-ocsp` serves `/ocsp` (0 disables). See [serving OCSP](#serving-ocsp) |
+| `--rate-limit-ipv6-prefix-length` | `128` | Leading bits of an IPv6 client address that `--csr-rate-limit` and `--ocsp-rate-limit` count as one client (1-128). See [rate limit](#rate-limit) |
 | `--ca-signing-concurrency` | `max(4, GOMAXPROCS)` | Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound) |
 | `--single-process` | `false` | Disable CA key isolation (run signer and frontend in a single process) |
 | `--storage-backend` | `filesystem` | Storage backend for CA state: `filesystem`, `sqlite`, `postgres`, `mysql`, `etcd`, or `redis`. See [storage backends](storage-backends.md) |
@@ -152,6 +153,7 @@ allow_duplicate_certs: false # let a CSR replace a pending one or queue beside a
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
 csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting; see "Rate limit"
 ocsp_rate_limit: 300  # max OCSP requests per IP per minute while enable_ocsp is set; 0 = disable
+rate_limit_ipv6_prefix_length: 128  # IPv6 bits counted as one client by both limits; 64 = one budget per /64
 # Caps concurrent CA-key signatures across issuance, CRL re-signing and the OCSP
 # responder together. Unset uses max(4, GOMAXPROCS); 0 disables the bound.
 # Lower it to a remote signer's capacity — see "Bounding CA-key signing" below.
@@ -264,6 +266,7 @@ Environment variables mirror the CLI flags:
 | `--metrics-listen` | `OPENVOX_CA_METRICS_LISTEN` |
 | `--csr-rate-limit` | `OPENVOX_CA_CSR_RATE_LIMIT` |
 | `--ocsp-rate-limit` | `OPENVOX_CA_OCSP_RATE_LIMIT` |
+| `--rate-limit-ipv6-prefix-length` | `OPENVOX_CA_RATE_LIMIT_IPV6_PREFIX_LENGTH` |
 | `--ca-signing-concurrency` | `OPENVOX_CA_SIGNING_CONCURRENCY` |
 | `--encrypt-ca-key` | `OPENVOX_CA_ENCRYPT_CA_KEY` |
 | `--insecure-allow-world-readable-keys` | `OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS` |
@@ -969,10 +972,25 @@ PROXY protocol), every client behind it shares one budget, and the limit
 becomes one for the whole fleet. Size it for that, or turn it off with `0` and
 limit at the proxy instead. `csr_rate_limit` behaves the same way.
 
-Each IPv6 address is its own client. A host holding a routed `/64` can send
-from as many addresses as it likes and get a budget for each, so against such
-a client the limit does not bound the signatures it can provoke; the signing
-bound below still caps the total.
+By default each IPv6 address is its own client. A host holding a routed `/64`
+can then send from as many addresses as it likes and get a budget for each, so
+against such a client the limit does not bound the signatures it can provoke
+(the signing bound below still caps the total), and it can fill the cap on
+tracked addresses described above. `rate_limit_ipv6_prefix_length` closes both
+by counting every address under a prefix as one client:
+
+```yaml
+rate_limit_ipv6_prefix_length: 64   # 1-128; 128, the default, is per address
+```
+
+`64` is the usual choice, since a `/64` is the smallest prefix normally routed
+to one host or one LAN, and `56` or `48` suit sites where one customer or
+attacker holds a larger allocation. The cost is that every legitimate client
+inside the prefix shares one budget too: a site whose verifiers or agents
+reach the CA from many addresses in one `/64` needs a limit sized for all of
+them. The setting covers `csr_rate_limit` as well, and IPv4 addresses,
+including IPv4-mapped IPv6 ones, are always counted one by one. A value outside
+1-128 refuses startup.
 
 The limit and the [CA-key signing bound](#bounding-ca-key-signing) answer
 different questions. The bound caps signatures in flight across every client

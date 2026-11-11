@@ -233,3 +233,51 @@ func gatheredNames(reg prometheus.Gatherer) []string {
 	}
 	return names
 }
+
+// The file and environment routes are in config_test.go. The flag is applied
+// after loadServerConfig has run its checks, so it needs its own, both ways.
+var _ = Describe("--rate-limit-ipv6-prefix-length", func() {
+	BeforeEach(func() {
+		clearServerEnv()
+		DeferCleanup(slog.SetDefault, slog.Default())
+	})
+
+	It("refuses a value outside 1-128 before anything starts", func() {
+		caDir := GinkgoT().TempDir()
+		cmd := newRootCmd()
+		cmd.SetOut(GinkgoWriter)
+		cmd.SetErr(GinkgoWriter)
+		cmd.SetArgs([]string{
+			"--config", writeTempConfig("cadir: " + caDir + "\n"),
+			"--host", "127.0.0.1", "--port", "0",
+			"--single-process",
+			"--rate-limit-ipv6-prefix-length=0",
+		})
+
+		// Bounded: were the check to regress, the command would go on to
+		// serve, and a hang would report nothing.
+		done := make(chan error, 1)
+		go func() { done <- cmd.Execute() }()
+		var err error
+		Eventually(done, "30s").Should(Receive(&err))
+		Expect(err).To(MatchError(ContainSubstring("rate_limit_ipv6_prefix_length must be between 1 and 128")))
+
+		entries, err := os.ReadDir(caDir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(entries).To(BeEmpty(), "the refusal must come before the store is touched")
+	})
+
+	It("reaches the server when valid", func() {
+		caDir := GinkgoT().TempDir()
+		logPath := filepath.Join(GinkgoT().TempDir(), "server.log")
+		bootstrapCAInDir(caDir, "ca.example.com")
+		path := serveConfig(caDir, GinkgoT().TempDir(), "127.0.0.1", freeLoopbackPort(), false)
+		appendConfig(path, fmt.Sprintf("logfile: %s\n", logPath))
+
+		startServe(path, "--rate-limit-ipv6-prefix-length=64")
+
+		data, err := os.ReadFile(logPath)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(data)).To(ContainSubstring(`"rate_limit_ipv6_prefix_length":64`))
+	})
+})

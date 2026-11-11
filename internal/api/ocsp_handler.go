@@ -42,7 +42,7 @@ func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
 	// First, before the request is read, so a malformed request is counted as
 	// well: a flood should not go uncounted for being malformed.
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
-	if s.ocspLimiter != nil && !s.ocspLimiter.Allow(clientIP(r)) {
+	if s.ocspLimiter != nil && !s.ocspLimiter.Allow(rateLimitKey(r, s.RateLimitIPv6PrefixLength)) {
 		if s.OnOCSPRateLimited != nil {
 			s.OnOCSPRateLimited()
 		}

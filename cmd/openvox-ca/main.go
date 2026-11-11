@@ -662,6 +662,27 @@ func resolveOCSPRateLimit(configured int) int {
 	return configured
 }
 
+// applyRateLimits hands srv the per-IP rate limits in cfg. For both limits an
+// explicit 0 from any layer (flag, environment or file) disables it, and the
+// unset sentinel (-1) falls back to the default. A function of its own so that
+// a spec can pin the join from configuration to server, which would otherwise
+// sit inline in the server start-up where nothing can reach it. It logs the
+// effective CSR limit and keying, since the prefix length is otherwise visible
+// nowhere; the OCSP limit has its own line with the responder.
+func applyRateLimits(srv *api.Server, cfg *serverConfig) {
+	srv.CSRRateLimit = resolveCSRRateLimit(cfg.CSRRateLimit)
+	srv.OCSPRateLimit = resolveOCSPRateLimit(cfg.OCSPRateLimit)
+	srv.RateLimitIPv6PrefixLength = cfg.RateLimitIPv6PrefixLength
+	// A limit of 0 is off, not "nothing allowed", so it is not logged as a
+	// rate: the OCSP line makes the same distinction.
+	csr := []any{"csr_rate_limit_per_minute", srv.CSRRateLimit}
+	if srv.CSRRateLimit == 0 {
+		csr = []any{"csr_rate_limit", "off"}
+	}
+	slog.Info("Per-IP rate limits",
+		append(csr, "rate_limit_ipv6_prefix_length", srv.RateLimitIPv6PrefixLength)...)
+}
+
 // newOCSPRateLimitedCounter registers openvoxca_ocsp_rate_limited_total on reg.
 // Only while the responder is served, like the openvoxca_ocsp_index_* series.
 func newOCSPRateLimitedCounter(reg prometheus.Registerer) prometheus.Counter {
@@ -802,6 +823,7 @@ func newRootCmd() *cobra.Command {
 		metricsListen           string
 		csrRateLimit            int
 		ocspRateLimit           int
+		rateLimitIPv6Prefix     int
 		caSigningConcurrency    int
 		configFile              string
 		encryptCAKey            bool
@@ -930,6 +952,12 @@ func newRootCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("ocsp-rate-limit") {
 				cfg.OCSPRateLimit = ocspRateLimit
+			}
+			if cmd.Flags().Changed("rate-limit-ipv6-prefix-length") {
+				if err := checkRateLimitIPv6PrefixLength(rateLimitIPv6Prefix); err != nil {
+					return err
+				}
+				cfg.RateLimitIPv6PrefixLength = rateLimitIPv6Prefix
 			}
 			if cmd.Flags().Changed("ca-signing-concurrency") {
 				cfg.CASigningConcurrency = caSigningConcurrency
@@ -1411,13 +1439,10 @@ func newRootCmd() *cobra.Command {
 			// --- HTTP(S) Server ---
 			srv := api.New(myCA)
 
-			// CSR rate limiting: an explicit 0 from any layer (flag/env/file)
-			// disables it; the unset sentinel (-1) falls back to the default.
-			srv.CSRRateLimit = resolveCSRRateLimit(cfg.CSRRateLimit)
+			applyRateLimits(srv, cfg)
 			srv.SignBatchLimit = 50 // Default max batch size for sign operations
 			srv.PlainHTTP = generateRefusesPlainHTTP(cfg, tlsConfigured)
 			srv.OCSPEnabled = cfg.EnableOCSP
-			srv.OCSPRateLimit = resolveOCSPRateLimit(cfg.OCSPRateLimit)
 			switch {
 			case cfg.EnableOCSP && srv.OCSPRateLimit > 0:
 				slog.Info("OCSP responder enabled at /ocsp", "rate_limit_per_minute", srv.OCSPRateLimit)
@@ -1717,6 +1742,7 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&crlURL, "crl-url", "", "CRL distribution point URL to embed in issued certificates (e.g. http://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca)")
 	f.StringVar(&metricsListen, "metrics-listen", "", "Address for the Prometheus metrics exporter (e.g. 127.0.0.1:9140 or :9140); empty disables it. Serves /metrics over plain HTTP on a separate listener; restrict to a trusted network as it reveals node hostnames")
 	f.IntVar(&csrRateLimit, "csr-rate-limit", -1, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables; unset uses the default of 60)")
+	f.IntVar(&rateLimitIPv6Prefix, "rate-limit-ipv6-prefix-length", 128, "Leading bits of an IPv6 client address that csr_rate_limit and ocsp_rate_limit count as one client (1-128; 128, the default, is per address; 64 shares one budget across a /64)")
 	f.IntVar(&ocspRateLimit, "ocsp-rate-limit", -1, "Max OCSP requests per IP per minute while --enable-ocsp serves /ocsp; the excess gets RFC 6960 tryLater over HTTP 429 (0 disables; unset uses the default of 300)")
 	f.IntVar(&caSigningConcurrency, "ca-signing-concurrency", -1, "Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound; unset uses max(4, GOMAXPROCS)). Lower it to a remote signer's capacity")
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id). Requires a passphrase source: --ca-key-passphrase-file or OPENVOX_CA_KEY_PASSPHRASE")
