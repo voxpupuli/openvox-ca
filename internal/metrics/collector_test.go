@@ -239,6 +239,33 @@ var _ = Describe("Collector", func() {
 		}
 	})
 
+	// Two reasons, both always present: an alert on reason="tampered" must
+	// see a zero rather than an absence on a healthy CA, and an unreachable
+	// backend must not count as tampering.
+	It("reports inventory verification failures by reason", func() {
+		// counterValue reads 0 from a missing series, so presence is asserted
+		// on its own: an absent tamper series would leave increase() nothing
+		// to compare the first detection after a restart with.
+		series := func(g gathered, reason string) *dto.Metric {
+			GinkgoHelper()
+			m := g.findByLabels("openvoxca_inventory_verify_failures_total", map[string]string{"reason": reason})
+			Expect(m).NotTo(BeNil(), "reason=%q must be exported even at zero", reason)
+			return m
+		}
+
+		g := gather(metrics.NewCollector(myCA))
+		Expect(counterValue(series(g, "tampered"))).To(Equal(0.0))
+		Expect(counterValue(series(g, "read_error"))).To(Equal(0.0))
+
+		Expect(os.Remove(myCA.Storage.InventoryPath())).To(Succeed())
+		Expect(os.Mkdir(myCA.Storage.InventoryPath(), 0o700)).To(Succeed())
+		Expect(myCA.VerifyInventory(ctx)).NotTo(Succeed())
+
+		g = gather(metrics.NewCollector(myCA))
+		Expect(counterValue(series(g, "read_error"))).To(Equal(1.0))
+		Expect(counterValue(series(g, "tampered"))).To(Equal(0.0))
+	})
+
 	It("reports CA certificate and CRL metrics", func() {
 		g := gather(metrics.NewCollector(myCA))
 

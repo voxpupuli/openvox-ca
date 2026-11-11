@@ -53,6 +53,7 @@ const (
 	jobCRLRefresh      = "crl-refresh"
 	jobCRLSync         = "crl-sync"
 	jobOCSPIndexSync   = "ocsp-index-sync"
+	jobInventoryVerify = "inventory-verify"
 	jobCertCleanup     = "expired-cert-cleanup"
 	jobSupersededSweep = "superseded-cert-revocation"
 	jobCRLChainRefresh = "crl-chain-refresh"
@@ -108,6 +109,17 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 	syncInterval := cfg.crlSyncInterval()
 	jobs = append(jobs, backgroundJob{jobCRLSync, func(ctx context.Context) {
 		runCRLSync(ctx, myCA, syncInterval)
+	}})
+
+	// Re-checks the inventory's integrity value on a timer, on every backend
+	// and whatever enable_ocsp says. The OCSP index sync below used to be the
+	// only periodic re-check, and only on the shared backends; with the
+	// responder off by default it no longer runs, and a tamper signal that
+	// depends on serving OCSP is one most deployments would not have. Read-only
+	// and takes no cluster lock, like the two sync jobs.
+	verifyInterval := cfg.inventoryVerifyInterval()
+	jobs = append(jobs, backgroundJob{jobInventoryVerify, func(ctx context.Context) {
+		runInventoryVerify(ctx, myCA, verifyInterval)
 	}})
 
 	// Reloads the inventory into the serial index this process's OCSP responder

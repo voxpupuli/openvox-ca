@@ -114,6 +114,8 @@ type Collector struct {
 	signingLimit    *prometheus.Desc
 	signingShed     *prometheus.Desc
 
+	inventoryVerifyFailures *prometheus.Desc
+
 	caInfo      *prometheus.Desc
 	caNotBefore *prometheus.Desc
 	caNotAfter  *prometheus.Desc
@@ -205,6 +207,14 @@ func NewCollector(c *ca.CA, opts ...Option) *Collector {
 				"longer verifies. While it is rising, this replica answers 'unknown' for "+
 				"certificates signed elsewhere since the last successful pass.",
 			nil, nil),
+		inventoryVerifyFailures: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "inventory_verify", "failures_total"),
+			"Total failed periodic inventory verifications, by reason. reason=\"tampered\" is a "+
+				"pass whose integrity value no longer matched the inventory: an edit made behind "+
+				"the CA's back, and the one to alert on. reason=\"read_error\" is a pass that "+
+				"could not read the inventory at all. Every replica verifies on every backend, "+
+				"once per inventory_verify_interval_sec.",
+			[]string{"reason"}, nil),
 		signingInFlight: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "ca_signing", "in_flight"),
 			"CA-key signatures in flight right now, across certificate issuance, CRL re-signing and "+
@@ -405,6 +415,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 		ch <- c.ocspIndexSyncFailures
 		ch <- c.ocspIndexSerials
 	}
+	ch <- c.inventoryVerifyFailures
 	ch <- c.signingInFlight
 	ch <- c.signingLimit
 	ch <- c.signingShed
@@ -460,6 +471,11 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.ocspIndexSerials, prometheus.GaugeValue,
 			float64(c.ca.SerialIndexSize()))
 	}
+	tampered, readErrors := c.ca.InventoryVerifyFailures()
+	ch <- prometheus.MustNewConstMetric(c.inventoryVerifyFailures, prometheus.CounterValue,
+		float64(tampered), "tampered")
+	ch <- prometheus.MustNewConstMetric(c.inventoryVerifyFailures, prometheus.CounterValue,
+		float64(readErrors), "read_error")
 	ch <- prometheus.MustNewConstMetric(c.supersedeFailures, prometheus.CounterValue,
 		float64(c.ca.SupersedeFailures()))
 	// Emitted alongside the failure counters, and for the same reason: these

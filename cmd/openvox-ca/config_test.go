@@ -256,6 +256,40 @@ var _ = Describe("crlRefreshInterval", func() {
 // end for the same reason crlSyncInterval's is: a typo in the env key, or a
 // guard that let a non-positive value reach time.NewTicker, would both be
 // invisible to a test that sets the field directly.
+var _ = Describe("inventoryVerifyInterval", func() {
+	BeforeEach(func() { clearServerEnv() })
+
+	It("returns the default when unset", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.inventoryVerifyInterval()).To(Equal(defaultInventoryVerifyInterval))
+	})
+
+	It("is read from the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("inventory_verify_interval_sec: 45\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.inventoryVerifyInterval()).To(Equal(45 * time.Second))
+	})
+
+	// A value that wraps the seconds-to-nanoseconds multiply would reach
+	// time.NewTicker in a goroutine nothing recovers, and one that does not
+	// wrap but is huge turns the tamper check off. Either is refused.
+	DescribeTable("refuses a value over 30 days, naming the key",
+		func(value string) {
+			_, err := loadServerConfig(writeTempConfig("inventory_verify_interval_sec: " + value + "\n"))
+			Expect(err).To(MatchError(ContainSubstring("inventory_verify_interval_sec must not exceed")))
+		},
+		Entry("one second over", "2592001"),
+		Entry("one that wraps a time.Duration", "9300000000"),
+	)
+
+	It("accepts exactly 30 days", func() {
+		cfg, err := loadServerConfig(writeTempConfig("inventory_verify_interval_sec: 2592000\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.inventoryVerifyInterval()).To(Equal(30 * 24 * time.Hour))
+	})
+})
+
 var _ = Describe("ocspIndexSyncInterval", func() {
 	It("returns the default when unset", func() {
 		clearServerEnv()
@@ -1032,6 +1066,7 @@ func serverEnvBindings() []serverEnvBinding {
 		{"OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", "15", func(c *serverConfig) any { return &c.CRLSyncIntervalSec }, 15},
 		{"OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "300", func(c *serverConfig) any { return &c.OCSPIndexSyncIntervalSec }, 300},
 		{"OPENVOX_CA_ENABLE_OCSP", "true", func(c *serverConfig) any { return &c.EnableOCSP }, true},
+		{"OPENVOX_CA_INVENTORY_VERIFY_INTERVAL_SEC", "45", func(c *serverConfig) any { return &c.InventoryVerifyIntervalSec }, 45},
 		{"OPENVOX_CA_OCSP_RATE_LIMIT", "17", func(c *serverConfig) any { return &c.OCSPRateLimit }, 17},
 		{"OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP", "true", func(c *serverConfig) any { return &c.EnableExpiredCertCleanup }, true},
 		{"OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC", "2592000", func(c *serverConfig) any { return &c.ExpiredCertRetentionSec }, 2592000},
