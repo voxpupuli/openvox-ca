@@ -1091,119 +1091,6 @@ linters:
 	})
 })
 
-var _ = Describe("verifyAutomergeLabelExclusion", func() {
-	// Against the repository's real ci.yml: the clause must actually be there.
-	It("finds the real auto-merge job excluding the signing-review label", func() {
-		Expect(verifyAutomergeLabelExclusion()).To(Succeed())
-	})
-
-	Describe("drift detection", func() {
-		good := []byte(`
-jobs:
-  automerge:
-    if: >-
-      github.event_name == 'pull_request'
-      && !contains(github.event.pull_request.labels.*.name, 'review-signing-path')
-      && github.event.pull_request.user.login == 'renovate[bot]'
-    steps:
-      - run: gh pr merge --auto --merge "$PR_URL"
-`)
-
-		It("accepts a merging job that excludes the label", func() {
-			Expect(verifyAutomergeLabelExclusionIn("ci.yml", good)).To(Succeed())
-		})
-
-		// The whole point: the clause is droppable in a tidy-up, and nothing
-		// else in the repository would notice it had gone.
-		It("rejects a merging job whose condition drops the label clause", func() {
-			bad := bytes.Replace(good,
-				[]byte("      && !contains(github.event.pull_request.labels.*.name, 'review-signing-path')\n"), nil, 1)
-			// Both clauses are gone, and the error must name both — this is
-			// the spec that distinguishes "clause deleted" from the
-			// partial-match case below.
-			Expect(verifyAutomergeLabelExclusionIn("ci.yml", bad)).To(MatchError(
-				And(ContainSubstring(`job "automerge"`),
-					ContainSubstring("github.event.pull_request.labels"),
-					ContainSubstring("review-signing-path"))))
-		})
-
-		// Naming the label but not reading it from the PR's labels is not an
-		// exclusion, however plausibly it reads.
-		It("rejects a condition that names the label without consulting the PR's labels", func() {
-			bad := bytes.Replace(good,
-				[]byte("!contains(github.event.pull_request.labels.*.name, 'review-signing-path')"),
-				[]byte("github.event.pull_request.title != 'review-signing-path'"), 1)
-			Expect(verifyAutomergeLabelExclusionIn("ci.yml", bad)).To(MatchError(
-				ContainSubstring("never consults")))
-		})
-
-		// The clause is required whole, not in fragments. Flipping it while an
-		// unrelated !contains(...) sits elsewhere leaves every fragment present
-		// — the label name, the labels context, a negation — and inverts the
-		// meaning anyway. This mutation passed an earlier fragment-based
-		// version of the guard, which is why the contract is the whole clause.
-		It("rejects an inverted clause even when another negation is present", func() {
-			bad := bytes.Replace(good,
-				[]byte("      && !contains(github.event.pull_request.labels.*.name, 'review-signing-path')"),
-				[]byte("      && contains(github.event.pull_request.labels.*.name, 'review-signing-path')\n"+
-					"      && !contains(github.event.pull_request.title, 'WIP')"), 1)
-			Expect(verifyAutomergeLabelExclusionIn("ci.yml", bad)).To(MatchError(
-				ContainSubstring("never consults")))
-		})
-
-		// Exact on shape, free on spacing: the condition is a YAML block
-		// scalar that people wrap and indent to taste, and a guard that failed
-		// on a reflow would be reformatted away rather than obeyed.
-		It("accepts the clause however it is spaced", func() {
-			spaced := bytes.Replace(good,
-				[]byte("!contains(github.event.pull_request.labels.*.name, 'review-signing-path')"),
-				[]byte("!contains(  github.event.pull_request.labels.*.name,   'review-signing-path'  )"), 1)
-			Expect(verifyAutomergeLabelExclusionIn("ci.yml", spaced)).To(Succeed())
-		})
-
-		// Dropping the '!' does not weaken the exclusion, it reverses it: the
-		// job would then arm auto-merge on signing bumps and nothing else. A
-		// guard that passes the exact inversion of what it checks for is not
-		// worth having, which is why the negation is a required clause and
-		// not left to "consults, not constrains".
-		It("rejects a condition whose label check is not negated", func() {
-			bad := bytes.Replace(good, []byte("&& !contains("), []byte("&& contains("), 1)
-			Expect(verifyAutomergeLabelExclusionIn("ci.yml", bad)).To(MatchError(
-				And(ContainSubstring(`job "automerge"`), ContainSubstring("!contains("))))
-			// And the reported clause is the whole expression a maintainer
-			// must restore, not a fragment of it.
-			Expect(verifyAutomergeLabelExclusionIn("ci.yml", bad)).To(MatchError(
-				ContainSubstring("labels.*.name, 'review-signing-path')")))
-		})
-
-		// Comments never reach the parsed `if:` scalar, so naming the clauses
-		// in one cannot satisfy the guard. Asserted rather than assumed: the
-		// immunity comes from parsing the document instead of grepping it,
-		// and a future rewrite to a text search would silently lose it.
-		It("is not satisfied by a comment naming the required clauses", func() {
-			bad := bytes.Replace(good,
-				[]byte("      && !contains(github.event.pull_request.labels.*.name, 'review-signing-path')\n"),
-				[]byte(""), 1)
-			bad = bytes.Replace(bad, []byte("jobs:\n"),
-				[]byte("jobs:\n  # github.event.pull_request.labels review-signing-path !contains(\n"), 1)
-			Expect(verifyAutomergeLabelExclusionIn("ci.yml", bad)).To(MatchError(
-				ContainSubstring("never consults")))
-		})
-
-		// A guard that finds nothing to guard has abstained, not passed. If
-		// auto-merge is renamed or rewritten to merge some other way, this
-		// must go red rather than quiet — that is the failure mode where a
-		// green check is actively misleading. The cost is accepted knowingly:
-		// legitimately removing auto-merge will fail this until the guard goes
-		// too. See the note at the merging == 0 branch.
-		It("refuses to pass when no job merges pull requests at all", func() {
-			bad := bytes.Replace(good, []byte("gh pr merge --auto --merge"), []byte("echo nothing to do"), 1)
-			Expect(verifyAutomergeLabelExclusionIn("ci.yml", bad)).To(MatchError(
-				ContainSubstring("no job runs `gh pr merge`")))
-		})
-	})
-})
-
 var _ = Describe("verifyReleaseJobConfinement", func() {
 	// Against the real workflow: this is the check that the release job as it
 	// actually stands runs no repository code.
@@ -1752,10 +1639,9 @@ jobs:
 				And(ContainSubstring("gh release create asset list"), ContainSubstring("*.deb"))))
 		})
 
-		// A guard that finds nothing to guard has abstained, not passed --
-		// the same reasoning as verifyAutomergeLabelExclusionIn's `merging ==
-		// 0` branch. Delete the packaging job and every other check here still
-		// passes, because they all read the release job.
+		// A guard that finds nothing to guard has abstained, not passed.
+		// Delete the packaging job and every other check here still passes,
+		// because they all read the release job.
 		It("refuses to pass when nothing in the workflow builds packages at all", func() {
 			badRel := bytes.Replace(goodRel, []byte("      - run: mage build:packages\n"), nil, 1)
 			Expect(verifyDistVariantsIn(goodCI, badRel, goodSBOM)).To(MatchError(
@@ -1769,10 +1655,6 @@ jobs:
 		// leaving the real site free to lose an operand with `mage dev:check`
 		// still green. release.yml quotes both commands in prose today, and
 		// the commit that added these checks quotes the operand list too.
-		//
-		// This is the property automergeRequiredClauses pins for itself with
-		// "a comment naming any of this cannot satisfy it"; these two specs
-		// are the same pin for the same reason.
 		It("is not satisfied by a comment quoting the checksums.txt operand list", func() {
 			badRel := bytes.Replace(goodRel,
 				[]byte("          sha256sum -- *.tar.gz *.spdx.json *.cdx.json *.deb *.rpm > checksums.txt\n"),
@@ -1923,15 +1805,14 @@ jobs:
 
 var _ = Describe("verifyWorkflowBaseScoping", func() {
 	// Runs against the repository's real ci.yml and codeql.yml: both triggers
-	// are unfiltered by base and the auto-merge job carries its pin (this also
-	// runs as part of `mage dev:check`).
-	It("finds the real workflows unfiltered by base and the merge job pinned", func() {
+	// are unfiltered by base (this also runs as part of `mage dev:check`).
+	It("finds the real workflows unfiltered by base", func() {
 		Expect(verifyWorkflowBaseScoping()).To(Succeed())
 	})
 
 	// Which files get checked is itself logic, and the real-tree spec above
 	// passes just as happily for a dispatcher that checks nothing. These drive
-	// it over synthetic sources so both halves of the dispatch are pinned.
+	// it over synthetic sources so the dispatch is pinned.
 	Describe("dispatch", func() {
 		clean := []byte("on:\n  pull_request:\njobs: {}\n")
 
@@ -1945,39 +1826,6 @@ var _ = Describe("verifyWorkflowBaseScoping", func() {
 			Expect(err).To(MatchError(ContainSubstring("codeql.yml")))
 		})
 
-		It("applies the pin check, not only the trigger check", func() {
-			err := verifyWorkflowBaseScopingIn(map[string][]byte{
-				"ci.yml": []byte(`
-on:
-  pull_request:
-jobs:
-  automerge:
-    steps:
-      - run: gh pr merge --auto "$PR_URL"
-`),
-				"codeql.yml": clean,
-			})
-			Expect(err).To(MatchError(ContainSubstring(`job "automerge"`)))
-		})
-
-		// The pin check is no longer special-cased to ci.yml, so a merging job
-		// that moves into another listed workflow is still caught, and the
-		// error names the file it is actually in.
-		It("names the workflow a misplaced merging job landed in", func() {
-			err := verifyWorkflowBaseScopingIn(map[string][]byte{
-				"ci.yml": clean,
-				"codeql.yml": []byte(`
-on:
-  pull_request:
-jobs:
-  automerge:
-    steps:
-      - run: gh pr merge --auto "$PR_URL"
-`),
-			})
-			Expect(err).To(MatchError(ContainSubstring("codeql.yml job")))
-		})
-
 		// Asserted on the branch's own message, not just the file name: a nil
 		// source parses as an empty document and reaches the missing-trigger
 		// error, which also names codeql.yml, so matching the name alone
@@ -1988,295 +1836,7 @@ jobs:
 		})
 	})
 
-	// The pin half. Fixtures are synthetic so the failure branches are driven
-	// without touching the real workflow files.
-	Describe("auto-merge base pin", func() {
-		const pinClause = "      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"
-
-		unfiltered := []byte(`
-on:
-  push:
-    branches: ["main"]
-  pull_request:
-
-jobs:
-  automerge:
-    if: >-
-      github.event_name == 'pull_request'
-      && github.event.pull_request.base.ref == github.event.repository.default_branch
-      && (github.event.pull_request.user.login == 'dependabot[bot]'
-      || github.event.pull_request.user.login == 'renovate[bot]')
-    steps:
-      - run: gh pr merge --auto --merge "$PR_URL"
-`)
-
-		It("accepts a merging job that carries the pin", func() {
-			Expect(verifyAutomergeBasePinIn("ci.yml", unfiltered)).To(Succeed())
-		})
-
-		It("rejects a dropped pin and names the job", func() {
-			bad := bytes.Replace(unfiltered, []byte(pinClause), nil, 1)
-			err := verifyAutomergeBasePinIn("ci.yml", bad)
-			Expect(err).To(MatchError(ContainSubstring(`job "automerge"`)))
-			Expect(err).To(MatchError(ContainSubstring("merges pull requests")))
-		})
-
-		// Losing the condition wholesale is the same defect as losing the
-		// clause, and it is what a botched edit to the folded block leaves
-		// behind most often.
-		It("rejects a merging job with no 'if:' at all, and names the job", func() {
-			bad := bytes.Replace(unfiltered, []byte(`    if: >-
-      github.event_name == 'pull_request'
-      && github.event.pull_request.base.ref == github.event.repository.default_branch
-      && (github.event.pull_request.user.login == 'dependabot[bot]'
-      || github.event.pull_request.user.login == 'renovate[bot]')
-`), nil, 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(MatchError(ContainSubstring(`job "automerge"`)))
-		})
-
-		// Pins the anti-pin branch. (It no longer pins the operator folded
-		// into automergeBasePin: the anti-pin fires first for any inverted
-		// fixture, so the operand-only spec below is what covers that.)
-		It("rejects an inverted comparison, and names the job", func() {
-			bad := bytes.Replace(unfiltered,
-				[]byte("github.event.pull_request.base.ref == github.event.repository.default_branch"),
-				[]byte("github.event.pull_request.base.ref != github.event.repository.default_branch"), 1)
-			err := verifyAutomergeBasePinIn("ci.yml", bad)
-			Expect(err).To(MatchError(ContainSubstring(`job "automerge"`)))
-			Expect(err).To(MatchError(ContainSubstring("the inverse of the pin")))
-		})
-
-		// Killed by dropping `==` from automergeBasePin and by nothing else.
-		// The base ref is conjoined, so the conjunct requirement is satisfied
-		// and cannot be what rejects it; only the operator can. Semantically a
-		// non-empty string is truthy, so this pins nothing at all.
-		It("rejects a bare truthy conjunct on the base ref", func() {
-			bad := bytes.Replace(unfiltered,
-				[]byte("github.event.pull_request.base.ref == github.event.repository.default_branch"),
-				[]byte("github.event.pull_request.base.ref"), 1)
-			err := verifyAutomergeBasePinIn("ci.yml", bad)
-			Expect(err).To(MatchError(ContainSubstring(`job "automerge"`)))
-			Expect(err).To(MatchError(ContainSubstring("never compares")))
-		})
-
-		// The ref is consulted but never compared, so it constrains nothing.
-		// Both error paths name the job, so this asserts the one substring only
-		// the missing-comparison path emits.
-		It("rejects a condition that consults the base ref without comparing it", func() {
-			bad := bytes.Replace(unfiltered,
-				[]byte("github.event.pull_request.base.ref == github.event.repository.default_branch"),
-				[]byte("startsWith(github.event.pull_request.base.ref, 'release/')"), 1)
-			err := verifyAutomergeBasePinIn("ci.yml", bad)
-			Expect(err).To(MatchError(ContainSubstring(`job "automerge"`)))
-			Expect(err).To(MatchError(ContainSubstring("never compares")))
-		})
-
-		// Spacing is not spelling in the direction that matters: GitHub reads
-		// `a!=b` as `a != b`, so a tight inversion plus a spaced decoy must
-		// still be refused. Collapsing whitespace rather than removing it let
-		// this through.
-		It("rejects a tight inverted pin even with a spaced decoy", func() {
-			bad := bytes.Replace(unfiltered,
-				[]byte("      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"),
-				[]byte("      && github.event.pull_request.base.ref!=github.event.repository.default_branch\n"+
-					"      && !(github.event.pull_request.base.ref == 'gh-pages')\n"), 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(
-				MatchError(ContainSubstring("the inverse of the pin")))
-		})
-
-		// The same asymmetry misfired upward: a correct pin written tight is
-		// a valid spelling and must not be reported as drift.
-		It("accepts an upright pin written with no spaces", func() {
-			tight := bytes.Replace(unfiltered,
-				[]byte("github.event.pull_request.base.ref == github.event.repository.default_branch"),
-				[]byte("github.event.pull_request.base.ref==github.event.repository.default_branch"), 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", tight)).To(Succeed())
-		})
-
-		// One keystroke, `&&` to `||`. GitHub binds && tighter, so this reads
-		// as `A || (B && C)` with A true for every pull_request event: the job
-		// loses the base pin *and* the author gate. The comparison is still
-		// present, so only requiring it as a conjunct catches this.
-		It("rejects a pin that is disjoined rather than conjoined", func() {
-			bad := bytes.Replace(unfiltered,
-				[]byte("      github.event_name == 'pull_request'\n      && github.event.pull_request.base.ref"),
-				[]byte("      github.event_name == 'pull_request'\n      || github.event.pull_request.base.ref"), 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(
-				MatchError(ContainSubstring("outside any parenthesised group")))
-		})
-
-		// The same slip one operator along: the pin stays where it was and the
-		// `||` moves after it. Caught for the same reason -- the disjunction is
-		// top-level -- which the earlier conjunct-adjacency form missed.
-		It("rejects a disjunction that follows the pin", func() {
-			bad := bytes.Replace(unfiltered,
-				[]byte("github.event.repository.default_branch\n      && (github.event.pull_request.user.login"),
-				[]byte("github.event.repository.default_branch\n      || (github.event.pull_request.user.login"), 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(
-				MatchError(ContainSubstring("outside any parenthesised group")))
-		})
-
-		// Documented limit, pinned so the comment and the code cannot drift:
-		// a negation wrapped around the comparison keeps it and inverts anyway.
-		// Not caught, on purpose -- nobody writes it by accident, and anyone
-		// writing it deliberately would delete the guard instead.
-		It("does not catch a comparison negated as a whole", func() {
-			bad := bytes.Replace(unfiltered,
-				[]byte("&& github.event.pull_request.base.ref == github.event.repository.default_branch"),
-				[]byte("&& !(github.event.pull_request.base.ref == github.event.repository.default_branch)"), 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(Succeed())
-		})
-
-		// Spellings a maintainer plausibly writes, all semantically identical
-		// to the baseline. The conjunct-adjacency form rejected every one.
-		It("accepts the comparison parenthesised", func() {
-			ok := bytes.Replace(unfiltered,
-				[]byte("&& github.event.pull_request.base.ref == github.event.repository.default_branch"),
-				[]byte("&& (github.event.pull_request.base.ref == github.event.repository.default_branch)"), 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", ok)).To(Succeed())
-		})
-
-		It("accepts the operands in either order", func() {
-			ok := bytes.Replace(unfiltered,
-				[]byte("github.event.pull_request.base.ref == github.event.repository.default_branch"),
-				[]byte("github.event.repository.default_branch == github.event.pull_request.base.ref"), 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", ok)).To(Succeed())
-		})
-
-		It("accepts a condition wrapped in ${{ }}", func() {
-			ok := bytes.Replace(unfiltered, []byte("    if: >-\n"),
-				[]byte("    if: >-\n      ${{\n"), 1)
-			ok = bytes.Replace(ok, []byte("|| github.event.pull_request.user.login == 'renovate[bot]')\n"),
-				[]byte("|| github.event.pull_request.user.login == 'renovate[bot]')\n      }}\n"), 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", ok)).To(Succeed())
-		})
-
-		// The decoy: invert the real pin and let a plausible neighbouring
-		// clause supply the required substring. Requiring the pin alone passed
-		// this, because a substring says nothing about which clause produced
-		// it.
-		It("rejects an inverted pin even when another clause supplies the substring", func() {
-			bad := bytes.Replace(unfiltered,
-				[]byte("      && github.event.pull_request.base.ref == github.event.repository.default_branch\n"),
-				[]byte("      && github.event.pull_request.base.ref != github.event.repository.default_branch\n"+
-					"      && !(github.event.pull_request.base.ref == 'gh-pages')\n"), 1)
-			// The fixture really is a decoy: the required substring is present,
-			// so a guard checking only for it would pass this.
-			Expect(string(bad)).To(ContainSubstring("github.event.pull_request.base.ref =="))
-			err := verifyAutomergeBasePinIn("ci.yml", bad)
-			Expect(err).To(MatchError(ContainSubstring(`job "automerge"`)))
-			Expect(err).To(MatchError(ContainSubstring("the inverse of the pin")))
-		})
-
-		// Spacing is not spelling: the required comparison is matched on its
-		// tokens, so an extra space around the operator is not drift.
-		It("accepts extra whitespace around the operator", func() {
-			spaced := bytes.Replace(unfiltered,
-				[]byte("github.event.pull_request.base.ref == github.event.repository.default_branch"),
-				[]byte("github.event.pull_request.base.ref   ==   github.event.repository.default_branch"), 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", spaced)).To(Succeed())
-		})
-
-		// The guard checks that the condition makes the comparison, not what it
-		// compares against: ci.yml uses default_branch so the pin tracks the
-		// ruleset, but a literal confines the job just as well and must not be
-		// reported as drift.
-		It("accepts a pin written against a literal branch name", func() {
-			literal := bytes.Replace(unfiltered,
-				[]byte("github.event.pull_request.base.ref == github.event.repository.default_branch"),
-				[]byte("github.event.pull_request.base.ref == 'main'"), 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", literal)).To(Succeed())
-		})
-
-		// Matching on what the job does, not on the name "automerge", means a
-		// rename cannot quietly retire the guard.
-		It("still requires the pin when the merging job is renamed", func() {
-			bad := bytes.Replace(unfiltered, []byte("  automerge:\n"), []byte("  land-bot-prs:\n"), 1)
-			bad = bytes.Replace(bad, []byte(pinClause), nil, 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(MatchError(ContainSubstring(`job "land-bot-prs"`)))
-		})
-
-		// A step that enables auto-merge through an action rather than an
-		// inline `gh pr merge` is the same job wearing a different hat.
-		It("still requires the pin when auto-merge is enabled via an action", func() {
-			bad := bytes.Replace(unfiltered,
-				[]byte(`      - run: gh pr merge --auto --merge "$PR_URL"`),
-				[]byte(`      - uses: peter-evans/enable-pull-request-automerge@v3`), 1)
-			bad = bytes.Replace(bad, []byte(pinClause), nil, 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(MatchError(ContainSubstring(`job "automerge"`)))
-		})
-
-		// A job that calls a reusable workflow has no steps at all, so a
-		// matcher walking only steps would skip it -- while the caller job is
-		// still where the if:, the permissions and the pin live.
-		It("still requires the pin when the job itself calls an auto-merge workflow", func() {
-			bad := []byte(`
-on:
-  pull_request:
-
-jobs:
-  automerge:
-    uses: ./.github/workflows/automerge.yml
-`)
-			Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(MatchError(ContainSubstring(`job "automerge"`)))
-		})
-
-		// The pin is required whatever the trigger looks like: a filter is
-		// only equivalent to it when it names the default branch alone, so
-		// disarming on any filter would retire the guard exactly when a
-		// widened filter started to matter.
-		It("still requires the pin when the trigger filters by base", func() {
-			filtered := bytes.Replace(unfiltered,
-				[]byte("  pull_request:\n"), []byte("  pull_request:\n    branches: [\"main\", \"release/**\"]\n"), 1)
-			filtered = bytes.Replace(filtered, []byte(pinClause), nil, 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", filtered)).To(MatchError(ContainSubstring(`job "automerge"`)))
-		})
-
-		// The parse-error branch, which only a direct call reaches:
-		// verifyWorkflowBaseScopingIn runs verifyPullRequestUnfilteredIn first
-		// on the same bytes, so malformed YAML always fails there in practice.
-		// Specced anyway because the branch exists and the test surface can
-		// reach it -- and asserted on `yaml:` rather than the file name, since
-		// every error this function returns leads with the workflow name.
-		It("reports malformed YAML, though only a direct call reaches this", func() {
-			Expect(verifyAutomergeBasePinIn("ci.yml", []byte("on: [\n"))).To(
-				MatchError(ContainSubstring("ci.yml: yaml:")))
-		})
-
-		It("ignores jobs that do not merge pull requests", func() {
-			noMerge := bytes.Replace(unfiltered,
-				[]byte(`      - run: gh pr merge --auto --merge "$PR_URL"`),
-				[]byte(`      - run: gh pr view "$PR_URL"`), 1)
-			noMerge = bytes.Replace(noMerge, []byte(pinClause), nil, 1)
-			Expect(verifyAutomergeBasePinIn("ci.yml", noMerge)).To(Succeed())
-		})
-
-		// Two offenders: the reported job must be the alphabetically first,
-		// so the message does not change from run to run with map order. The
-		// non-merging job sorts before both and must be skipped.
-		It("names the first offending job when several are unpinned", func() {
-			bad := []byte(`
-on:
-  pull_request:
-
-jobs:
-  aardvark-lint:
-    steps:
-      - run: gh pr view "$PR_URL"
-  merge-zulu:
-    steps:
-      - run: gh pr merge --auto "$PR_URL"
-  merge-alpha:
-    steps:
-      - run: gh pr merge --auto "$PR_URL"
-`)
-			for range 20 {
-				Expect(verifyAutomergeBasePinIn("ci.yml", bad)).To(MatchError(ContainSubstring(`job "merge-alpha"`)))
-			}
-		})
-	})
-
-	// The trigger half: what stops the widening this guard accompanies from
+	// The trigger check: what stops the widening this guard accompanies from
 	// being silently reverted.
 	Describe("pull_request trigger", func() {
 		It("accepts a trigger with no base filter", func() {
@@ -10417,11 +9977,11 @@ jobs:
       - uses: re-actors/alls-green@b5b5b37504aa4183270bd3d855c52a67f212be35 # v1.3.0
         with:
           jobs: ${{ toJSON(needs) }}
-  automerge:
+  downstream:
     needs:
       - ci
     steps:
-      - run: gh pr merge --auto "$PR_URL"
+      - run: "true"
 `
 	goodImages := `
 on:
@@ -10738,14 +10298,14 @@ jobs:
 			ContainSubstring(`container-images.yml job "aggregate" needs job "departed", which container-images.yml does not define`)))
 	})
 
-	// Absorbed from verifyCIGate's specs. automerge runs once the gate is
-	// green, so the gate must never need it; the good fixtures pass because
-	// automerge's own edge to the gate exempts it. Without that edge it is
+	// Absorbed from verifyCIGate's specs. downstream runs once the gate has
+	// decided, so the gate must never need it; the good fixtures pass because
+	// downstream's own edge to the gate exempts it. Without that edge it is
 	// just another job, and the remedy is to restore the edge.
-	It("asks for automerge only once it loses its edge to the gate", func() {
-		src := mutate(goodCI, "  automerge:\n    needs:\n      - ci\n", "  automerge:\n")
+	It("asks for a downstream job only once it loses its edge to the gate", func() {
+		src := mutate(goodCI, "  downstream:\n    needs:\n      - ci\n", "  downstream:\n")
 		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(MatchError(
-			ContainSubstring(`ci.yml job "ci" does not need job "automerge"`)))
+			ContainSubstring(`ci.yml job "ci" does not need job "downstream"`)))
 	})
 
 	It("rejects an aggregate that needs nothing", func() {
@@ -10760,11 +10320,11 @@ jobs:
 		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(Succeed())
 	})
 
-	// automerge needs ci, so it cannot be in ci's needs; the exemption is
+	// downstream needs ci, so it cannot be in ci's needs; the exemption is
 	// derived from the graph rather than listed, and reaches jobs downstream
 	// of it as well.
 	It("exempts jobs that depend on the aggregate, transitively", func() {
-		src := goodCI + "  notify:\n    needs: automerge\n    steps:\n      - run: \"true\"\n"
+		src := goodCI + "  notify:\n    needs: downstream\n    steps:\n      - run: \"true\"\n"
 		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(Succeed())
 	})
 
@@ -10779,10 +10339,10 @@ jobs:
 	})
 
 	// The walk's memo is per job. Shared across jobs, the first dependant
-	// marks automerge seen and the second is then reported as missing.
+	// marks downstream seen and the second is then reported as missing.
 	It("exempts every dependant, not only the first one walked", func() {
-		src := goodCI + "  announce:\n    needs: automerge\n    steps:\n      - run: \"true\"\n" +
-			"  notify:\n    needs: automerge\n    steps:\n      - run: \"true\"\n"
+		src := goodCI + "  announce:\n    needs: downstream\n    steps:\n      - run: \"true\"\n" +
+			"  notify:\n    needs: downstream\n    steps:\n      - run: \"true\"\n"
 		Expect(verifyAggregateJobsIn(sources(src, goodImages))).To(Succeed())
 	})
 
