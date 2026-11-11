@@ -27,8 +27,10 @@
 // definition of what "self", "chain" and "root" select keeps the two exporters
 // from publishing different things for the same setting.
 //
-// Its specs live with internal/k8sexport's, which exercise it through those
-// aliases, so a per-package coverage report shows this package uncovered.
+// Its specs live with internal/k8sexport's, which reach the configuration types
+// through those aliases and call Scoped and PEMBlocks directly; Scoped is also
+// exercised through internal/fileexport's exporter specs. A per-package
+// coverage report therefore shows this package uncovered.
 package exportconfig
 
 import (
