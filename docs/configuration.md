@@ -178,6 +178,10 @@ crl_chain_refresh_interval_sec: 0  # how often to re-read it; 0 = built-in defau
 # writing certificates on filesystem or sqlite. See "OCSP status across
 # replicas" below.
 ocsp_index_sync_interval_sec: 0  # how often to reload; 0 = built-in default (5m)
+# Background inventory verification re-checks the inventory's integrity value on
+# every replica and every backend, whatever enable_ocsp says. Read-only. See
+# "Inventory verification" below.
+inventory_verify_interval_sec: 0  # how often to verify; 0 = built-in default (5m)
 # Background expired-certificate cleanup (opt-in). When enabled, a job removes
 # certificates that expired more than the retention grace period ago from the
 # inventory and the CRL, and deletes their stored signed certificate. Safe to run
@@ -321,6 +325,7 @@ A database password needs the same care. Give it in `--sql-dsn-file`,
 | `crl_chain_file` | `OPENVOX_CA_CRL_CHAIN_FILE` |
 | `crl_chain_refresh_interval_sec` | `OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC` |
 | `ocsp_index_sync_interval_sec` | `OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC` |
+| `inventory_verify_interval_sec` | `OPENVOX_CA_INVENTORY_VERIFY_INTERVAL_SEC` |
 | `enable_expired_cert_cleanup` | `OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP` |
 | `expired_cert_retention_sec` | `OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC` |
 | `expired_cert_cleanup_interval_sec` | `OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC` |
@@ -907,7 +912,9 @@ when it names this one.
 With the responder off, nothing reads the serial index it answers from, so the
 OCSP index sync job is not started on any backend and the
 `openvoxca_ocsp_index_*` series are not exported. See
-[OCSP status across replicas](#ocsp-status-across-replicas).
+[OCSP status across replicas](#ocsp-status-across-replicas). The inventory's
+integrity is still re-checked on a timer, by the separate
+[inventory verification](#inventory-verification) job.
 
 ### Rate limit
 
@@ -1004,7 +1011,8 @@ What that window does and does not mean:
   downward as well as upward.
 - **`filesystem` and `sqlite` are single-node**, so the job has nothing to find
   there and is not started at all: the index stays as it was built at startup,
-  and no periodic inventory read is paid.
+  and this job pays no periodic inventory read
+  ([inventory verification](#inventory-verification) still does).
 
 The read takes no cluster lock and does not re-sign anything, but it is not
 free: it is the whole inventory, so unlike the CRL sync its cost grows with the
@@ -1030,6 +1038,40 @@ Watch `openvoxca_ocsp_index_serials` across replicas to confirm they agree, and
 replica reading *above* its peers is not a fault: a pass that overlaps a local
 issuance defers its removals to the next one, so a busy replica can hold pruned
 serials a little longer.
+
+## Inventory verification
+
+Every replica re-reads the whole inventory once per
+`inventory_verify_interval_sec` (five minutes by default) and checks it against
+its stored integrity value: the whole-blob HMAC, or the hash-chain head on the
+backends that store rows. It runs on every backend, whatever `enable_ocsp`
+says, so an edit made outside the CA is reported within an interval rather
+than at the next restart.
+
+```yaml
+inventory_verify_interval_sec: 0   # 0 = built-in default (5m); at most 30 days
+```
+
+A pass takes no cluster lock and writes nothing. A mismatch counts into
+`openvoxca_inventory_verify_failures_total{reason="tampered"}`, which the
+shipped `OpenVoxCAInventoryTampered` alert pages on, and an inventory that
+cannot be read at all counts under `reason="read_error"` instead. Neither stops
+the CA. What a mismatch means is in
+[the inventory store's design notes](development/inventory-store.md), and once
+the cause is established,
+[`openvox-ca rebuild-inventory-hmac`](operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity)
+is the supported way back.
+
+The cost is one read of the whole inventory per replica per interval, so like
+the OCSP index sync it grows with every certificate ever issued, and
+`enable_expired_cert_cleanup` is what bounds it. With `enable_ocsp` set on a
+shared backend the inventory is read twice per interval, once by each job.
+
+The shipped mixin's two inventory alerts count over a one-hour window, which
+assumes an interval of 30 minutes or less. Lengthen the interval past that and
+raise `inventoryTamperWindow` and `inventoryUnreadableWindow` to at least twice
+it, or the tamper page resolves and re-fires between passes; see the
+[mixin's configuration table](../mixin/README.md#configurable-thresholds).
 
 ## Bounding CA-key signing
 

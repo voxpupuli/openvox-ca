@@ -564,74 +564,66 @@ inventory diverged from its recorded state, never where it diverged.** Recovery
 is therefore a rebuild, not a repair.
 
 Verification runs at startup from `CA.Init`, on `ReadInventory` and
-`InventoryEntries`, on `SubjectForSerial` on the blob path, and in
-`PruneInventory` on every backend. **How often it runs after startup
-depends on the backend, and the difference cuts against the weaker scheme.** The
-OCSP serial-index resync tick re-checks the inventory through
-`InventoryEntries` once per `ocsp_index_sync_interval_sec` (default five
-minutes), but that job starts only while `enable_ocsp` serves the responder,
-and then only for the shared backends: `sharedStorageBackend` excludes
-`filesystem` and `sqlite`, and on those the server logs `OCSP serial index sync
-not started` and no tick runs.
+`InventoryEntries`, on `SubjectForSerial` on the blob path, in `PruneInventory`
+on every backend, and on a timer. The timer is the inventory-verify job: it
+calls `CA.VerifyInventory`, which reads through `InventoryEntries`, once per
+`inventory_verify_interval_sec` (default five minutes), on every replica and
+every backend, whatever `enable_ocsp` says. So every established CA re-checks
+its inventory continuously, whichever scheme its backend keeps.
 
-So on postgres, mysql, etcd and redis an established CA with `enable_ocsp` set
-re-checks its inventory continuously. Without the tick it does not. That is
-every CA on filesystem and sqlite and, since `enable_ocsp` is off by default, a
-default CA on the other four as well, which then verifies only at startup and
-on verifying reads like those below. The two single-node backends differ from
-each other.
-On the default filesystem backend — also the only whole-blob backend —
-verification after `CA.Init` happens only when something drives a verifying
-read: both revocation entry points, the CSR-based renewal path, and the opt-in
+On the structured backends that read takes the rows and the stored head from
+one snapshot (`InventoryStore.EntriesWithHead`: one transaction at REPEATABLE
+READ on SQL, one Txn on etcd, one MULTI/EXEC on Redis). Read apart, a peer's
+append or prune committing between the two reads would compare one state's
+rows with the next state's head and report tampering that never happened.
+
+That job is newer than the rest of this section. Before it, the only periodic
+re-check was the OCSP serial-index resync tick, which reads the same way but
+runs only while `enable_ocsp` serves the responder, and then only on the shared
+backends. Filesystem and SQLite never had a tick, and once `enable_ocsp`
+defaulted to off neither did a default CA on the other four. The job exists to
+close that gap, and it is deliberately not gated on either condition.
+
+Between passes, what else verifies depends on the backend, and the difference
+cuts against the weaker scheme. On the default filesystem backend — also the
+only whole-blob backend — a verifying read happens when something drives one:
+both revocation entry points, the CSR-based renewal path, and the opt-in
 expired-certificate cleanup. **Auto-renewal is not one of them.** `AutoRenew` —
 the empty-body flow real agents use by default — takes the predecessor serial
 from the presented certificate rather than the inventory, so a fleet doing
-nothing but routine renewal never drives a verifying read at all.
+nothing but routine renewal drives no verifying read at all.
 
 SQLite gets a smaller set still: the by-subject and by-serial lookups skip
 verification on `InventoryStore` backends, so no revocation carries it there,
 and `ReadInventory` is reachable only from the blob branch SQLite never takes.
 That leaves startup and, if the opt-in cleanup is enabled, the prune. Startup
 itself verifies twice — `InitHMAC`, which fails the start, and the serial-index
-build, whose failure is only logged — so with cleanup off, those two passes are
-the whole of it.
-
-So the gap between the two is narrower than it looks: on a filesystem CA whose
-agents only auto-renew, verification is also just the startup pair. The backend
-with the weaker integrity scheme is among those whose value is checked least
-often.
+build, whose failure is only logged. On both single-node backends the timer is
+therefore what bounds how long an edit can go unnoticed.
 
 What a mismatch then does depends on the caller. At `CA.Init` it returns
 `ErrInventoryTampered` and startup fails. On the periodic path it does **not**
-fail closed: `SyncSerialIndex` counts the failure into
-`openvoxca_ocsp_index_sync_failures_total`, `syncOCSPIndexOnce` logs `OCSP serial
-index sync failed; continuing with the index already in memory` at `Warn`, and
-the CA keeps answering from the index it already holds.
+fail closed: `VerifyInventory` counts it into
+`openvoxca_inventory_verify_failures_total{reason="tampered"}`,
+`verifyInventoryOnce` logs `Inventory verification failed` at `Warn`, and the CA
+keeps serving. Where the OCSP index sync also runs, it meets the same mismatch
+and counts it into `openvoxca_ocsp_index_sync_failures_total` as well.
 
-The signal to alert on is the mismatch warning itself — `inventory HMAC
-mismatch; integrity check failed`, at `Warn`, carrying a `scheme` attribute of
-`whole-blob-hmac` or `hash-chain`. That is the only integrity-specific,
-backend-identifying record the system emits. The counter is the weaker
-secondary: `openvoxca_ocsp_index_sync_failures_total` counts *every* failed
-inventory read on that path, an unreachable backend included, so a rise in it
-means "this replica is not refreshing its serial index" and only the log line
-says why.
+The signal to alert on is that `tampered` reason, which the shipped
+`OpenVoxCAInventoryTampered` alert pages on. It is specific: an inventory that
+cannot be read at all counts under `reason="read_error"` instead, so an
+unreachable backend does not look like tampering. The storage layer's own
+warning — `inventory HMAC mismatch; integrity check failed`, carrying a
+`scheme` attribute of `whole-blob-hmac` or `hash-chain` and the repair hint — is
+the record that says which scheme failed.
 
-No metric is *specific* to the mismatch, so only the log line identifies it as
-one. What a mismatch moves depends on which path met it, and that differs by
-backend. On the shared backends with `enable_ocsp` set, the tick counts into
-`openvoxca_ocsp_index_sync_failures_total`, raising `OpenVoxCAOCSPIndexSyncFailing`.
-On filesystem the tick does not run, but a revocation that meets the mismatch
-does count: both revoke paths read through a verifying call there, so the failure
-lands in `openvoxca_crl_update_failures_total` and can raise
-`OpenVoxCACRLUpdateFailing` — an alert that fires for a tamper signal while naming
-it a CRL problem. SQLite is the one backend where neither happens: no tick, and
-the by-subject and by-serial lookups verify nothing, so no metric moves for a
-mismatch at all and the signals are the log line and a failed start. A refused
+Other paths still report a mismatch under another name. On filesystem a
+revocation that meets one reads through a verifying call, so the failure lands
+in `openvoxca_crl_update_failures_total` and can raise
+`OpenVoxCACRLUpdateFailing`, naming a tamper signal a CRL problem; and the OCSP
+index sync's counter rises for any failed read, a mismatch included. A refused
 start aborts before the metrics listener binds, so it shows up as
-`OpenVoxCAExporterDown` (or a bare `absent(up)`) rather than `OpenVoxCANotReady` —
-mislabelled in the same way, and on SQLite it is the only alert a mismatch
-produces.
+`OpenVoxCAExporterDown` (or a bare `absent(up)`) rather than `OpenVoxCANotReady`.
 
 Several read paths do not verify at all. `SerialExists` reads through
 `inventoryEntriesLocked`, which checks nothing on any backend.
@@ -650,10 +642,11 @@ out-of-scope item 1.
    the stored bytes all change the covered input and are caught with
    overwhelming probability. This is the strongest justification for the
    control and the one least sensitive to where the key lives: corruption does
-   not recompute a MAC. Detection is bounded by how often verification runs,
-   though, which on the default filesystem backend is at startup, on revocation
-   and CSR-based renewal, and on the opt-in cleanup — not on auto-renewal, and
-   not continuously.
+   not recompute a MAC. Detection is bounded by how often verification runs:
+   every `inventory_verify_interval_sec` (five minutes by default) on every
+   backend, and between passes on whatever verifying reads happen to run, which
+   on the default filesystem backend is at startup, on revocation and CSR-based
+   renewal, and on the opt-in cleanup — not on auto-renewal.
 
 2. **Tampering that reaches the inventory but not the key.** A tampered or
    mismatched backup, or an exposure path that reaches the inventory without
@@ -696,12 +689,13 @@ recorded so the control is not credited with more than it does.
 
    Which verifier gets there first matters. `verifyInventoryHMACLocked` — reached
    from `CA.Init`, `ReadInventory`, `SubjectForSerial` and the prune path — is
-   the one that re-baselines. `compareInventoryMACLocked`, which
-   `InventoryEntries` and therefore the resync tick use, instead logs `No
-   inventory HMAC stored; skipping the integrity check for this read` at `Warn`
-   and writes nothing; its comment says the divergence is deliberate, because a
-   read path that writes, from every replica at once on a timer, is not worth
-   leaving available. On a hash-chain backend an append that lands before any
+   the one that re-baselines. `compareInventoryMAC`, which `InventoryEntries`
+   uses, and so the inventory-verify job on every backend and the OCSP index
+   resync where it runs, instead logs `No inventory HMAC stored; skipping the
+   integrity check for this read` at `Warn` and writes nothing.
+   `compareInventoryMACLocked`'s comment says the divergence is deliberate,
+   because a read path that writes, from every replica at once on a timer, is
+   not worth leaving available. On a hash-chain backend an append that lands before any
    re-baseline makes things worse for the attacker rather than better: the new
    head chains onto the absent predecessor while verification folds over every
    row, leaving a mismatch that no later check clears.
@@ -859,12 +853,15 @@ and to tampering that reaches the inventory but neither `hmac_key` nor
 `inventory_hmac`. It provides little against an adversary who can write the
 store.
 
-Three properties compound on one backend. The only whole-blob backend is the
-default one; it is the only family where an append can re-bless already-tampered
-contents; and it is one of the two that get no periodic verification.
-**The control is weakest on the backend a deployment gets if it chooses
-nothing.** (SQLite is the one where no metric moves for a mismatch at all, so
-it is worst served for detection even though its scheme is the stronger one.)
+Two properties compound on one backend. The only whole-blob backend is the
+default one, and it is the only family where an append can re-bless
+already-tampered contents. **The control is weakest on the backend a deployment
+gets if it chooses nothing.** It used also to be one of the two backends with no
+periodic verification at all, SQLite being the other and the one where no
+metric moved for a mismatch; the inventory-verify job now runs on every
+backend, so detection latency no longer differs by backend, but the timer
+bounds only how late an edit is noticed, not whether an append re-blesses it
+first.
 
 That is a claim about the control, not about where the threat is worst — the
 section does not argue the latter, and for at least one threat it points the
@@ -900,12 +897,14 @@ rather than resolved, and this document does not change the mechanism.
    restore, a deletion, or the absent-value bypass in out-of-scope item 1. The two verifiers
    report it differently: `verifyInventoryHMACLocked` re-baselines, logging at
    `Warn` unless the store looks brand new (out-of-scope item 1 has the test),
-   while `compareInventoryMACLocked` logs at `Warn` and writes nothing.
-   So on a shared backend, where the resync tick runs, a deleted integrity blob
-   produces a repeating warning worth alerting on. The two backends without a
-   tick then diverge in opposite directions: on filesystem, if an issuance
-   reaches the store before any verifying read, the append silently rewrites the
-   value and there is no record at all, not even the re-baseline line; on SQLite the
+   while `compareInventoryMAC` logs at `Warn` and writes nothing.
+   So wherever the inventory-verify job reaches the store first, which is
+   every backend once an interval has passed, a deleted integrity blob produces
+   a repeating warning worth alerting on. Before that first pass the two
+   single-node backends diverge in opposite directions: on filesystem, if an
+   issuance reaches the store before any verifying read, the append silently
+   rewrites the value and there is no record at all, not even the re-baseline
+   line; on SQLite the
    same issuance chains onto the absent predecessor and leaves the permanent
    mismatch described in out-of-scope item 1. That one fails the next start and
    logs the `inventory HMAC mismatch; integrity check failed` warning with

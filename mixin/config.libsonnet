@@ -116,6 +116,21 @@
     // to lengthen the other.
     ocspIndexSyncWindow: '1h',
     ocspIndexSyncFor: '15m',
+
+    // Window for OpenVoxCAInventoryTampered. The counter resets on restart,
+    // so the rule alerts on increase() over a window, and the window is how
+    // long one detection keeps the alert firing. Keep it at least twice
+    // inventory_verify_interval_sec (5m by default), the rule crlChainWindow
+    // sets out above: a mismatch that persists adds one to the counter on
+    // every pass, and with a window near the interval increase() falls to
+    // zero between passes, so the alert, which has no `for`, resolves and
+    // re-fires on every pass instead of staying up.
+    inventoryTamperWindow: '1h',
+
+    // Window and dwell for OpenVoxCAInventoryUnreadable, the same shape as
+    // the OCSP index sync pair above and for the same reasons.
+    inventoryUnreadableWindow: '1h',
+    inventoryUnreadableFor: '15m',
     // --- Delayed supersession ---
     // With superseded_cert_revoke_after_sec set, a renewal records the
     // certificate it replaced on a durable list and a sweep revokes it once the

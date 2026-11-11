@@ -66,6 +66,18 @@ alerting rules for the openvox-ca exporter. It alerts on:
   other. See `ocsp_index_sync_interval_sec` in
   [configuration](../docs/configuration.md). Silent when `enable_ocsp` is off,
   since the series it reads is then not exported.
+- **Inventory tampering** — the periodic inventory verification finding the
+  stored integrity value no longer matching the inventory, on any backend:
+  rows added, removed or edited outside the CA. Critical, and fires on the
+  first detection. Keyed on `reason="tampered"` only, so a backend that cannot
+  be read does not page as tampering. See `inventory_verify_interval_sec` in
+  [configuration](../docs/configuration.md#inventory-verification).
+- **Inventory unreadable** — the periodic inventory verification failing to
+  read the inventory at all, so nothing is checking it. A warning, with a
+  dwell. On the filesystem backend nothing else covers this, since readiness
+  reflects only the key and certificate in memory and the scrape does not read
+  the inventory there; on the structured backends the scrape alert also fires,
+  but without naming the inventory.
 - **Delayed-revocation failures** — the CA failing to schedule or carry out the
   revocation of a certificate a renewal replaced, which leaves that certificate
   a valid credential. Live on any CA that renews certificates, since
@@ -204,6 +216,9 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `crlSyncFor` | `5m` | `for:` debounce for the CRL-reload-failure alert. Keep it below `crlLagFor` so the warning precedes the page it explains. |
 | `ocspIndexSyncWindow` | `1h` | Window over which OCSP-index-reload failures are counted (the metric is a restart-resetting counter). |
 | `ocspIndexSyncFor` | `15m` | `for:` debounce for the OCSP-index-reload-failure alert. Longer than `crlSyncFor` because an `unknown` is not fail-open. Note `increase()` over the window stays true for the whole window after one failure, so this delays the page rather than filtering a transient. |
+| `inventoryTamperWindow` | `1h` | Window over which inventory tamper detections are counted (the metric is a restart-resetting counter), and so how long one detection keeps `OpenVoxCAInventoryTampered` firing. Keep it at least twice `inventory_verify_interval_sec`: a persisting mismatch counts once per pass, and a window near the interval lets the alert resolve and re-fire between passes. |
+| `inventoryUnreadableWindow` | `1h` | Window over which failed inventory reads by the periodic verification are counted. |
+| `inventoryUnreadableFor` | `15m` | `for:` debounce for `OpenVoxCAInventoryUnreadable`. As with `ocspIndexSyncFor`, `increase()` over the window stays true for the whole window after one failure, so this delays the warning rather than filtering a transient: one failed read warns 15 minutes later and stays up until the window has passed it. |
 | `crlLagFor` | `10m` | How long a replica may keep enforcing a CRL behind the stored one before it is paged on. Raise it if you have raised `crl_sync_interval_sec`. |
 | `k8sExportNotRunningFor` | `30m` | How long a configured export target may go with no apply attempt at all before alerting. Only has to outlast a slow start: the counters reset on restart and the startup export runs immediately. |
 | `k8sExportFailingFor` | `15m` | How long a target's most recent apply may stay failed before alerting. Keep it above the CA's export retry interval, a compile-time constant of two minutes: below that, every blip the retry would have cleared by itself pages. It cannot reach a target that fails once and succeeds on retry every cycle — see [metrics](../docs/metrics.md) for the query that can. |

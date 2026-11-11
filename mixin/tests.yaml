@@ -1,6 +1,6 @@
 # promtool rule tests for the CRL-propagation, upstream-chain,
-# Kubernetes-export, delayed-supersession, leaf- and CRL-expiry and
-# managed-certificate alerts.
+# Kubernetes-export, delayed-supersession, leaf- and CRL-expiry,
+# managed-certificate, OCSP index sync and inventory-verification alerts.
 #
 # Run with `mage test:mixin` from the repository root, which renders the mixin
 # to the path below and then runs both promtool checks over it.
@@ -24,6 +24,10 @@
 #   * OpenVoxCAOCSPIndexSyncFailing, whose `increase(...)` over the window stays
 #     true for the whole window after a single failure — so its `for:` delays
 #     the page and then extends it, rather than filtering a transient.
+#   * OpenVoxCAInventoryTampered and OpenVoxCAInventoryUnreadable, keyed on
+#     the two label values of one counter: the cases pin that each stays
+#     silent for the other's reason, because an unreadable backend paged as
+#     tampering would teach operators to ignore the page.
 #   * OpenVoxCASupersedeFailing, where what needs pinning is the debounce: it is
 #     deliberately slower than its neighbours because the sweep retries on its
 #     own interval, so a case asserts it is quiet at 20m and firing at 40m.
@@ -696,6 +700,110 @@ tests:
             exp_annotations:
               summary: "A Kubernetes export target has never been attempted."
               description: "The OpenVox CA on ca-1:9140 has Secret/trust in namespace pki configured for export but has not attempted a single apply in 30m. The exported object holds whatever it held before, and OpenVoxCAKubernetesExportFailing cannot report on a target with no apply results. Check the CA logs for the Kubernetes export job starting, and for errors initialising the in-cluster client."
+
+  # The inventory tamper alert fires on the first detection, with no dwell,
+  # and latches for the window: quiet before the step, firing at once after
+  # it, still firing 40m later, and quiet again once the window has passed the
+  # step. That last evaluation is what pins the window at all: a rule without
+  # increase() would pass the first three and page until a restart.
+  - interval: 1m
+    name: An inventory integrity mismatch pages at once and latches
+    input_series:
+      - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="tampered"}'
+        values: "0 0 0 1+0x60"
+      - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="read_error"}'
+        values: "0+0x63"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: OpenVoxCAInventoryTampered
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: OpenVoxCAInventoryTampered
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openvox-ca
+              instance: ca-1:9140
+              reason: tampered
+            exp_annotations:
+              summary: "OpenVox CA inventory failed its integrity check."
+              description: "The OpenVox CA on ca-1:9140 found that its certificate inventory no longer matches its stored integrity value (openvoxca_inventory_verify_failures_total{reason=\"tampered\"} is rising): rows were added, removed or edited outside the CA. Treat the inventory as untrusted. The CA logs carry the scheme and a repair hint on the \"inventory HMAC mismatch\" line; see docs/metrics.md#inventory-verification, and docs/operator-cli.md (rebuild-inventory-hmac) for the way back once the cause is known."
+      - eval_time: 44m
+        alertname: OpenVoxCAInventoryTampered
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openvox-ca
+              instance: ca-1:9140
+              reason: tampered
+            exp_annotations:
+              summary: "OpenVox CA inventory failed its integrity check."
+              description: "The OpenVox CA on ca-1:9140 found that its certificate inventory no longer matches its stored integrity value (openvoxca_inventory_verify_failures_total{reason=\"tampered\"} is rising): rows were added, removed or edited outside the CA. Treat the inventory as untrusted. The CA logs carry the scheme and a repair hint on the \"inventory HMAC mismatch\" line; see docs/metrics.md#inventory-verification, and docs/operator-cli.md (rebuild-inventory-hmac) for the way back once the cause is known."
+      - eval_time: 64m
+        alertname: OpenVoxCAInventoryTampered
+        exp_alerts: []
+      # A tamper is not an unreadable inventory either.
+      - eval_time: 20m
+        alertname: OpenVoxCAInventoryUnreadable
+        exp_alerts: []
+
+  # An unreadable inventory has its own warning, after its dwell, and is not
+  # tampering: the read_error reason rising on every pass must not raise the
+  # tamper alert.
+  - interval: 1m
+    name: An unreadable inventory warns after the dwell and does not page as tampering
+    input_series:
+      - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="read_error"}'
+        values: "0 1+1x30"
+      - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="tampered"}'
+        values: "0+0x31"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: OpenVoxCAInventoryTampered
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: OpenVoxCAInventoryUnreadable
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: OpenVoxCAInventoryUnreadable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              reason: read_error
+            exp_annotations:
+              summary: "OpenVox CA cannot read its inventory to verify it."
+              description: "The OpenVox CA on ca-1:9140 could not read its certificate inventory for the periodic integrity check (openvoxca_inventory_verify_failures_total{reason=\"read_error\"} is rising), so the inventory is not being verified. Check inventory storage and the \"Inventory verification failed\" warnings in the CA log."
+
+  # One failed pass, then recovery: the dwell does not filter it. The warning
+  # still fires once the dwell has passed and holds until the window has moved
+  # past the failure, which pins inventoryUnreadableWindow as well.
+  - interval: 1m
+    name: An unreadable inventory warning latches after a single failure
+    input_series:
+      - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="read_error"}'
+        values: "0 1+0x70"
+      - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="tampered"}'
+        values: "0+0x71"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: OpenVoxCAInventoryUnreadable
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: OpenVoxCAInventoryUnreadable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              reason: read_error
+            exp_annotations:
+              summary: "OpenVox CA cannot read its inventory to verify it."
+              description: "The OpenVox CA on ca-1:9140 could not read its certificate inventory for the periodic integrity check (openvoxca_inventory_verify_failures_total{reason=\"read_error\"} is rising), so the inventory is not being verified. Check inventory storage and the \"Inventory verification failed\" warnings in the CA log."
+      - eval_time: 64m
+        alertname: OpenVoxCAInventoryUnreadable
+        exp_alerts: []
 
   # The OCSP index sync failure warning. Its dwell (ocspIndexSyncFor, 15m) is
   # deliberately longer than the CRL one's, because a missed inventory read is

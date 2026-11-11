@@ -39,11 +39,33 @@ func jobNames(cfg *serverConfig) []string {
 var _ = Describe("backgroundJobs", func() {
 	// The default backend is filesystem, so the default job set deliberately
 	// does not include the OCSP index sync; the table below owns that decision.
-	It("runs CRL refresh, CRL sync and the superseded sweep by default, and cleanup only on request", func() {
-		Expect(jobNames(&serverConfig{})).To(ConsistOf(jobCRLRefresh, jobCRLSync, jobSupersededSweep))
+	It("runs CRL refresh, CRL sync, inventory verification and the superseded sweep by default, and cleanup only on request", func() {
+		Expect(jobNames(&serverConfig{})).
+			To(ConsistOf(jobCRLRefresh, jobCRLSync, jobInventoryVerify, jobSupersededSweep))
 		Expect(jobNames(&serverConfig{EnableExpiredCertCleanup: true})).
-			To(ConsistOf(jobCRLRefresh, jobCRLSync, jobSupersededSweep, jobCertCleanup))
+			To(ConsistOf(jobCRLRefresh, jobCRLSync, jobInventoryVerify, jobSupersededSweep, jobCertCleanup))
 	})
+
+	// The periodic tamper check. It used to ride on the OCSP index sync, which
+	// runs only on the shared backends and only while the responder is served,
+	// so it must not inherit either condition: every backend, OCSP on or off.
+	DescribeTable("runs inventory verification on every backend, whatever enable_ocsp says",
+		func(backend string, enableOCSP bool) {
+			Expect(jobNames(&serverConfig{
+				StorageConfig: config.StorageConfig{StorageBackend: backend},
+				EnableOCSP:    enableOCSP,
+			})).To(ContainElement(jobInventoryVerify))
+		},
+		Entry("filesystem, OCSP off", "filesystem", false),
+		Entry("the empty default, OCSP off", "", false),
+		Entry("sqlite, OCSP off", "sqlite", false),
+		Entry("etcd, OCSP off", "etcd", false),
+		Entry("redis, OCSP off", "redis", false),
+		Entry("postgres, OCSP off", "postgres", false),
+		Entry("mysql, OCSP off", "mysql", false),
+		Entry("filesystem, OCSP on", "filesystem", true),
+		Entry("postgres, OCSP on", "postgres", true),
+	)
 
 	// The same promise as the CRL-sync one below, for the other list a
 	// configuration change can strand. superseded_cert_revoke_after_sec decides
@@ -79,7 +101,7 @@ var _ = Describe("backgroundJobs", func() {
 			EnableOCSP:               true,
 			DisableCRLRefresh:        true,
 			EnableExpiredCertCleanup: false,
-		})).To(ConsistOf(jobCRLSync, jobOCSPIndexSync, jobSupersededSweep))
+		})).To(ConsistOf(jobCRLSync, jobOCSPIndexSync, jobInventoryVerify, jobSupersededSweep))
 	})
 
 	// The OCSP index goes stale when a *second* process issues certificates
@@ -166,11 +188,12 @@ var _ = Describe("backgroundJobs", func() {
 		// else is required for the chain refresh to be scheduled, and only an
 		// exhaustive assertion can carry it. jobSupersededSweep is in the set
 		// because it registers unconditionally, delay or no delay, so that it
-		// can drain a list an earlier configuration may have filled.
+		// can drain a list an earlier configuration may have filled, and
+		// jobInventoryVerify because it too runs on every configuration.
 		Expect(jobNames(&serverConfig{
 			DisableCRLRefresh:        true,
 			EnableExpiredCertCleanup: false,
 			CRLChainFile:             "/etc/openvox-ca/upstream-crls.pem",
-		})).To(ConsistOf(jobCRLSync, jobSupersededSweep, jobCRLChainRefresh))
+		})).To(ConsistOf(jobCRLSync, jobInventoryVerify, jobSupersededSweep, jobCRLChainRefresh))
 	})
 })

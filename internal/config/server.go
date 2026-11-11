@@ -173,6 +173,13 @@ type ServerConfig struct {
 	// as unrecognised.
 	OCSPIndexSyncIntervalSec int `yaml:"ocsp_index_sync_interval_sec"` // how often to reload the OCSP serial index; 0 = built-in default (5m)
 
+	// InventoryVerifyIntervalSec is how often every replica, on every backend,
+	// re-reads the whole inventory and checks its integrity value, so that an
+	// edit made behind the CA's back is reported within an interval rather
+	// than at the next restart. An edit that also deletes the stored value is
+	// not: that pass logs a warning and counts nothing.
+	InventoryVerifyIntervalSec int `yaml:"inventory_verify_interval_sec"` // how often to verify the inventory; 0 = built-in default (5m)
+
 	// EnableOCSP serves the OCSP responder, POST /ocsp and GET /ocsp/{request}
 	// (default: false). The endpoint is unauthenticated and a nonced request
 	// costs a CA-key signature, so a deployment that does not use OCSP should

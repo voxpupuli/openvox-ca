@@ -481,6 +481,60 @@
             },
           },
           {
+            alert: 'OpenVoxCAInventoryTampered',
+            // The periodic inventory verification found the stored integrity
+            // value (whole-blob HMAC or hash-chain head) no longer matching the
+            // inventory: rows were added, removed or edited behind the CA's
+            // back. It runs on every backend whatever enable_ocsp says, which
+            // the OCSP index sync never did.
+            //
+            // Keyed on reason="tampered" only. reason="read_error" is an
+            // inventory that could not be read at all, a different problem
+            // with its own warning below, and paging it as tampering would
+            // teach operators to ignore this one.
+            //
+            // No `for`: a mismatch is not transient, and one pass is enough.
+            // increase() over the window latches it until the window rolls past
+            // the last failed pass, so a single detection is not missed by
+            // somebody who looks a few minutes late.
+            expr: 'increase(openvoxca_inventory_verify_failures_total{%(selector)s,reason="tampered"}[%(window)s]) > 0' % {
+              selector: $._config.openvoxCASelector,
+              window: $._config.inventoryTamperWindow,
+            },
+            labels: { severity: 'critical' } + $._config.alertLabels,
+            annotations: {
+              summary: 'OpenVox CA inventory failed its integrity check.',
+              description: 'The OpenVox CA on {{ $labels.instance }} found that its certificate inventory no longer matches its stored integrity value (openvoxca_inventory_verify_failures_total{reason="tampered"} is rising): rows were added, removed or edited outside the CA. Treat the inventory as untrusted. The CA logs carry the scheme and a repair hint on the "inventory HMAC mismatch" line; see docs/metrics.md#inventory-verification, and docs/operator-cli.md (rebuild-inventory-hmac) for the way back once the cause is known.',
+            },
+          },
+          {
+            alert: 'OpenVoxCAInventoryUnreadable',
+            // The periodic inventory verification could not read the
+            // inventory at all, so nothing is checking it. Its own rule
+            // because on the filesystem backend nothing else sees this:
+            // readiness reflects only the CA's key and certificate in memory,
+            // and the scrape does not read the inventory there. On the
+            // structured backends the scrape reads it through the certificate
+            // index, so OpenVoxCAScrapeFailing fires too, but names the gather
+            // rather than the inventory.
+            //
+            // A warning, with a dwell, like the CRL and OCSP index sync
+            // failures. As the config comment for the OCSP pair explains,
+            // increase() over the window latches, so the dwell delays the
+            // warning rather than filtering a transient: one failed pass
+            // warns after it and stays up until the window has passed it.
+            expr: 'increase(openvoxca_inventory_verify_failures_total{%(selector)s,reason="read_error"}[%(window)s]) > 0' % {
+              selector: $._config.openvoxCASelector,
+              window: $._config.inventoryUnreadableWindow,
+            },
+            'for': $._config.inventoryUnreadableFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'OpenVox CA cannot read its inventory to verify it.',
+              description: 'The OpenVox CA on {{ $labels.instance }} could not read its certificate inventory for the periodic integrity check (openvoxca_inventory_verify_failures_total{reason="read_error"} is rising), so the inventory is not being verified. Check inventory storage and the "Inventory verification failed" warnings in the CA log.',
+            },
+          },
+          {
             alert: 'OpenVoxCACRLStale',
             // The revocation list this replica enforces is behind the stored
             // one. Every replica polls storage on crl_sync_interval_sec, so a

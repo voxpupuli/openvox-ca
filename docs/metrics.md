@@ -187,10 +187,12 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > rather than only the one that noticed. On the revoke paths alone it also counts
 > a malformed serial, or an inventory read that failed while resolving the
 > subject's serial — which on the filesystem backend includes an **integrity
-> MAC that no longer verifies**, since both revoke paths verify there, so this
-> counter is the one a tamper signal reaches on the default backend (see the
-> [inventory integrity threat
+> MAC that no longer verifies**, since both revoke paths verify there, so a
+> tamper signal can surface here too, under a CRL name (see the [inventory
+> integrity threat
 > model](development/inventory-store.md#inventory-integrity-threat-model-and-rationale)).
+> Alert on `openvoxca_inventory_verify_failures_total{reason="tampered"}`
+> ([inventory verification](#inventory-verification)) for that, not on this.
 > That last one
 > includes a revocation whose wait for the per-subject lock spent the 60-second
 > budget behind another goroutine *in this process* on the single-node backends,
@@ -428,6 +430,27 @@ local issuance defers its removals, so pruned serials linger an interval or two.
 `openvoxca_ocsp_index_sync_failures_total` has a shipped alert
 (`OpenVoxCAOCSPIndexSyncFailing`); the fleet-relative gauge comparison above does
 not, and has to be added by hand if you want it.
+
+### Inventory verification
+
+| Metric | Description |
+| --- | --- |
+| `openvoxca_inventory_verify_failures_total{reason}` | Counter of failed periodic inventory verifications. `reason="tampered"`: the stored integrity value (whole-blob HMAC or hash-chain head) no longer matches the inventory, so rows were added, removed or edited outside the CA. `reason="read_error"`: the inventory could not be read at all. Both series are always present. Resets to `0` on process restart. |
+
+Every replica runs the verification on every backend, once per
+[`inventory_verify_interval_sec`](configuration.md#inventory-verification) (5m
+by default), whatever `enable_ocsp` says. `OpenVoxCAInventoryTampered` alerts on
+the `tampered` reason, critical and on the first detection. A rising
+`read_error` is a storage problem rather than an integrity one, but it still
+means the inventory is not being verified. On the filesystem backend nothing
+else notices it: readiness reflects only the key and certificate in memory, and
+the collector's scrape does not read the inventory there. On the structured
+backends the scrape reads it through the certificate index, so a failure there
+also shows as `OpenVoxCAScrapeFailing`, without naming the inventory.
+`OpenVoxCAInventoryUnreadable` warns on it,
+after a 15-minute dwell. The CA log carries the detail: the
+`inventory HMAC mismatch` line, with the scheme and a repair hint, for a
+mismatch, and `Inventory verification failed` for a failed read.
 
 ### Delayed supersession
 
@@ -773,7 +796,8 @@ CA/CRL/leaf expiry, pending requests, CRL update failures
 the stored one (`openvoxca_crl_cached_number`,
 `openvoxca_crl_sync_failures_total`), a replica that cannot reload its OCSP
 serial index (`openvoxca_ocsp_index_sync_failures_total`, while `enable_ocsp`
-serves the responder), delayed revocations
+serves the responder), an inventory that fails its integrity check or cannot
+be read to check it (`openvoxca_inventory_verify_failures_total`), delayed revocations
 that were lost or could not be carried out
 (`openvoxca_supersede_failures_total`), the [upstream CRL
 chain](#upstream-crl-chain) (an ancestor nearing or past its `NextUpdate`, and
