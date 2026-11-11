@@ -5414,13 +5414,15 @@ type chartRenderCase struct {
 // The blocks it types from packages of their own are deliberately not
 // scanned. internal/k8sexport/exportconfig declares kubernetes_export, but only
 // export targets: the exporter authenticates with the pod's ServiceAccount, so
-// no credential lives there. internal/certstore/certconfig declares
-// managed_certs and serving_cert, whose `secret` block names a Kubernetes
-// Secret rather than holding one; the tag pattern below would read it as a
-// credential. So this scan cannot see a credential added to either: it needs
-// an entry in openvox-ca.validate's refusal and a reject case written by hand.
-// What the two packages hold is pinned in magefile_chart_test.go, which fails
-// when a credential-shaped tag appears there, so that this is not forgotten.
+// no credential lives there. internal/fileexport/fileexportconfig declares
+// file_export, which names local paths and nothing else.
+// internal/certstore/certconfig declares managed_certs and serving_cert, whose
+// `secret` block names a Kubernetes Secret rather than holding one; the tag
+// pattern below would read it as a credential. So this scan cannot see a
+// credential added to any of them: it needs an entry in openvox-ca.validate's
+// refusal and a reject case written by hand. What the three packages hold is
+// pinned in magefile_chart_test.go, which fails when a credential-shaped tag
+// appears there, so that this is not forgotten.
 //
 // The scan reads tag names, not paths, so a key in a nested block such as
 // openbao comes back bare. That is enough to fail the check below; the fix is
