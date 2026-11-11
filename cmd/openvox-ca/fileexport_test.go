@@ -37,6 +37,7 @@ import (
 
 	"github.com/voxpupuli/openvox-ca/internal/certstore/certconfig"
 	"github.com/voxpupuli/openvox-ca/internal/fileexport"
+	"github.com/voxpupuli/openvox-ca/internal/fileexport/fileexportconfig"
 )
 
 var _ = Describe("checkFileExport", func() {
@@ -168,6 +169,16 @@ func (s *stubMaterial) set(crl string) {
 	defer s.mu.Unlock()
 	s.crl = []byte(crl)
 }
+
+// docs/file-export.md, fileexportconfig.DefaultInterval and runFileExporter
+// all say a revocation reaches an exported file on the same schedule that
+// crl_sync_interval_sec gives it to another replica's checks. That holds only
+// while the two defaults agree, and they are constants in different packages.
+var _ = Describe("the file export's default interval", func() {
+	It("is crl_sync_interval_sec's default", func() {
+		Expect(fileexportconfig.DefaultInterval).To(Equal(defaultCRLSyncInterval))
+	})
+})
 
 var _ = Describe("runFileExporter", func() {
 	It("syncs at startup, picks up a change on the next tick, and stops on cancel", func() {
