@@ -402,15 +402,16 @@ func refuseOnMissingPassphrase(ctx context.Context, rt *caRuntime, cfg *serverCo
 // hosts (many replicas are expected), one offering no store-wide lock at all,
 // and one whose lock set is unavailable.
 //
-// Three of the four callers discard it today, and the reason differs per
-// caller rather than following a rule: csr and import-ca-cert displace a writer
-// rather than compute over a snapshot, so a lost race is a conflict they would
-// notice; generate has the same snapshot exposure the rebuild does — its own
-// pre-flight says a concurrent append can leave an HMAC covering a blob that
-// never existed — but warns rather than refusing, and changing that is out of
-// scope for #188. Only rebuild-inventory-hmac acts on the answer. A fifth
-// caller should decide deliberately rather than copy whichever neighbour it
-// read first.
+// Two of the four callers discard it today, and the reason differs per caller
+// rather than following a rule: csr and import-ca-cert displace a writer rather
+// than compute over a snapshot, so a lost race is a conflict they would notice.
+// generate has the same snapshot exposure the rebuild does — its own pre-flight
+// says a concurrent append can leave an HMAC covering a blob that never existed
+// — but warns rather than refusing, and changing that is out of scope for #188;
+// it reads the answer only to decide whether --force prints a note naming
+// openvox-ca-ctl renew (#247). Only rebuild-inventory-hmac refuses on it. A
+// fifth caller should decide deliberately rather than copy whichever neighbour
+// it read first.
 func holdInstanceLock(ctx context.Context, rt *caRuntime, opts ...storage.InstanceLockOption) (enforced bool, err error) {
 	ul, err := rt.Store.AcquireInstanceLock(ctx, opts...)
 	if err != nil {

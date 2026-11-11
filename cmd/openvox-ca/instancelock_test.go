@@ -94,6 +94,25 @@ var _ = Describe("the store instance lock", func() {
 			// timeout cannot give them.
 			Expect(err).To(MatchError(ContainSubstring("pid " + strconv.Itoa(os.Getpid()))))
 			Expect(err).To(MatchError(ContainSubstring("stop the running one first")))
+			// Without --force the operator is minting, not replacing, so renew
+			// is not the answer and is not offered.
+			Expect(err).NotTo(MatchError(ContainSubstring("openvox-ca-ctl renew")))
+		})
+
+		It("points --force at openvox-ca-ctl renew while another process holds the store", func() {
+			caDir := GinkgoT().TempDir()
+			outDir := GinkgoT().TempDir()
+			bootstrapCAInDir(caDir, "puppet.example.com")
+			holdStore(caDir)
+
+			_, _, err := runGenerate("--cadir", caDir, "--certname", "web01", "--force",
+				"--ttl", "1h", "--key-out", filepath.Join(outDir, "web01.key"))
+
+			Expect(err).To(MatchError(ContainSubstring("already running against this store")),
+				"the refusal itself must survive the annotation")
+			Expect(err).To(MatchError(ContainSubstring("'openvox-ca-ctl renew --certname web01'")))
+			var locked *storage.StoreLockedError
+			Expect(errors.As(err, &locked)).To(BeTrue(), "the annotation must keep the error's type")
 		})
 
 		It("mints once the store has been released", func() {
@@ -110,6 +129,32 @@ var _ = Describe("the store instance lock", func() {
 			_, _, err = runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "1h", "--key-out", filepath.Join(outDir, "web01.key"))
 			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	Describe("generate --force on a store whose lock is not enforced", func() {
+		// The note is for the stores where holding the instance lock proves
+		// nothing about a running server. Driving generate onto one end to end
+		// needs a backend that is both usable and unenforced, which no fixture
+		// here provides, so the decision is pinned directly.
+		DescribeTable("names renew only when --force meets an unenforced lock",
+			func(force, enforced, wantNote bool) {
+				var out bytes.Buffer
+				noteRenewOnline(&out, force, enforced, "web01")
+				if wantNote {
+					Expect(out.String()).To(ContainSubstring("'openvox-ca-ctl renew --certname web01'"))
+				} else {
+					Expect(out.String()).To(BeEmpty())
+				}
+			},
+			Entry("--force, lock not enforced", true, false, true),
+			Entry("--force, lock enforced", true, true, false),
+			Entry("no --force, lock not enforced", false, false, false),
+		)
+
+		It("leaves every error but a held store unannotated", func() {
+			plain := errors.New("disk full")
+			Expect(annotateForceLockError(plain, true, "web01")).To(BeIdenticalTo(plain))
 		})
 	})
 

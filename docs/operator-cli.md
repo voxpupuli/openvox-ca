@@ -804,6 +804,17 @@ says so: you may be revoking the certificate the server is currently serving.
 `--force` revokes the serial of the certificate in storage, which is not
 necessarily every live serial for the name — see the withdrawal note below.
 
+**To replace a certificate while the server runs, use `openvox-ca-ctl renew`
+instead** (see [subcommands](#subcommands)). The two are not alternatives:
+`renew` is online, keeps the certificate's names and extensions, and leaves the
+old certificate valid for the server's overlap window; `--force` is offline,
+issues whatever this invocation asks for, and revokes the old certificate at
+once. On the filesystem and SQLite backends `generate` already refuses while a
+server holds the store, and under `--force` that refusal names `renew`. A
+backend with distributed locking has no such lock, so nothing can tell whether
+a server is running: there `--force` goes ahead and prints a note naming
+`renew`, for the case where one is.
+
 #### Administrator credentials
 
 `--pp-cli-auth` stamps the `pp_cli_auth` extension, which grants the holder the
