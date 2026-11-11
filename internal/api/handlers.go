@@ -165,6 +165,16 @@ type Server struct {
 	// This is independent of the CA's OCSPURLs, which only decide what issued
 	// certificates advertise: a URL may name a responder somewhere else.
 	OCSPEnabled bool
+	// OCSPRateLimit is the maximum number of OCSP requests allowed per IP
+	// address per minute, counted in front of the responder whatever the
+	// request holds, so a nonced request that would sign is counted like any
+	// other. Zero (the default) disables it. Its own budget, not
+	// CSRRateLimit's: verifier traffic from an address must not spend that
+	// address's CSR submissions.
+	OCSPRateLimit int
+	// OnOCSPRateLimited, when set, is called once for each request
+	// OCSPRateLimit refuses. The server points it at a Prometheus counter.
+	OnOCSPRateLimited func()
 	// PlainHTTP is set when the server is running without TLS and the
 	// operator has not set insecure_allow_plain_http_generate. The /generate
 	// endpoint refuses to serve private keys when this is true.
@@ -183,6 +193,7 @@ type Server struct {
 
 	csrLimiter     *ipRateLimiter
 	csrLimitedWarn logThrottle
+	ocspLimiter    *ipRateLimiter
 	destructiveOps *destructiveOpTracker
 }
 
@@ -199,6 +210,9 @@ func New(c *ca.CA) *Server {
 func (s *Server) Routes() http.Handler {
 	if s.CSRRateLimit > 0 {
 		s.csrLimiter = newIPRateLimiter(s.CSRRateLimit, time.Minute)
+	}
+	if s.OCSPEnabled && s.OCSPRateLimit > 0 {
+		s.ocspLimiter = newIPRateLimiter(s.OCSPRateLimit, time.Minute)
 	}
 
 	mux := http.NewServeMux()

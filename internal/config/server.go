@@ -179,6 +179,10 @@ type ServerConfig struct {
 	// not expose it. Independent of ocsp_url, which only decides what issued
 	// certificates advertise and may name a responder elsewhere.
 	EnableOCSP bool `yaml:"enable_ocsp"`
+	// OCSPRateLimit caps OCSP requests per client IP per minute, nonced or not,
+	// while enable_ocsp serves the responder. Same three-state convention as
+	// CSRRateLimit: 0 disables, -1/unset = built-in default (300).
+	OCSPRateLimit int `yaml:"ocsp_rate_limit"`
 
 	// Background expired-certificate cleanup. Disabled by default: when enabled,
 	// a job periodically removes certificates that expired more than the

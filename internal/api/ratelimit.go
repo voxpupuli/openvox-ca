@@ -28,8 +28,9 @@ import (
 // Each IP address is allowed at most maxReqs requests per window duration.
 // Old windows are evicted lazily on access so memory stays bounded over time.
 //
-// SECURITY: Applied to the unauthenticated PUT /certificate_request endpoint
-// to prevent CSR flooding attacks.
+// SECURITY: Applied, as two separate limiters, to the unauthenticated
+// PUT /certificate_request endpoint to prevent CSR flooding, and to the OCSP
+// responder, where a nonced request costs a CA-key signature.
 // NIST 800-53: SC-5 (Denial-of-Service Protection)
 type ipRateLimiter struct {
 	mu      sync.Mutex
@@ -90,7 +91,9 @@ func (l *ipRateLimiter) evictExpired(now time.Time) {
 
 // clientIP extracts the remote IP address from r, stripping the port.
 // It does not trust X-Forwarded-For or similar headers since the server
-// accepts direct connections (no trusted reverse proxy layer).
+// accepts direct connections (no trusted reverse proxy layer). Behind a proxy
+// that does not preserve the client's address, every client therefore shares
+// the proxy's budget.
 // NIST 800-53: SC-5 (Denial-of-Service Protection)
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
