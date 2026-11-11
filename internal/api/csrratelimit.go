@@ -39,7 +39,7 @@ func (s *Server) refuseCSRRateLimited(w http.ResponseWriter, r *http.Request) {
 		s.OnCSRRateLimited()
 	}
 	if s.csrLimitedWarn.due(csrRateLimitedWarnInterval) {
-		slog.Warn("CSR submission refused: client over csr_rate_limit "+
+		slog.Warn("CSR submission refused: client over csr_rate_limit, or new while the limiter is full "+
 			"(further refusals in the next minute log at Debug)",
 			"client_ip", clientIP(r), "csr_rate_limit_per_minute", s.CSRRateLimit)
 	} else {

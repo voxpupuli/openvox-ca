@@ -70,7 +70,7 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 
 | Metric | Description |
 | --- | --- |
-| `openvoxca_csr_rate_limited_total` | Counter of CSR submissions (`PUT /certificate_request`) refused with `429 Too Many Requests` because their client address was over [`csr_rate_limit`](configuration.md). Exported whenever the exporter is enabled, and stays at `0` while `csr_rate_limit` is `0`. Unlabelled: a label per client address would be unbounded, and any client could add to it. Resets to `0` on process restart. |
+| `openvoxca_csr_rate_limited_total` | Counter of CSR submissions (`PUT /certificate_request`) refused with `429 Too Many Requests` because their client address was over [`csr_rate_limit`](configuration.md#rate-limit), or was new while the limiter was already tracking its maximum of addresses and no sweep freed room. Exported whenever the exporter is enabled, and stays at `0` while `csr_rate_limit` is `0`. Unlabelled: a label per client address would be unbounded, and any client could add to it. Resets to `0` on process restart. |
 
 The same refusals also show in `openvoxca_http_requests_total` as
 `method="put",code="429"`. This counter names them, so a query does not have to
@@ -413,7 +413,7 @@ sum the series across the job to see what the signer actually faces.
 | --- | --- |
 | `openvoxca_ocsp_index_serials` | Number of certificate serials **this replica's** responder recognises. A serial it does not hold is answered `unknown`, before the CRL is consulted. |
 | `openvoxca_ocsp_index_sync_failures_total` | Counter of failures to reload the inventory into that index — an unreadable inventory, or one whose integrity MAC no longer verifies. While it rises the replica keeps whatever index it already held. Resets to `0` on process restart. |
-| `openvoxca_ocsp_rate_limited_total` | Counter of OCSP requests refused with `tryLater` over HTTP `429` because their client address was over [`ocsp_rate_limit`](configuration.md#rate-limit). Not the same as `openvoxca_ca_signing_shed_total`, which counts the responder at capacity rather than one client over its budget. A steady rise with no flood behind it means a legitimate verifier needs a higher limit, or several share one address through a proxy. Resets to `0` on process restart. |
+| `openvoxca_ocsp_rate_limited_total` | Counter of OCSP requests refused with `tryLater` over HTTP `429` because their client address was over [`ocsp_rate_limit`](configuration.md#rate-limit), or was new while the limiter was already tracking its maximum of addresses. Not the same as `openvoxca_ca_signing_shed_total`, which counts the responder at capacity rather than one client over its budget. A steady rise with no flood behind it means a legitimate verifier needs a higher limit, or several share one address through a proxy. Resets to `0` on process restart. |
 
 All three are exported only while [`enable_ocsp`](configuration.md#serving-ocsp)
 serves the responder. With it off nothing answers from the index and no sync

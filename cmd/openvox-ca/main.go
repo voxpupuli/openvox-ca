@@ -670,8 +670,10 @@ func newOCSPRateLimitedCounter(reg prometheus.Registerer) prometheus.Counter {
 		Subsystem: "ocsp",
 		Name:      "rate_limited_total",
 		Help: "Total OCSP requests refused with RFC 6960 tryLater over HTTP 429 because their " +
-			"client address was over ocsp_rate_limit. Unlike openvoxca_ca_signing_shed_total, " +
-			"which counts the responder at capacity, this counts clients over their own budget.",
+			"client address was over ocsp_rate_limit, or was new while the limiter was already " +
+			"tracking its maximum of addresses and no sweep freed room. Unlike " +
+			"openvoxca_ca_signing_shed_total, which counts the responder at capacity, this " +
+			"counts clients over their own budget.",
 	})
 	reg.MustRegister(c)
 	return c
@@ -696,9 +698,10 @@ func newCSRRateLimitedCounter(reg prometheus.Registerer) prometheus.Counter {
 		Subsystem: "csr",
 		Name:      "rate_limited_total",
 		Help: "Total CSR submissions (PUT /certificate_request) refused with HTTP 429 because " +
-			"their client address was over csr_rate_limit. Behind a proxy that does not " +
-			"preserve client addresses every agent shares one budget, so a rise there can " +
-			"be a fleet enrolling at once rather than a flood.",
+			"their client address was over csr_rate_limit, or was new while the limiter was " +
+			"already tracking its maximum of addresses and no sweep freed room. Behind a " +
+			"proxy that does not preserve client addresses every agent shares one budget, so " +
+			"a rise there can be a fleet enrolling at once rather than a flood.",
 	})
 	reg.MustRegister(c)
 	return c

@@ -926,7 +926,8 @@ While the responder is served, `ocsp_rate_limit` caps the OCSP requests each
 client IP address may make per minute. The default is 300, five a second. How a
 client is identified and how its budget behaves behind a proxy apply to
 `csr_rate_limit` as well, which is the only per-IP limit a deployment without
-OCSP has.
+OCSP has. Its refusals are counted in `openvoxca_csr_rate_limited_total`; see
+[CSR submissions](metrics.md#csr-submissions).
 
 ```yaml
 ocsp_rate_limit: 300   # -1/unset = 300; 0 = no limit
@@ -949,6 +950,21 @@ rising.
 The budget is kept in memory by each replica, so behind a load balancer a
 client's ceiling is `ocsp_rate_limit` times the number of replicas it can
 reach. Size the setting, or a limit at the proxy, with that in mind.
+
+Each replica tracks at most 100,000 addresses at once. A new address arriving
+while every tracked window is still live is refused as if over its limit, until
+windows expire: past that point the choice is between refusing new clients and
+not limiting them, and the second is the flood winning. Addresses already
+tracked keep their budgets throughout. `csr_rate_limit` has the same cap. While
+a replica is in that state it logs `Per-IP rate limiter is full` at `Warn`,
+naming the limiter (`ocsp` or `csr`), at most once every 6 seconds.
+
+That refusal can be provoked. With each IPv6 address counted on its own, one
+host holding a routed `/64` can fill the cap by itself, at about 1,700 requests
+a second for a minute, and every new client on that replica is then refused
+until windows expire: new verifiers, and new agents submitting their first
+CSR. Plan for it if the CA is reachable over IPv6 from networks you do not
+control.
 
 The address is the TCP peer's. `X-Forwarded-For` and similar headers are not
 trusted, because the server takes direct connections and has no trusted-proxy
