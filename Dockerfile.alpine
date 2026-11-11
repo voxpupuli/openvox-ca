@@ -7,8 +7,11 @@ RUN go mod download
 
 COPY . .
 ENV CGO_ENABLED=0 GOOS=linux
-RUN go build -ldflags="-s -w" -o /openvox-ca     ./cmd/openvox-ca/ && \
-    go build -ldflags="-s -w" -o /openvox-ca-ctl ./cmd/openvox-ca-ctl/
+# -trimpath, as the release tarballs are built (buildDistVariant in
+# magefile.go): it keeps the builder's paths -- /src, and the toolchain's own
+# location, which differs between the two images -- out of the binaries.
+RUN go build -trimpath -ldflags="-s -w" -o /openvox-ca     ./cmd/openvox-ca/ && \
+    go build -trimpath -ldflags="-s -w" -o /openvox-ca-ctl ./cmd/openvox-ca-ctl/
 
 # ---- Runtime Stage ----
 FROM alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4

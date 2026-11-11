@@ -39,6 +39,8 @@ globs:
   - "**/*.md"
 
 ignores:
-  - node_modules
+  # Any depth: CI installs the pinned markdownlint-cli2 into
+  # .github/markdownlint/node_modules, whose READMEs are not ours to lint.
+  - "**/node_modules"
   - vendor
   - ".git"

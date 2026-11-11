@@ -1,0 +1,57 @@
+# Build context for every image built from the repository root: Dockerfile and
+# Dockerfile.alpine, whose `COPY . .` takes everything not excluded here, and
+# test/Dockerfile.run, which the test/compose*.yml suites build with
+# `context: ..` and which copies the binaries out of bin/.
+#
+# Only paths git does not track belong in this file, and .git must stay out of
+# it. The builder runs `go build` in a git checkout, so the toolchain stamps
+# vcs.revision, vcs.time and vcs.modified into both binaries, and --version
+# prints them (internal/version.Full). Without .git that stamp is gone. And
+# vcs.modified is `git status`: a tracked file excluded here reads as deleted
+# in the builder and marks every binary "dirty".
+#
+# What this list is for is keeping untracked local material -- secrets, agent
+# worktrees, build output -- out of the context and the builder's layers. It
+# is not what keeps the stamp clean: the builder's `git status` honours
+# .gitignore, which is in the context, and everything excluded here is ignored
+# there too. An untracked file named in neither still marks the build dirty.
+#
+# CI's "Image build context" job checks the stamp on every pull request; see
+# docs/development/testing.md, "Image build context check".
+#
+# Unlike .gitignore, a pattern here is anchored at the context root, so the
+# ones that should match at any depth say **/.
+
+# Local secrets and environment files.
+**/.env
+**/.env.*
+
+# Agent session data, including git worktrees: a build from the main checkout
+# would otherwise send every worktree under .claude/worktrees with it.
+.claude/
+
+# Build and test output, mirroring .gitignore -- except bin/, which stays in:
+# test/Dockerfile.run copies bin/openvox-ca and bin/openvox-ca-ctl from it.
+dist/
+/openvox-ca
+/openvox-ca-ctl
+**/*.exe
+**/*.test
+**/*.out
+coverage.html
+.test-output/
+tmp/
+.mage/
+**/node_modules/
+
+# Editor and OS clutter, mirroring .gitignore.
+**/.DS_Store
+**/Thumbs.db
+.idea/
+.vscode/
+**/*.swp
+**/*.swo
+
+# Untracked local material, mirroring .gitignore.
+docs/superpowers/
+Threat_Model/

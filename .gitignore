@@ -14,6 +14,11 @@ coverage.html
 # Local CA runtime data (used during development with --cadir=tmp)
 tmp/
 
+# Local environment files, which can hold secrets (.dockerignore keeps them
+# out of the image build context too)
+.env
+.env.*
+
 # OS metadata
 .DS_Store
 Thumbs.db
@@ -26,6 +31,9 @@ Thumbs.db
 
 # Mage build cache
 .mage/
+
+# The pinned markdownlint-cli2 install (.github/markdownlint)
+node_modules/
 
 # Claude Code session data
 .claude/
