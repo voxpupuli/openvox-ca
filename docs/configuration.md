@@ -215,6 +215,15 @@ managed_cert_interval_sec: 0           # 0 = built-in default (15m)
 # including what it means for the store holding OpenVox Server's key.
 managed_certs: []
 
+# Local files kept current with the CA certificate and/or CRL, for a consumer on
+# this host. Off unless a target is configured; file-only. See file-export.md.
+# file_export:
+#   interval_sec: 0                    # 0 = built-in default (60s); at most 300
+#   targets:
+#     - path: /etc/puppetlabs/puppet/ssl/crl.pem
+#       material: crl                  # cert | crl
+#       scope: chain                   # chain (default) | self | root (cert only)
+
 # The certificate the CA's own listener presents, issued and renewed by the CA
 # itself instead of being supplied through tls_cert/tls_key. Absent by default,
 # and mutually exclusive with that pair. See "The CA's own serving certificate".

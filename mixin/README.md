@@ -92,6 +92,10 @@ alerting rules for the openvox-ca exporter. It alerts on:
 - **Kubernetes export** targets whose applies keep failing, and targets that are
   configured but never attempted at all (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
+- **File export** targets that have not been confirmed current for more than
+  ten minutes, or have never succeeded since the CA started (only when the
+  [file export](../docs/file-export.md) feature is in use). One alert covers
+  failed writes, failed storage reads and a write that never returns.
 - **Managed certificates** with no usable certificate — never issued at all, or
   holding only revoked ones (only when
   [`managed_certs`](../docs/configuration.md#managed-certificates) or

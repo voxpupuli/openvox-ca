@@ -105,6 +105,13 @@ commonAnnotations: {}
 #         secret: {name: openvox-ca-serving-tls}
 #     # true: a CSR may replace a pending one or queue beside a certificate; see docs/configuration.md "Duplicate certificate requests"
 #     allow_duplicate_certs: false
+#     # Local files kept current with the CA cert/CRL; off unless a target is
+#     # listed. Paths are in the pod's filesystem, so mount a shared volume for
+#     # another container to read. See docs/file-export.md.
+#     file_export:
+#       interval_sec: 0   # 0 = built-in default (60s); at most 300
+#       targets:
+#         - {path: /srv/trust/crl.pem, material: crl}
 config: {}
 
 # Use a ConfigMap you manage yourself instead of one rendered from `config`.
