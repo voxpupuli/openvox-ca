@@ -683,7 +683,8 @@ Deployment was running — the subsection below has how to read that back — an
 with a retrieval step for the key: a `--key-out` path inside a Job pod that is
 then reaped is the same as having no key at all.
 
-One more asymmetry to expect: a running server answers OCSP `unknown` for a
+One more asymmetry to expect: a running server that serves OCSP
+([`enable_ocsp`](configuration.md#serving-ocsp)) answers `unknown` for a
 certificate minted this way until it restarts, because its serial index is built
 at startup. The CRL and the inventory are correct immediately.
 

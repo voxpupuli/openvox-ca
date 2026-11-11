@@ -460,6 +460,10 @@
             // other, which is a split that is unpleasant to diagnose from the
             // client end. Counter resets on restart, hence increase().
             //
+            // Live only while enable_ocsp serves the responder. With it off the
+            // job does not run and the counter is not exported, so this rule
+            // matches nothing, which is right: there is no index to fall behind.
+            //
             // The fleet-relative comparison of openvoxca_ocsp_index_serials is
             // deliberately not shipped: it needs a by (job) aggregation to
             // avoid fanning in across unrelated CAs, and a replica reading

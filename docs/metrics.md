@@ -380,6 +380,11 @@ sum the series across the job to see what the signer actually faces.
 | `openvoxca_ocsp_index_serials` | Number of certificate serials **this replica's** responder recognises. A serial it does not hold is answered `unknown`, before the CRL is consulted. |
 | `openvoxca_ocsp_index_sync_failures_total` | Counter of failures to reload the inventory into that index — an unreadable inventory, or one whose integrity MAC no longer verifies. While it rises the replica keeps whatever index it already held. Resets to `0` on process restart. |
 
+Both are exported only while [`enable_ocsp`](configuration.md#serving-ocsp)
+serves the responder. With it off nothing reads or refreshes the index, so the
+series are absent rather than a frozen startup count and a constant zero, and
+`OpenVoxCAOCSPIndexSyncFailing` has nothing to evaluate.
+
 Both are per-process, like the two CRL series above, and that is the point:
 every replica sharing a backend should converge on the same
 `openvoxca_ocsp_index_serials` within one `ocsp_index_sync_interval_sec` (5m by
@@ -762,7 +767,8 @@ CA/CRL/leaf expiry, pending requests, CRL update failures
 (`openvoxca_crl_update_failures_total`), a replica whose CRL has fallen behind
 the stored one (`openvoxca_crl_cached_number`,
 `openvoxca_crl_sync_failures_total`), a replica that cannot reload its OCSP
-serial index (`openvoxca_ocsp_index_sync_failures_total`), delayed revocations
+serial index (`openvoxca_ocsp_index_sync_failures_total`, while `enable_ocsp`
+serves the responder), delayed revocations
 that were lost or could not be carried out
 (`openvoxca_supersede_failures_total`), the [upstream CRL
 chain](#upstream-crl-chain) (an ancestor nearing or past its `NextUpdate`, and

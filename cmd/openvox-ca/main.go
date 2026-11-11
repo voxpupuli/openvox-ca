@@ -600,6 +600,30 @@ func plainHTTPGenerateNotice(cfg *serverConfig, tlsConfigured bool) string {
 		"returns private keys in cleartext, without client authentication, to any caller that can reach the listener"
 }
 
+// ocspURLWithoutResponderNotice is the startup warning for an ocsp_url set
+// while enable_ocsp is not. Issued certificates then advertise a responder this
+// server does not serve, which is right when the URL names one elsewhere and a
+// mistake when it names this one. Only a warning, because the server cannot
+// tell which. Empty otherwise.
+func ocspURLWithoutResponderNotice(cfg *serverConfig) string {
+	if cfg.EnableOCSP || cfg.OCSPUrl == "" {
+		return ""
+	}
+	return "ocsp_url is set but enable_ocsp is not, so issued certificates advertise an OCSP responder " +
+		"this server does not serve; set enable_ocsp to serve /ocsp, or ignore this if ocsp_url names a " +
+		"responder elsewhere"
+}
+
+// metricsOptions maps cfg to the CA collector's options. It is a function of
+// its own so that the mapping from enable_ocsp to the series it removes can be
+// stated as a table.
+func metricsOptions(cfg *serverConfig) []metrics.Option {
+	if !cfg.EnableOCSP {
+		return []metrics.Option{metrics.WithoutOCSPResponder()}
+	}
+	return nil
+}
+
 // defaultCSRRateLimit is the built-in CSR submission cap (per IP per minute)
 // applied when no rate limit is configured on any layer.
 const defaultCSRRateLimit = 60
@@ -735,6 +759,7 @@ func newRootCmd() *cobra.Command {
 		noTLSRequired           bool
 		allowPublicStatus       bool
 		ocspURL                 string
+		enableOCSP              bool
 		crlURL                  string
 		metricsListen           string
 		csrRateLimit            int
@@ -851,6 +876,9 @@ func newRootCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("ocsp-url") {
 				cfg.OCSPUrl = ocspURL
+			}
+			if cmd.Flags().Changed("enable-ocsp") {
+				cfg.EnableOCSP = enableOCSP
 			}
 			if cmd.Flags().Changed("crl-url") {
 				cfg.CRLUrl = crlURL
@@ -1153,6 +1181,9 @@ func newRootCmd() *cobra.Command {
 			if msg := plainHTTPGenerateNotice(cfg, tlsConfigured); msg != "" {
 				slog.Warn(msg)
 			}
+			if msg := ocspURLWithoutResponderNotice(cfg); msg != "" {
+				slog.Warn(msg, "ocsp_url", cfg.OCSPUrl)
+			}
 			if !tlsConfigured && (cfg.PuppetServer != "" || cfg.PuppetServerFile != "") {
 				slog.Warn("--puppet-server / --puppet-server-file have no effect without TLS; " +
 					"all endpoints are accessible without authentication in plain HTTP mode.")
@@ -1343,6 +1374,12 @@ func newRootCmd() *cobra.Command {
 			srv.CSRRateLimit = resolveCSRRateLimit(cfg.CSRRateLimit)
 			srv.SignBatchLimit = 50 // Default max batch size for sign operations
 			srv.PlainHTTP = generateRefusesPlainHTTP(cfg, tlsConfigured)
+			srv.OCSPEnabled = cfg.EnableOCSP
+			if cfg.EnableOCSP {
+				slog.Info("OCSP responder enabled at /ocsp")
+			} else {
+				slog.Info("OCSP responder disabled; /ocsp is not served (set enable_ocsp to serve it)")
+			}
 			if err := applyResponseFormats(srv, cfg); err != nil {
 				return err
 			}
@@ -1375,7 +1412,7 @@ func newRootCmd() *cobra.Command {
 			handler := srv.Routes()
 			var exporter *metrics.Exporter
 			if cfg.MetricsListen != "" {
-				exporter = metrics.NewExporter(myCA)
+				exporter = metrics.NewExporter(myCA, metricsOptions(cfg)...)
 				handler = exporter.InstrumentHandler(handler)
 			}
 
@@ -1624,7 +1661,8 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&clientRevocationPolicy, "client-revocation-policy", "", "Revocation checking for client_ca domains: require (default), check, or skip. Our own CA always checks its own CRL")
 	f.BoolVar(&noTLSRequired, "no-tls-required", false, "Allow plain HTTP on non-loopback addresses (use only behind a trusted TLS proxy or in test environments)")
 	f.BoolVar(&allowPublicStatus, "allow-public-status", false, "Allow unauthenticated GET /certificate_status (by default this route is admin-only)")
-	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://openvox-ca:8140/ocsp)")
+	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://openvox-ca:8140/ocsp); does not enable the responder")
+	f.BoolVar(&enableOCSP, "enable-ocsp", false, "Serve the unauthenticated OCSP responder at /ocsp (off by default; each nonced request costs a CA-key signature)")
 	f.StringVar(&crlURL, "crl-url", "", "CRL distribution point URL to embed in issued certificates (e.g. http://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca)")
 	f.StringVar(&metricsListen, "metrics-listen", "", "Address for the Prometheus metrics exporter (e.g. 127.0.0.1:9140 or :9140); empty disables it. Serves /metrics over plain HTTP on a separate listener; restrict to a trusted network as it reveals node hostnames")
 	f.IntVar(&csrRateLimit, "csr-rate-limit", -1, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables; unset uses the default of 60)")

@@ -162,15 +162,23 @@ type ServerConfig struct {
 	// disable_crl_refresh, which governs re-signing rather than propagation.
 	CRLSyncIntervalSec int `yaml:"crl_sync_interval_sec"` // how often to reload the CRL; 0 = built-in default (60s)
 
-	// OCSPIndexSyncIntervalSec is how often each replica re-reads the inventory
-	// into the serial index its OCSP responder answers from, and so bounds how
-	// long that responder says `unknown` about a certificate signed on another
-	// replica. Separate from crl_sync_interval_sec because the two answer
-	// different questions at different costs: that one re-reads a single small
-	// CRL blob and bounds a certificate outliving its revocation, this one
-	// re-reads the whole inventory and bounds a correct certificate being
-	// reported as unrecognised.
+	// OCSPIndexSyncIntervalSec is how often each replica serving the responder
+	// (enable_ocsp) on a shared backend re-reads the inventory into the serial
+	// index the responder answers from, and so bounds how long it says `unknown`
+	// about a certificate signed on another replica. Elsewhere the job does not
+	// run and this is inert. Separate from crl_sync_interval_sec because the two
+	// answer different questions at different costs: that one re-reads a single
+	// small CRL blob and bounds a certificate outliving its revocation, this one
+	// re-reads the whole inventory and bounds a correct certificate being reported
+	// as unrecognised.
 	OCSPIndexSyncIntervalSec int `yaml:"ocsp_index_sync_interval_sec"` // how often to reload the OCSP serial index; 0 = built-in default (5m)
+
+	// EnableOCSP serves the OCSP responder, POST /ocsp and GET /ocsp/{request}
+	// (default: false). The endpoint is unauthenticated and a nonced request
+	// costs a CA-key signature, so a deployment that does not use OCSP should
+	// not expose it. Independent of ocsp_url, which only decides what issued
+	// certificates advertise and may name a responder elsewhere.
+	EnableOCSP bool `yaml:"enable_ocsp"`
 
 	// Background expired-certificate cleanup. Disabled by default: when enabled,
 	// a job periodically removes certificates that expired more than the

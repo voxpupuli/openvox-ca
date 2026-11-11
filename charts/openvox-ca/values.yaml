@@ -76,6 +76,7 @@ commonAnnotations: {}
 #     insecure_allow_world_readable_keys: false  # true starts anyway on world-readable keys
 #     insecure_allow_unsafe_autosign_path: false  # true runs an autosign plugin others could replace
 #     insecure_allow_plain_http_generate: false  # true lets POST /generate return keys without TLS
+#     enable_ocsp: false  # true serves the unauthenticated OCSP responder at /ocsp; ocsp_url does not
 #     # Certificates openvox-ca issues and renews for OpenVox components. Each
 #     # entry needs a store: a Kubernetes Secret or a local file pair, never
 #     # inferred. The Secret holding OpenVox Server's key is a CA admin

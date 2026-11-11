@@ -217,6 +217,28 @@ var _ = Describe("Collector", func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+	// With the responder off nothing answers from the index and no sync
+	// refreshes it, so its series would describe nothing. Exactly those two go: the
+	// signing-bound series stay, since issuance and CRL re-signing share them.
+	It("omits the OCSP index series, and only those, under WithoutOCSPResponder", func() {
+		with := gather(metrics.NewCollector(myCA))
+		without := gather(metrics.NewCollector(myCA, metrics.WithoutOCSPResponder()))
+
+		var removed []string
+		for name := range with {
+			if _, ok := without[name]; !ok {
+				removed = append(removed, name)
+			}
+		}
+		Expect(removed).To(ConsistOf(
+			"openvoxca_ocsp_index_serials",
+			"openvoxca_ocsp_index_sync_failures_total",
+		))
+		for name := range without {
+			Expect(with).To(HaveKey(name), "the option must only remove series")
+		}
+	})
+
 	It("reports CA certificate and CRL metrics", func() {
 		g := gather(metrics.NewCollector(myCA))
 

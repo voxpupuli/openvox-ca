@@ -36,6 +36,7 @@ services:
       - --no-tls-required
       - --insecure-allow-plain-http-generate
       - --crl-url=http://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca
+      - --enable-ocsp               # Group 15 queries the OCSP responder
       - -v=1
     expose:
       - "8140"

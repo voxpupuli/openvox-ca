@@ -26,7 +26,8 @@ re-asserting inventory integrity on a CA that will not start.
 | `--no-pp-cli-auth` | `false` | Disable `pp_cli_auth` extension as an admin credential **for certificates this CA issued**; require CN allow list only. It does not reach `client_ca` entries, which each carry their own `allow_pp_cli_auth` and default to off — see [trusting client certificates from another CA](#trusting-client-certificates-from-another-ca) |
 | `--no-tls-required` | `false` | Allow plain HTTP on non-loopback addresses; use only behind a trusted TLS proxy or in test environments |
 | `--allow-public-status` | `false` | Allow unauthenticated `GET /certificate_status`; by default this endpoint is admin-only, matching Puppet Server's shipped `auth.conf`. "Admin" means an admin CN of the trust domain that verified the client, or `pp_cli_auth` where that domain honours it — see [trusting client certificates from another CA](#trusting-client-certificates-from-another-ca) |
-| `--ocsp-url` | `""` | OCSP responder URL to embed in issued certificates |
+| `--ocsp-url` | `""` | OCSP responder URL to embed in issued certificates. Does not serve the responder; see `--enable-ocsp` |
+| `--enable-ocsp` | `false` | Serve the unauthenticated OCSP responder at `/ocsp`. See [serving OCSP](#serving-ocsp) |
 | `--crl-url` | `""` | CRL distribution point URL to embed in issued certificates |
 | `--metrics-listen` | `""` | Address for the Prometheus exporter (e.g. `127.0.0.1:9140`); empty disables it. See [metrics & monitoring](metrics.md) |
 | `--encrypt-ca-key` | `false` | Encrypt the CA private key at rest (AES-256-GCM + Argon2id). See [CA key security](ca-key-security.md) |
@@ -117,6 +118,7 @@ autosign_config: ""
 logfile: ""
 verbosity: 0
 ocsp_url: ""
+enable_ocsp: false # serve the OCSP responder at /ocsp; see "Serving OCSP"
 crl_url: ""
 shutdown_timeout_sec: 0  # graceful HTTP-drain budget on SIGTERM; 0 = built-in default (25s)
 # Memory budget for the process tree (launcher + isolated signer + frontend).
@@ -169,9 +171,10 @@ crl_chain_file: ""
 crl_chain_refresh_interval_sec: 0  # how often to re-read it; 0 = built-in default (1h)
 # Background OCSP index sync reloads the inventory into the serial index this
 # replica's OCSP responder answers from, so a certificate signed on another
-# replica stops being reported as "unknown". Read-only; runs on the shared
-# backends only, since nothing else can be writing certificates on filesystem
-# or sqlite. See "OCSP status across replicas" below.
+# replica stops being reported as "unknown". Read-only; runs only while
+# enable_ocsp is set, and on the shared backends only, since nothing else can be
+# writing certificates on filesystem or sqlite. See "OCSP status across
+# replicas" below.
 ocsp_index_sync_interval_sec: 0  # how often to reload; 0 = built-in default (5m)
 # Background expired-certificate cleanup (opt-in). When enabled, a job removes
 # certificates that expired more than the retention grace period ago from the
@@ -250,6 +253,7 @@ Environment variables mirror the CLI flags:
 | `--no-tls-required` | `OPENVOX_CA_NO_TLS_REQUIRED` |
 | `--allow-public-status` | `OPENVOX_CA_ALLOW_PUBLIC_STATUS` |
 | `--ocsp-url` | `OPENVOX_CA_OCSP_URL` |
+| `--enable-ocsp` | `OPENVOX_CA_ENABLE_OCSP` |
 | `--crl-url` | `OPENVOX_CA_CRL_URL` |
 | `--metrics-listen` | `OPENVOX_CA_METRICS_LISTEN` |
 | `--csr-rate-limit` | `OPENVOX_CA_CSR_RATE_LIMIT` |
@@ -604,9 +608,9 @@ Three things the window does not cover, all worth knowing before you rely on it:
   the revocation can keep treating the certificate as valid for that long. The
   replica drops its own cached responses for a serial whenever it installs a
   CRL revoking it — by any route, not only the sync — but answers already in a
-  client's or proxy's cache cannot be recalled. This applies whether or not you
-  set `--ocsp-url`: that flag decides whether issued certificates advertise the
-  responder, not whether `/ocsp` answers. An `unknown` is treated differently
+  client's or proxy's cache cannot be recalled. This applies whenever
+  `enable_ocsp` serves the responder, whether or not you set `--ocsp-url`: that
+  flag decides only whether issued certificates advertise it. An `unknown` is treated differently
   and is not subject to this — see
   [OCSP status across replicas](#ocsp-status-across-replicas).
 - **Certificates issued to the agent before it was locked out.** Revoking one
@@ -873,7 +877,39 @@ configured but has never been opened.
 > `crl_chain_file`. Preservation is a no-op on a single-CRL deployment, so that
 > ordering costs nothing.
 
+## Serving OCSP
+
+The OCSP responder, `POST /ocsp` and `GET /ocsp/{request}` (also under
+`/puppet-ca/v1/`), is off by default. Set `enable_ocsp` to serve it:
+
+```yaml
+enable_ocsp: true
+```
+
+It is off by default because it is an unauthenticated endpoint that signs. A
+request carrying a nonce bypasses the response cache, so each one costs a CA-key
+signature, and under `ca_key_provider: openbao` a Transit call as well. Puppet
+agents check revocation against the CRL and never query it, so a deployment
+without OCSP verifiers loses nothing by leaving it off. While it is off both
+paths answer `404`, as they would from OpenVox Server, which has no responder.
+
+`enable_ocsp` and `ocsp_url` are independent. `ocsp_url` decides only whether
+issued certificates advertise a responder in their authority information
+access extension, and it may name one somewhere else; it does not serve this
+one. If `ocsp_url` is set and `enable_ocsp` is not, the server logs a warning at
+startup, because certificates then advertise a responder this server does not
+serve. That is expected when the URL names an external responder, and a mistake
+when it names this one.
+
+With the responder off, nothing reads the serial index it answers from, so the
+OCSP index sync job is not started on any backend and the
+`openvoxca_ocsp_index_*` series are not exported. See
+[OCSP status across replicas](#ocsp-status-across-replicas).
+
 ## OCSP status across replicas
+
+Everything in this section applies only while `enable_ocsp` serves the
+responder.
 
 The responder answers from a second per-process copy of shared state: an index
 of every serial this CA has issued, built from the inventory. A serial the index
@@ -924,9 +960,9 @@ number of certificates ever issued — one read of the whole thing, as a blob or
 as a row fetch depending on how the backend stores it, plus the small integrity
 value either way. That is what the five-minute default is buying
 back. Lengthening the interval trades cost against the window; there is no
-switch to turn it off, for the same reason the CRL sync has none — a deployment
-cannot opt out of `/ocsp` answering, so it should not be able to opt out of
-answering correctly.
+separate switch to turn it off, because a deployment that serves `/ocsp` should
+not be able to opt out of answering correctly. One that does not serve it
+stops the job with `enable_ocsp`.
 
 Note what the cost scales with: certificates **ever issued**, not certificates
 currently valid, because the inventory keeps a row per issuance for the life of
@@ -948,7 +984,8 @@ serials a little longer.
 `ca_signing_concurrency` caps how many CA-key signatures may be in flight at
 once. The cap is shared across certificate issuance, CRL re-signing and the
 OCSP responder, because they share one key: what needs bounding is the load on
-whatever holds that key, not the load on any one endpoint.
+whatever holds that key, not the load on any one endpoint. With `enable_ocsp`
+off, issuance and CRL re-signing are its only consumers, and nothing sheds.
 
 ```yaml
 ca_signing_concurrency: -1   # -1/unset = max(4, GOMAXPROCS); 0 = unbounded
@@ -956,8 +993,8 @@ ca_signing_concurrency: -1   # -1/unset = max(4, GOMAXPROCS); 0 = unbounded
 
 ### Why there is a bound at all
 
-`/ocsp` is unauthenticated, the rate limiter in front of the API covers CSR
-submissions only, and an OCSP cache miss signs. Without a cap, an anonymous
+While `enable_ocsp` serves it, `/ocsp` is unauthenticated, the rate limiter in
+front of the API covers CSR submissions only, and an OCSP cache miss signs. Without a cap, an anonymous
 caller can drive as many concurrent signatures as it can open connections,
 against the same key and the same signer that issuance uses.
 

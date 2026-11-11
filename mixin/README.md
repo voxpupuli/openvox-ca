@@ -64,7 +64,8 @@ alerting rules for the openvox-ca exporter. It alerts on:
   last successful pass, which is not fail-open but does split a fleet: a
   verifier that hard-fails on `unknown` rejects against that replica and no
   other. See `ocsp_index_sync_interval_sec` in
-  [configuration](../docs/configuration.md).
+  [configuration](../docs/configuration.md). Silent when `enable_ocsp` is off,
+  since the series it reads is then not exported.
 - **Delayed-revocation failures** — the CA failing to schedule or carry out the
   revocation of a certificate a renewal replaced, which leaves that certificate
   a valid credential. Live on any CA that renews certificates, since

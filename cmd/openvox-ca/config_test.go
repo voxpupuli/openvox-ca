@@ -1003,6 +1003,8 @@ var _ = Describe("applyServerEnv each variable", func() {
 		Entry("INSECURE_ALLOW_PLAIN_HTTP_GENERATE", "OPENVOX_CA_INSECURE_ALLOW_PLAIN_HTTP_GENERATE", "true",
 			func(c *serverConfig) bool { return c.InsecureAllowPlainHTTPGenerate },
 			"InsecureAllowPlainHTTPGenerate"),
+		Entry("ENABLE_OCSP", "OPENVOX_CA_ENABLE_OCSP", "true",
+			func(c *serverConfig) bool { return c.EnableOCSP }, "EnableOCSP"),
 		Entry("CLIENT_REVOCATION_POLICY", "OPENVOX_CA_CLIENT_REVOCATION_POLICY", "check",
 			func(c *serverConfig) bool { return c.ClientRevocationPolicy == "check" }, "ClientRevocationPolicy"),
 		Entry("CLIENT_CRL_REFRESH_INTERVAL_SEC", "OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", "300",
@@ -1508,6 +1510,24 @@ var _ = Describe("insecure_allow_plain_http_generate wiring", func() {
 		cfg, err := loadServerConfig(writeTempConfig("insecure_allow_plain_http_generate: true\n"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.InsecureAllowPlainHTTPGenerate).To(BeTrue())
+	})
+})
+
+var _ = Describe("enable_ocsp wiring", func() {
+	// The environment route is in the table above, and the flag route is
+	// driven end to end by ocsp_serve_test.go.
+	BeforeEach(func() { clearServerEnv() })
+
+	It("is false by default", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.EnableOCSP).To(BeFalse())
+	})
+
+	It("is read from the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("enable_ocsp: true\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.EnableOCSP).To(BeTrue())
 	})
 })
 

@@ -71,10 +71,11 @@ import (
 //
 // Scope, stated plainly so nobody mistakes this for total coverage:
 //
-//   - 12 rows over 11 of the 19 protocol routes registered by Routes().
+//   - 13 rows over 12 of the 20 protocol routes registered by Routes() with
+//     the OCSP responder enabled (18 without it).
 //     GET /certificate_request/{subject} gets two rows because the self-match is
 //     the only signal separating tierSelfOrAdmin from tierAdminOnly. The three
-//     /healthz/ probes are registered separately and are not among the 19. The
+//     /healthz/ probes are registered separately and are not among the 20. The
 //     eight omitted are GET /ocsp/{request}, which shares its classifier arm
 //     with the POST form covered here, and seven duplicates of tierAdminOnly,
 //     a tier three rows already pin.
@@ -336,6 +337,12 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 				trusted,
 			},
 		}
+		// The responder is opt-in. Enabled here so that the OCSP row reaches
+		// its handler, as its comment says it does; switched off, the route
+		// answers the mux's 404, which classify also reads as admitted, so the
+		// row would pass while pinning nothing past the middleware. The
+		// configuration-axes block below covers the switch itself.
+		server.OCSPEnabled = true
 		mux = server.Routes()
 
 		// Fresh certificates per route, not one shared set.
@@ -853,6 +860,8 @@ var _ = Describe("Authorisation baseline", Ordered, ContinueOnFailure, func() {
 
 		scratch := api.New(scratchCA)
 		scratch.AuthConfig = api.NewAuthConfig(caCert, adminAllowList)
+		// Every row's route must be registered, the OCSP row's included.
+		scratch.OCSPEnabled = true
 		scratchMux := scratch.Routes()
 		// A fresh admin certificate per route, for the reason the class fixtures
 		// give: POST /certificate_renewal succeeds here and, with
@@ -1607,5 +1616,52 @@ var _ = Describe("Authorisation baseline: configuration axes", func() {
 			Expect(probe(handler, "PUT", "/certificate_revocation_list/ca", byAllowList)).To(BeFalse(),
 				"the CN allow list must still grant admin when the extension does not")
 		})
+	})
+
+	// enable_ocsp moves no cell in the main table: a route the mux does not
+	// register answers 404, which classify reads as admitted, so the OCSP row
+	// passes either way. What the switch changes is whether anyone reaches the
+	// responder at all, so that is what this pair pins, on both path forms and
+	// both methods, for a client with no certificate (the only one OCSP needs).
+	Describe("enable_ocsp", func() {
+		serve := func(enabled bool, method, path string) *httptest.ResponseRecorder {
+			server := api.New(myCA)
+			server.AuthConfig = api.NewAuthConfig(caCert, adminAllowList)
+			server.OCSPEnabled = enabled
+			req := httptest.NewRequest(method, path, strings.NewReader(""))
+			req.TLS = &tls.ConnectionState{}
+			rec := httptest.NewRecorder()
+			server.Routes().ServeHTTP(rec, req)
+			return rec
+		}
+
+		ocspPaths := []TableEntry{
+			Entry("POST /ocsp", "POST", "/ocsp"),
+			Entry("GET /ocsp/{request}", "GET", "/ocsp/AAAA"),
+			Entry("POST /puppet-ca/v1/ocsp", "POST", "/puppet-ca/v1/ocsp"),
+			Entry("GET /puppet-ca/v1/ocsp/{request}", "GET", "/puppet-ca/v1/ocsp/AAAA"),
+		}
+
+		DescribeTable("leaves the responder unregistered when unset",
+			func(method, path string) {
+				rec := serve(false, method, path)
+				// Go's own mux body, not merely 404: the handler never answers
+				// one, but this is the claim that it was never reached.
+				Expect(rec.Code).To(Equal(http.StatusNotFound))
+				Expect(rec.Body.String()).To(ContainSubstring("404 page not found"))
+			},
+			ocspPaths,
+		)
+
+		DescribeTable("serves the responder to a client with no certificate when set",
+			func(method, path string) {
+				rec := serve(true, method, path)
+				// An empty or three-byte request is malformed, and only the
+				// responder answers that with an OCSP response.
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+				Expect(rec.Header().Get("Content-Type")).To(Equal("application/ocsp-response"))
+			},
+			ocspPaths,
+		)
 	})
 })

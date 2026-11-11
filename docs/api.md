@@ -475,7 +475,7 @@ Response:
 | `POST` | `/ocsp` | RFC 6960 OCSP request; body is DER-encoded `OCSPRequest` |
 | `GET` | `/ocsp/{request}` | RFC 6960 GET form; `{request}` is standard or URL-safe base64-encoded DER |
 
-Both paths are also served under `/puppet-ca/v1/`. Responses are signed by the CA key directly (`Content-Type: application/ocsp-response`). The AIA extension is embedded in issued certificates when `--ocsp-url` is set; the endpoint answers either way.
+Served only when [`enable_ocsp`](configuration.md#serving-ocsp) is set; otherwise both paths answer `404`, as they would from OpenVox Server, which has no responder. Both paths are also served under `/puppet-ca/v1/`. Responses are signed by the CA key directly (`Content-Type: application/ocsp-response`). The AIA extension is embedded in issued certificates when `--ocsp-url` is set, which neither requires nor implies `enable_ocsp`.
 
 The responder answers only for certificates issued by this CA's own certificate — the first in `ca_crt.pem`, not the ancestors of an imported chain. A request whose issuer name hash or issuer key hash does not match that certificate is answered with RFC 6960 `unauthorized` over HTTP 403, whatever the serial. The hashes are checked with whichever algorithm the request used (SHA-1, SHA-256, SHA-384 or SHA-512), and the response names the certificate with that same algorithm, so a client that matches the two — `openssl ocsp` does — finds its answer; a request using any other algorithm is answered `malformedRequest` over HTTP 400. With `openssl ocsp`, an `unauthorized` usually means `-issuer` named the root or another intermediate rather than this CA.
 
@@ -499,7 +499,7 @@ When mTLS is enabled — TLS configured by any route: `--tls-cert`/`--tls-key`, 
 
 | Tier | Required client cert | Endpoints |
 | --- | --- | --- |
-| **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp`, `GET /ocsp/{request}` |
+| **Public** | None | `GET /healthz/*`, `GET /certificate/{subject}`, `GET /certificate_revocation_list/ca`, `PUT /certificate_request/{subject}`, `GET /expirations`, `POST /ocsp` and `GET /ocsp/{request}` (served only with [`enable_ocsp`](configuration.md#serving-ocsp)) |
 | **Own client** | A cert **this CA** issued, with `clientAuth` EKU | `POST /certificate_renewal` — restricted to certificates this CA issued (see [renewal eligibility](#renewal-eligibility)); renewal reissues under our authority using that certificate's own subject, which is only safe for names we assigned. Both paths carry that certificate's subject and extensions forward unchanged, authorization-arc OIDs included; the CSR path takes only a new key from the CSR (see [Certificate renewal](#certificate-renewal)) |
 | **Self or admin** | Cert CN matches path subject **and was issued by this CA**, OR cert is admin | `GET /certificate_request/{subject}` |
 | **Admin** | Cert is admin (see below) | `GET /certificate_status/{subject}` (public with `--allow-public-status`), `PUT /certificate_status/{subject}`, `DELETE /certificate_status/{subject}`, `DELETE /certificate_request/{subject}`, `GET /certificate_statuses/*`, `POST /sign`, `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`, `PUT /certificate_revocation_list/ca`, `PUT /certificate/{subject}`, `PUT /certificate_status_by_serial/{serial}` |
@@ -522,7 +522,7 @@ admitted above the public tier, including where its CN grants it admin.
 
 The public tier is unaffected, because it examines no client certificate at
 all. A revoked agent can still fetch the CA certificate and the CRL, read
-`/expirations`, query OCSP, and submit a CSR to
+`/expirations`, query OCSP where it is served, and submit a CSR to
 `PUT /certificate_request/{subject}`.
 
 **The two forms of revocation differ in whether the subject can enrol again.**
@@ -597,7 +597,8 @@ When containing a compromised agent, apply the levers that hold, in this order:
 
    To confirm a given replica, ask that address. `GET
    /certificate_status/{subject}` reports `revoked` from the very cache the
-   admission check reads, and an `/ocsp` query carrying a nonce (`openssl ocsp`
+   admission check reads, and where [`enable_ocsp`](configuration.md#serving-ocsp)
+   serves the responder, an `/ocsp` query carrying a nonce (`openssl ocsp`
    sends one unless you pass `-no_nonce`) resolves status from it too; the
    `openvoxca_crl_cached_number` gauge is the same answer as a number. Each is
    reliable only while issuance stays closed off, per step 1, since the status
@@ -605,7 +606,7 @@ When containing a compromised agent, apply the levers that hold, in this order:
    The status probe also needs that certificate to still be there, so it suits
    the `PUT` route: after a `DELETE` — what `openvox-ca-ctl clean` sends — every
    replica answers `404` and it distinguishes nothing, so record the serial
-   beforehand and use OCSP or the gauge. OCSP answers `Unknown` — not
+   beforehand and use the gauge, or OCSP where it is served. OCSP answers `Unknown` — not
    `revoked` — for a serial a peer issued that this replica has not yet indexed,
    which the index sync bounds at `ocsp_index_sync_interval_sec` (5 minutes by
    default); see [OCSP status across
