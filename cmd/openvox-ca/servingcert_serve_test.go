@@ -331,17 +331,18 @@ puppet_server: admin.example.com
 // as its children. Readiness comes from the service-manager notification the
 // command sends after binding, rather than from polling the port, so a server
 // that is slow to start is waited for and one that fails is reported with its
-// own error instead of a connection refusal.
-func startServe(configPath string) string {
+// own error instead of a connection refusal. extra is appended to the
+// command line, after --config.
+func startServe(configPath string, extra ...string) string {
 	GinkgoHelper()
-	addr, _, _ := startServeRecorded(configPath)
+	addr, _, _ := startServeRecorded(configPath, extra...)
 	return addr
 }
 
 // startServeRecorded is startServe, also returning the recorder the command's
 // notifications reach and a function that stops the command as a signal would,
 // by cancelling its context, and waits for it to return.
-func startServeRecorded(configPath string) (string, *notifyRecorder, func()) {
+func startServeRecorded(configPath string, extra ...string) (string, *notifyRecorder, func()) {
 	GinkgoHelper()
 	rec := startNotifyRecorder(nil)
 
@@ -351,7 +352,7 @@ func startServeRecorded(configPath string) (string, *notifyRecorder, func()) {
 	cmd := newRootCmd()
 	cmd.SetOut(GinkgoWriter)
 	cmd.SetErr(GinkgoWriter)
-	cmd.SetArgs([]string{"--config", configPath, "--single-process"})
+	cmd.SetArgs(append([]string{"--config", configPath, "--single-process"}, extra...))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

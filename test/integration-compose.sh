@@ -1441,6 +1441,7 @@ grep -q "openvox-admin" "$_AUTH_DIR/inventory.txt" 2>/dev/null \
 openvox-ca --cadir "$_AUTH_DIR" \
     --host 127.0.0.1 --port "$_AUTH_PORT" \
     --no-tls-required \
+    --insecure-allow-plain-http-generate \
     --autosign-config=true \
     >/dev/null 2>&1 &
 _AUTH_PID=$!
@@ -1629,6 +1630,7 @@ openvox-ca-ctl setup --cadir "$_MTLS_DIR" --hostname mtls-ctl-test \
 openvox-ca --cadir "$_MTLS_DIR" \
     --host 127.0.0.1 --port "$_MTLS_PORT" \
     --no-tls-required \
+    --insecure-allow-plain-http-generate \
     --autosign-config=true \
     >/dev/null 2>&1 &
 _MTLS_PID=$!
@@ -2112,6 +2114,7 @@ openvox-ca-ctl setup --cadir "$_REN_DIR" --hostname renewal-test-ca 2>/dev/null
 openvox-ca --cadir "$_REN_DIR" \
     --host 127.0.0.1 --port "$_REN_PORT" \
     --no-tls-required \
+    --insecure-allow-plain-http-generate \
     --autosign-config=true \
     >/dev/null 2>&1 &
 _REN_PID=$!

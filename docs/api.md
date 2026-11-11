@@ -405,6 +405,13 @@ Response:
 { "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...", "certificate": "-----BEGIN CERTIFICATE-----\n..." }
 ```
 
+It refuses with `403 Forbidden` and the body `private key delivery requires
+TLS` whenever the server has no TLS of its own, wherever it is bound and
+whether or not `no_tls_required` is set, unless
+[`insecure_allow_plain_http_generate`](configuration.md#server-side-key-generation-without-tls)
+is set: without TLS the key would cross the network in cleartext, and nothing
+would authenticate the caller.
+
 This route serialises on the same per-subject lock as signing, so it can block
 while another replica holds that lock. It answers `400 Bad Request` for an
 invalid subject or a bad `?dns=` value, and `409 Conflict` when the subject

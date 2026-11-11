@@ -168,6 +168,9 @@ openvox-ca-ctl reissue-crl
 # is a --out-dir that is not an existing directory; both are checked before the
 # server is asked for a key. The server refuses the certname "ca" with a 400,
 # and no key file is written (see docs/api.md, "Server-side key generation").
+# A server with no TLS of its own refuses with a 403 unless it sets
+# insecure_allow_plain_http_generate (see docs/configuration.md, "Server-side
+# key generation without TLS").
 openvox-ca-ctl generate --certname agent.example.com
 openvox-ca-ctl generate --certname agent.example.com --dns alt.example.com --out-dir /etc/ssl
 

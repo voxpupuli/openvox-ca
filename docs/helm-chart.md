@@ -284,12 +284,17 @@ The alternatives, in the same message:
 | `config.tls_cert` / `config.tls_key` | A certificate you mount yourself, via `extraVolumes` |
 | `config.serving_cert` | The CA issues and renews its own, into a Secret or a file pair. The way out of the bootstrap deadlock when the CA key is held at a provider, and the only route that also renews it unattended. Mutually exclusive with every route that sets `tls_cert`/`tls_key` — the two rows around this one, and `tls.existingSecret` — and the chart refuses the combination at install time. A file store must live under `persistence.mountPath` and outside `config.cadir` (both refused at install), in a directory that already exists (discovered at startup, and fatal) — see [Managed certificates](#managed-certificates) |
 | `env` / `extraEnv` — `OPENVOX_CA_TLS_CERT` and `OPENVOX_CA_TLS_KEY` | The paths come from a Secret at runtime. Environment variables outrank the config file, and the chart counts them |
-| `config.no_tls_required: true` | Only behind a proxy that terminates TLS and re-originates it to the pod. Client certificates do not survive that, so mTLS-authenticated endpoints become unreachable |
+| `config.no_tls_required: true` | Only behind a trusted proxy that terminates TLS. The pod then serves plain HTTP, and without TLS the server installs no client authentication at all: every endpoint, the admin API included, answers anything that reaches the pod's port. The proxy and a [network policy](#network-policy) are the only gate |
 | `listen.host: 127.0.0.1` or `localhost` | A sidecar-only deployment. Those two spellings and nothing else: the server tests `net.ParseIP(host).IsLoopback()`, which rejects the bracketed `[::1]`, and it builds its listen address as `host + ":" + port`, which turns a bare `::1` into the unparseable `::1:8140` |
 
 With `no_tls_required` the chart also switches the health probes to HTTP, since
 the kubelet has to speak whatever the server speaks. Set `httpGet.scheme` on a
 probe explicitly to override that.
+
+`POST /generate` refuses under `no_tls_required`, as it does wherever the
+server has no TLS of its own, unless `config.insecure_allow_plain_http_generate`
+is also set — see [server-side key generation without
+TLS](configuration.md#server-side-key-generation-without-tls).
 
 **The check only runs when the chart can see the whole configuration.**
 `existingConfigMap`, `args`, `envFrom` and a `--config` in `extraArgs` each put
@@ -588,7 +593,9 @@ the `tls` Secret, from `config.tls_cert`/`config.tls_key`, or from
 your controller needs a certificate for SNI routing.
 
 If you deliberately terminate TLS at the edge, set `config.no_tls_required:
-true` and accept that mTLS-authenticated endpoints are unreachable.
+true`, and understand what it costs: the pod serves plain HTTP with no client
+authentication, so the admin API answers anything that reaches the pod's port.
+Restrict that with a [network policy](#network-policy).
 
 ### Gateway API
 
