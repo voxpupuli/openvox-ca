@@ -132,7 +132,9 @@ point of the change — so concurrent OCSP requests become concurrent signer
 round trips. The endpoint is public by design (verifiers query it before they
 hold a client certificate), the only rate limiter in the server applies to CSR
 submission, and a response that misses the cache signs. An RFC 8954 nonced
-request misses on every request.
+request misses on every request. All of this applies only while
+[`enable_ocsp`](configuration.md#serving-ocsp) serves the responder. It is off
+by default, and a deployment that does not use OCSP should leave it off.
 
 **`ca_signing_concurrency` is the aggregate cap**
 ([#274](https://github.com/voxpupuli/openvox-ca/issues/274)). It bounds all

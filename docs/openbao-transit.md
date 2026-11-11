@@ -610,7 +610,9 @@ failure and throughput profile; plan for it:
   OCSP responder signs outside the CA's process-wide lock
   ([#197](https://github.com/voxpupuli/openvox-ca/issues/197)), so concurrent
   OCSP requests produce concurrent Transit `sign` calls against the same
-  backend that issuance uses. Two consequences worth planning for:
+  backend that issuance uses. This applies only while
+  [`enable_ocsp`](configuration.md#serving-ocsp) serves the responder, which
+  is off by default. Two consequences worth planning for:
 
   - `/ocsp` is **unauthenticated**, and the only rate limiter in the server
     applies to CSR submission, so the request rate is not something the CA

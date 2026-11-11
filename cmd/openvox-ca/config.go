@@ -518,6 +518,7 @@ func applyServerEnv(cfg *serverConfig) error {
 	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_REFRESH_BEFORE_SEC", &cfg.CRLRefreshBeforeSec, config.Positive))
 	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", &cfg.CRLSyncIntervalSec, config.Positive))
 	errs = append(errs, config.EnvInt("OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", &cfg.OCSPIndexSyncIntervalSec, config.Positive))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ENABLE_OCSP", &cfg.EnableOCSP))
 	errs = append(errs, config.EnvBool("OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP", &cfg.EnableExpiredCertCleanup))
 	errs = append(errs, config.EnvInt("OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC", &cfg.ExpiredCertRetentionSec, config.Positive))
 	errs = append(errs, config.EnvInt("OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", &cfg.ExpiredCertCleanupIntervalSec, config.Positive))

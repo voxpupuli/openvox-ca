@@ -154,6 +154,17 @@ type Server struct {
 	// CSRRateLimit refuses, so that the caller can count them. When nil, a
 	// refusal is only logged.
 	OnCSRRateLimited func()
+
+	// OCSPEnabled registers the OCSP responder's routes, POST /ocsp and
+	// GET /ocsp/{request}. The zero value leaves them unregistered, so a
+	// request answers 404 just as it would from OpenVox Server, which has no
+	// responder. Each nonced request signs with the CA key and the endpoint is
+	// unauthenticated, so a deployment that does not use OCSP should not
+	// expose it.
+	//
+	// This is independent of the CA's OCSPURLs, which only decide what issued
+	// certificates advertise: a URL may name a responder somewhere else.
+	OCSPEnabled bool
 	// PlainHTTP is set when the server is running without TLS and the
 	// operator has not set insecure_allow_plain_http_generate. The /generate
 	// endpoint refuses to serve private keys when this is true.
@@ -192,10 +203,11 @@ func (s *Server) Routes() http.Handler {
 
 	mux := http.NewServeMux()
 
-	routes := []struct {
+	type route struct {
 		method, path string
 		handler      http.HandlerFunc
-	}{
+	}
+	routes := []route{
 		{"GET", "/certificate_status/{subject}", s.handleGetStatus},
 		{"PUT", "/certificate_status/{subject}", s.handlePutStatus},
 		{"DELETE", "/certificate_status/{subject}", s.handleDeleteStatus},
@@ -208,8 +220,6 @@ func (s *Server) Routes() http.Handler {
 		{"PUT", "/certificate/{subject}", s.handlePutCert},
 		{"GET", "/certificate_revocation_list/ca", s.handleGetCRL},
 		{"PUT", "/certificate_revocation_list/ca", s.handleReissueCRL},
-		{"POST", "/ocsp", s.handleOCSP},
-		{"GET", "/ocsp/{request}", s.handleOCSP},
 		{"GET", "/expirations", s.handleGetExpirations},
 		{"POST", "/sign", s.handlePostSign},
 		{"POST", "/sign/all", s.handlePostSignAll},
@@ -217,6 +227,12 @@ func (s *Server) Routes() http.Handler {
 		{"POST", "/generate/{subject}", s.handlePostGenerate},
 		{"POST", "/certificate_renewal", s.handlePostCertificateRenewal},
 		{"POST", "/renew/{subject}", s.handlePostRenew},
+	}
+	if s.OCSPEnabled {
+		routes = append(routes,
+			route{"POST", "/ocsp", s.handleOCSP},
+			route{"GET", "/ocsp/{request}", s.handleOCSP},
+		)
 	}
 
 	prefixes := []string{"", "/puppet-ca/v1"}

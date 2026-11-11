@@ -1031,6 +1031,7 @@ func serverEnvBindings() []serverEnvBinding {
 		{"OPENVOX_CA_CRL_REFRESH_BEFORE_SEC", "86400", func(c *serverConfig) any { return &c.CRLRefreshBeforeSec }, 86400},
 		{"OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", "15", func(c *serverConfig) any { return &c.CRLSyncIntervalSec }, 15},
 		{"OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", "300", func(c *serverConfig) any { return &c.OCSPIndexSyncIntervalSec }, 300},
+		{"OPENVOX_CA_ENABLE_OCSP", "true", func(c *serverConfig) any { return &c.EnableOCSP }, true},
 		{"OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP", "true", func(c *serverConfig) any { return &c.EnableExpiredCertCleanup }, true},
 		{"OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC", "2592000", func(c *serverConfig) any { return &c.ExpiredCertRetentionSec }, 2592000},
 		{"OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", "3600", func(c *serverConfig) any { return &c.ExpiredCertCleanupIntervalSec }, 3600},
@@ -1525,6 +1526,24 @@ var _ = Describe("insecure_allow_plain_http_generate wiring", func() {
 		cfg, err := loadServerConfig(writeTempConfig("insecure_allow_plain_http_generate: true\n"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.InsecureAllowPlainHTTPGenerate).To(BeTrue())
+	})
+})
+
+var _ = Describe("enable_ocsp wiring", func() {
+	// The environment route is in the table above, and the flag route is
+	// driven end to end by ocsp_serve_test.go.
+	BeforeEach(func() { clearServerEnv() })
+
+	It("is false by default", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.EnableOCSP).To(BeFalse())
+	})
+
+	It("is read from the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("enable_ocsp: true\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.EnableOCSP).To(BeTrue())
 	})
 })
 

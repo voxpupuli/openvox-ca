@@ -557,12 +557,17 @@ Verification runs at startup from `CA.Init`, on `ReadInventory` and
 depends on the backend, and the difference cuts against the weaker scheme.** The
 OCSP serial-index resync tick re-checks the inventory through
 `InventoryEntries` once per `ocsp_index_sync_interval_sec` (default five
-minutes), but that job starts only for the shared backends:
-`sharedStorageBackend` excludes `filesystem` and `sqlite`, and on those the
-server logs `OCSP serial index sync not started` and no tick runs.
+minutes), but that job starts only while `enable_ocsp` serves the responder,
+and then only for the shared backends: `sharedStorageBackend` excludes
+`filesystem` and `sqlite`, and on those the server logs `OCSP serial index sync
+not started` and no tick runs.
 
-So on postgres, mysql, etcd and redis an established CA re-checks its inventory
-continuously. The two without a tick do not, and they differ from each other.
+So on postgres, mysql, etcd and redis an established CA with `enable_ocsp` set
+re-checks its inventory continuously. Without the tick it does not. That is
+every CA on filesystem and sqlite and, since `enable_ocsp` is off by default, a
+default CA on the other four as well, which then verifies only at startup and
+on verifying reads like those below. The two single-node backends differ from
+each other.
 On the default filesystem backend — also the only whole-blob backend —
 verification after `CA.Init` happens only when something drives a verifying
 read: both revocation entry points, the CSR-based renewal path, and the opt-in
@@ -602,7 +607,7 @@ says why.
 
 No metric is *specific* to the mismatch, so only the log line identifies it as
 one. What a mismatch moves depends on which path met it, and that differs by
-backend. On the shared backends the tick counts into
+backend. On the shared backends with `enable_ocsp` set, the tick counts into
 `openvoxca_ocsp_index_sync_failures_total`, raising `OpenVoxCAOCSPIndexSyncFailing`.
 On filesystem the tick does not run, but a revocation that meets the mismatch
 does count: both revoke paths read through a verifying call there, so the failure

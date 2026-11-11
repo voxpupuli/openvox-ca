@@ -406,8 +406,9 @@ replicas within `crl_sync_interval_sec` (60s by
 default) rather than instantly, since each answers revocation checks from its own
 copy of the CRL — see
 [revocation across replicas](configuration.md#revocation-across-replicas).
-A certificate signed on one replica is likewise reported `unknown` by the
-others until they reload the inventory into the index their OCSP responder
+With `config.enable_ocsp` set, a certificate signed on one replica is likewise
+reported `unknown` by the others until they reload the inventory into the index
+their OCSP responder
 answers from, within `ocsp_index_sync_interval_sec` (5m by default) — see
 [OCSP status across replicas](configuration.md#ocsp-status-across-replicas).
 
@@ -624,7 +625,9 @@ implementation serves it elsewhere.
 
 An **HTTPRoute** (`gateway.httpRoute`) is also available, but it makes the
 Gateway terminate TLS. Reserve it for the anonymous endpoints — CRL
-distribution, OCSP, health — where no client certificate is involved:
+distribution, OCSP, health — where no client certificate is involved. OCSP is
+served only with `config.enable_ocsp` set; see
+[serving OCSP](configuration.md#serving-ocsp):
 
 ```yaml
 gateway:

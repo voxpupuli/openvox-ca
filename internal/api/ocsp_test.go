@@ -47,7 +47,8 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
-// setupOCSPServer creates a CA + API server pair backed by dir.
+// setupOCSPServer creates a CA + API server pair backed by dir, with the OCSP
+// responder enabled.
 func setupOCSPServer(dir string) (*ca.CA, http.Handler) {
 	store := storage.New(dir)
 	myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
@@ -59,6 +60,7 @@ func setupOCSPServer(dir string) (*ca.CA, http.Handler) {
 	Expect(store.TouchInventory(context.Background())).To(Succeed())
 	Expect(myCA.Init(context.Background())).To(Succeed())
 	srv := api.New(myCA)
+	srv.OCSPEnabled = true
 	return myCA, srv.Routes()
 }
 

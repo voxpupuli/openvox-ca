@@ -79,7 +79,8 @@ alerting rules for the openvox-ca exporter. It alerts on:
   other. See `ocsp_index_sync_interval_sec` in
   [configuration](../docs/configuration.md). It fires on three failed passes
   within 30 minutes, so a backend restart that costs one or two stays silent,
-  while an inventory that stays unreadable warns 15 to 20 minutes in.
+  while an inventory that stays unreadable warns 15 to 20 minutes in. Silent
+  when `enable_ocsp` is off, since the series it reads is then not exported.
 - **Delayed-revocation failures** — the CA failing to schedule or carry out the
   revocation of a certificate a renewal replaced, which leaves that certificate
   a valid credential. Live on any CA that renews certificates, since

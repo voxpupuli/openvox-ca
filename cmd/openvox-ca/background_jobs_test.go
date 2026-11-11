@@ -76,6 +76,7 @@ var _ = Describe("backgroundJobs", func() {
 	It("still runs both sync jobs and the superseded sweep when every other job is switched off", func() {
 		Expect(jobNames(&serverConfig{
 			StorageConfig:            config.StorageConfig{StorageBackend: "etcd"},
+			EnableOCSP:               true,
 			DisableCRLRefresh:        true,
 			EnableExpiredCertCleanup: false,
 		})).To(ConsistOf(jobCRLSync, jobOCSPIndexSync, jobSupersededSweep))
@@ -94,7 +95,10 @@ var _ = Describe("backgroundJobs", func() {
 	// and nothing in the logs says why.
 	DescribeTable("starts the OCSP index sync only where a second writer is possible",
 		func(backend string, want bool) {
-			names := jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: backend}})
+			names := jobNames(&serverConfig{
+				StorageConfig: config.StorageConfig{StorageBackend: backend},
+				EnableOCSP:    true,
+			})
 			if want {
 				Expect(names).To(ContainElement(jobOCSPIndexSync))
 			} else {
@@ -114,14 +118,35 @@ var _ = Describe("backgroundJobs", func() {
 
 	// Not gated on ocsp_url, which is a different question: that setting
 	// decides whether issued certificates carry an AIA extension pointing here,
-	// while /ocsp answers either way. On a shared backend the job runs whatever
-	// it says, so an operator distributing the responder URL by another route
-	// still gets correct answers.
+	// while with enable_ocsp set /ocsp answers either way. On a shared backend
+	// with the responder on, the job runs whatever ocsp_url says, so an operator
+	// distributing the responder URL by another route still gets correct
+	// answers.
 	It("runs the OCSP index sync on a shared backend whatever ocsp_url says", func() {
-		Expect(jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: "etcd"}})).To(ContainElement(jobOCSPIndexSync))
-		Expect(jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: "etcd"}, OCSPUrl: "http://ca.example.com:8140/ocsp"})).
+		etcd := config.StorageConfig{StorageBackend: "etcd"}
+		Expect(jobNames(&serverConfig{StorageConfig: etcd, EnableOCSP: true})).To(ContainElement(jobOCSPIndexSync))
+		Expect(jobNames(&serverConfig{StorageConfig: etcd, EnableOCSP: true, OCSPUrl: "http://ca.example.com:8140/ocsp"})).
 			To(ContainElement(jobOCSPIndexSync))
 	})
+
+	// The index feeds the responder and nothing else, so with the responder
+	// off a pass re-reads the whole inventory for nobody. A shared backend is
+	// the only place the job would otherwise run, so that is where the switch
+	// has to be seen to win -- ocsp_url included, which advertises a responder
+	// but does not serve one.
+	DescribeTable("does not run the OCSP index sync while enable_ocsp is off",
+		func(backend string) {
+			Expect(jobNames(&serverConfig{
+				StorageConfig: config.StorageConfig{StorageBackend: backend},
+				OCSPUrl:       "http://ca.example.com:8140/ocsp",
+			})).NotTo(ContainElement(jobOCSPIndexSync))
+		},
+		Entry("etcd", "etcd"),
+		Entry("redis", "redis"),
+		Entry("postgres", "postgres"),
+		Entry("mysql", "mysql"),
+		Entry("a name that does not parse", "no-such-backend"),
+	)
 
 	// crl_chain_file gates the chain refresh on its own, and nothing else gates
 	// it. The failure this pins is not "the job is missing" but "the job is
