@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/config"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
@@ -35,8 +36,15 @@ import (
 // directory the spec validator requires (migration never touches the
 // per-subject private keys kept there). It is not decoded into; see
 // loadMigrateConfig for why.
+//
+// encrypt_ca_key and ca_key_passphrase_file say how the CA key is held at
+// that end (#516): the source's passphrase decrypts an encrypted source key,
+// and the destination's settings decide how the copy is written, so that the
+// server started on the destination's file can load it.
 type migrateFileConfig struct {
-	CADir string
+	CADir               string
+	EncryptCAKey        bool
+	CAKeyPassphraseFile string
 	config.StorageConfig
 }
 
@@ -59,6 +67,8 @@ func loadMigrateConfig(path string) (migrateFileConfig, error) {
 		return c, fmt.Errorf("parsing %s: %w", path, err)
 	}
 	c.CADir = full.CADir
+	c.EncryptCAKey = full.EncryptCAKey
+	c.CAKeyPassphraseFile = full.CAKeyPassphraseFile
 	c.StorageConfig = full.StorageConfig
 	return c, nil
 }
@@ -95,6 +105,14 @@ this can import a filesystem CA into a database, move data between databases
 
 By default migrate refuses to write into a destination that already holds a CA
 certificate; pass --force to overwrite it.
+
+The CA key is written as --dest-config says it should be held. With
+encrypt_ca_key set there, the key is encrypted under the destination's
+passphrase (its ca_key_passphrase_file, or OPENVOX_CA_KEY_PASSPHRASE). An
+encrypted source key is decrypted with the source's passphrase and always
+written encrypted under the destination's, so a migration can change the
+passphrase but never writes a decrypted copy. Without the passphrase each side
+needs, migrate refuses before it writes anything.
 
 The source inventory is verified against its stored integrity value before
 anything is copied, because the destination's value is rebuilt over the copy
@@ -165,9 +183,22 @@ local filesystem under cadir, never in a storage backend.`,
 			}
 			defer releaseDst()
 
+			caKey := ca.MigrateCAKey{
+				Source:      ca.KeyPassphraseConfig{PassphraseFile: srcCfg.CAKeyPassphraseFile},
+				SourceCADir: srcCfg.CADir,
+				Dest:        ca.KeyPassphraseConfig{PassphraseFile: dstCfg.CAKeyPassphraseFile},
+				DestCADir:   dstCfg.CADir,
+				DestEncrypt: dstCfg.EncryptCAKey,
+			}
+			var keyEncrypted bool
 			report, err := storage.MigrateService(cmd.Context(), srcSvc, dstSvc, storage.MigrateOptions{
 				Force:                 force,
 				AllowUnverifiedSource: allowUnverified,
+				CAKey: func(sourceKey []byte) ([]byte, error) {
+					out, encrypted, err := caKey.Encode(sourceKey)
+					keyEncrypted = encrypted
+					return out, err
+				},
 				Logf: func(format string, a ...any) {
 					if globalVerbose {
 						fmt.Fprintf(os.Stderr, format+"\n", a...)
@@ -190,6 +221,9 @@ local filesystem under cadir, never in a storage backend.`,
 					"will vouch for it as copied.\n", report.UnverifiedSource)
 			}
 
+			if keyEncrypted {
+				fmt.Println("The CA key was written encrypted, under the destination's passphrase.")
+			}
 			fmt.Printf("Migration complete: %d CA/state blob(s), %d CSR(s), %d signed cert(s) copied (%d total)\n",
 				report.Singletons, report.CSRs, report.Certs, report.Total())
 			return nil

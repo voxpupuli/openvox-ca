@@ -846,7 +846,8 @@ func newSetupCmd() *cobra.Command {
 }
 
 func newImportCmd() *cobra.Command {
-	var caDir, certBundle, privateKey, crlChain string
+	var caDir, certBundle, privateKey, crlChain, passphraseFile string
+	var encryptKey, allowPlaintext bool
 	cmd := &cobra.Command{
 		Use:          "import",
 		Short:        "Import an external CA cert/key (offline)",
@@ -897,7 +898,12 @@ func newImportCmd() *cobra.Command {
 			}
 			defer func() { _ = instanceLock.Unlock() }()
 
-			if err := ca.ImportCA(cmd.Context(), store, certPEM, keyPEM, crlPEM); err != nil {
+			opts := ca.ImportCAOptions{
+				EncryptCAKey:                encryptKey,
+				KeyPassphrase:               ca.KeyPassphraseConfig{PassphraseFile: passphraseFile},
+				AllowPlaintextOverEncrypted: allowPlaintext,
+			}
+			if err := ca.ImportCAWithOptions(cmd.Context(), store, certPEM, keyPEM, crlPEM, opts); err != nil {
 				return err
 			}
 			fmt.Printf("CA imported into %s\n", absDir)
@@ -908,6 +914,10 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().StringVar(&certBundle, "cert-bundle", "", "Path to CA certificate PEM")
 	cmd.Flags().StringVar(&privateKey, "private-key", "", "Path to CA private key PEM (required; see 'openvox-ca import-ca-cert' when the key lives at a provider)")
 	cmd.Flags().StringVar(&crlChain, "crl-chain", "", "Path to a CRL PEM, or several concatenated in any order (optional; when omitted the stored CRL chain is left as it is, one is generated if none is stored, and the import is refused if nothing stored was signed by the certificate being imported)")
+	cmd.Flags().BoolVar(&encryptKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (an encrypted --private-key is always stored encrypted)")
+	cmd.Flags().StringVar(&passphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (default: the "+ca.DefaultPassphraseEnvVar+" environment variable)")
+	cmd.Flags().BoolVar(&allowPlaintext, "allow-plaintext-ca-key", false, "Allow a plaintext --private-key to replace an encrypted CA key in storage")
+	cmd.MarkFlagsMutuallyExclusive("encrypt-ca-key", "allow-plaintext-ca-key")
 	_ = cmd.MarkFlagRequired("cadir")
 	_ = cmd.MarkFlagRequired("cert-bundle")
 	return cmd

@@ -154,6 +154,12 @@ cp "$PUPPET_SSL/ca/serial" "$NEW_CADIR/serial"
 chown -R puppet:puppet "$NEW_CADIR"
 ```
 
+To hold the CA key encrypted at rest from the start, add `--encrypt-ca-key
+--ca-key-passphrase-file <file>` to the `import` and set `encrypt_ca_key` and
+the same passphrase source on the server; see [CA key encryption at
+rest](ca-key-security.md#ca-key-encryption-at-rest). The key in `$PUPPET_SSL`
+stays as it was, in plaintext.
+
 Copy `inventory.txt` rather than rebuilding it from `signed/`: openvox-ca reads
 it as OpenVox Server wrote it, and a rebuild loses every entry whose certificate
 is no longer in `signed/`. Copy `serial` too, over the `0001` that `import`
@@ -396,7 +402,14 @@ every time — `mktemp -d` — because `migrate` copies and never deletes: anyth
 left from a previous run is pushed back into the live backend on the return leg,
 including signed certificates that have since been cleaned, which reappear with
 no inventory row and are then invisible to the expiry cleanup. Remove the
-directory afterwards; it holds a plaintext copy of the CA key.
+directory afterwards; it holds a copy of the CA key.
+
+Under `encrypt_ca_key` the key stays encrypted all the way round, and every leg
+needs the passphrase: give `scratch.yaml` and `backup.yaml` the same
+`ca_key_passphrase_file` as `live.yaml`, and pass it to `import` as
+`--ca-key-passphrase-file` (or set `OPENVOX_CA_KEY_PASSPHRASE` for all four
+commands). `migrate` refuses an end that has none rather than write the key
+decrypted.
 
 ```bash
 # A fresh, empty directory every time, as above. Write its path into
@@ -407,6 +420,9 @@ SCRATCH=$(mktemp -d)
 openvox-ca-ctl migrate --source-config live.yaml --dest-config scratch.yaml
 
 # --cert-bundle and --private-key are the copies the first leg just wrote there.
+# Under encrypt_ca_key the copied key is encrypted: add
+# --ca-key-passphrase-file <the file live.yaml names>, unless
+# OPENVOX_CA_KEY_PASSPHRASE is set.
 openvox-ca-ctl import --cadir "$SCRATCH" \
   --cert-bundle "$SCRATCH/ca_crt.pem" \
   --private-key "$SCRATCH/ca_key.pem" \
@@ -424,7 +440,7 @@ openvox-ca-ctl migrate --source-config live.yaml --dest-config backup.yaml
 
 openvox-ca-ctl migrate --source-config scratch.yaml --dest-config live.yaml --force
 
-# The scratch copy holds the CA key in plaintext.
+# The scratch copy holds a copy of the CA key.
 rm -rf "$SCRATCH"
 ```
 
@@ -435,15 +451,14 @@ is not a limitation of `import` but the shape of the backend — nothing
 reconciles what two processes would each hold in memory (see
 [running a second process against a live store](storage-backends.md#running-a-second-process-against-a-live-store)).
 
-> **Re-import rewrites the CA key, so two custody modes cannot use it.** `import`
-> writes whatever `--private-key` holds, and offers no encryption flags. Under
-> `encrypt_ca_key` the stored key is an `ENCRYPTED PRIVATE KEY` block that
-> `import` cannot parse, so feeding it back fails — and feeding the original
-> plaintext key instead succeeds while replacing the encrypted at-rest key with
-> a plaintext one, because key loading accepts both forms. `import` itself says
-> nothing; the only sign is the warning the server logs at its next start that
-> the stored key is not encrypted. Under `ca_key_provider: openbao` there is no exportable key at all, so
-> re-import is unavailable outright. For both,
+> **Re-import rewrites the CA key.** `import` writes the key it is given. Under
+> `encrypt_ca_key`, give it the stored `ENCRYPTED PRIVATE KEY` block and the
+> passphrase (`--ca-key-passphrase-file`, or `OPENVOX_CA_KEY_PASSPHRASE`): it
+> decrypts the key to check it against the certificate and writes it back
+> encrypted. A plaintext key over the encrypted one is refused unless you pass
+> `--encrypt-ca-key`, which encrypts it, or `--allow-plaintext-ca-key`, which
+> stores it in plaintext. Under `ca_key_provider: openbao` there is no
+> exportable key at all, so re-import is unavailable outright, and
 > [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is not an
 > alternative to re-import but the only ancestor-refresh mechanism there is: it
 > reads a PEM bundle and republishes it, touching neither the CA key nor the
@@ -822,7 +837,12 @@ Server's user and kept the CA key as a plain file in the directory; see
 After an import into a separate directory (step 5), that directory belongs to
 openvox-ca's own user and its key and inventory are `0600`. Give it to
 OpenVox Server's user first (`chown -R puppet:puppet "$NEW_CADIR"`), then
-point OpenVox Server's `cadir` at it or copy it back over the original.
+point OpenVox Server's `cadir` at it or copy it back over the original. If the
+import used `--encrypt-ca-key`, the directory's key is encrypted and OpenVox
+Server cannot sign with it. Before pointing OpenVox Server at the directory,
+replace its `ca_key.pem` with the original plaintext key (from `$PUPPET_SSL`,
+or the backup from step 1); when copying back, copy everything but the key, so
+the original's stays in place.
 
 Either way, a [delayed revocation](configuration.md#delayed-supersession) still
 pending in `superseded.json` does not carry over: OpenVox Server ignores that
