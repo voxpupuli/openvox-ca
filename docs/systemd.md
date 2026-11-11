@@ -227,6 +227,8 @@ The service also sets `MemoryDenyWriteExecute=yes` and `UMask=0077`, and on a pa
 
 It applies a third time, and there the consequence is worse. A [`serving_cert`](configuration.md#the-cas-own-serving-certificate) file store always needs the same `ReadWritePaths=` drop-in: it must sit outside the `cadir`, which the CA reserves against every file store, and the CA directory is the only path the unit makes writable. An unwritable serving store is **fatal** — the CA refuses to start rather than logging and retrying, because the listener has nothing to present. A managed certificate in the same position is merely retried on the next pass.
 
+A [file export](file-export.md) target needs the drop-in too, for the directory that holds it. Without it every sync fails and `OpenVoxCAFileExportStale` fires, but the CA keeps serving.
+
 Check your changes with:
 
 ```console
@@ -407,6 +409,8 @@ $ sudo openvox-ca-ctl setup       # against your configured backend
 ```
 
 and supplying the credential the shipped configuration names — `certs/openvox-ca-server.pem` and `private_keys/openvox-ca-server.pem` — or pointing `tls_cert` and `tls_key` at your own. Leaving the oneshot enabled blocks the service at the next boot.
+
+On the filesystem backend the oneshot links `certs/ca.pem` and `crl.pem` into the CA directory; on another backend the CA certificate and CRL live in the store, so there is nothing there to link to. To keep those two paths current, configure a [file export](file-export.md) to them: it writes each as a regular file, replacing any link already there, and rewrites it whenever storage changes. It needs a `ReadWritePaths=` drop-in for `/etc/puppetlabs/puppet/ssl` — see [hardening](#hardening).
 
 Every spelling of the filesystem backend that `openvox-ca` itself accepts — `filesystem`, `file`, `fs`, `disk`, `local` — is accepted here too, in any case.
 
