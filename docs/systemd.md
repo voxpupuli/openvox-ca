@@ -410,7 +410,7 @@ $ sudo openvox-ca-ctl setup       # against your configured backend
 
 and supplying the credential the shipped configuration names — `certs/openvox-ca-server.pem` and `private_keys/openvox-ca-server.pem` — or pointing `tls_cert` and `tls_key` at your own. Leaving the oneshot enabled blocks the service at the next boot.
 
-On the filesystem backend the oneshot links `certs/ca.pem` and `crl.pem` into the CA directory; on another backend the CA certificate and CRL live in the store, so there is nothing there to link to. To keep those two paths current, configure a [file export](file-export.md) to them: it writes each as a regular file, replacing any link already there, and rewrites it whenever storage changes. It needs a `ReadWritePaths=` drop-in for `/etc/puppetlabs/puppet/ssl` — see [hardening](#hardening).
+On the filesystem backend the oneshot links `certs/ca.pem` and `crl.pem` into the CA directory; on another backend the CA certificate and CRL live in the store, so there is nothing there to link to. To keep those two paths current, configure a [file export](file-export.md) to them: it writes each as a regular file, replacing any link already there, and rewrites it whenever storage changes. It needs a `ReadWritePaths=` drop-in for `/etc/puppetlabs/puppet/ssl`, best paired with `ReadOnlyPaths=/etc/puppetlabs/puppet/ssl/private_keys` so the keys under it stay read-only; [file export](file-export.md#under-systemd) has the drop-in and the one case where the second line must go.
 
 Every spelling of the filesystem backend that `openvox-ca` itself accepts — `filesystem`, `file`, `fs`, `disk`, `local` — is accepted here too, in any case.
 

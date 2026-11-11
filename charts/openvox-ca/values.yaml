@@ -106,8 +106,9 @@ commonAnnotations: {}
 #     # true: a CSR may replace a pending one or queue beside a certificate; see docs/configuration.md "Duplicate certificate requests"
 #     allow_duplicate_certs: false
 #     # Local files kept current with the CA cert/CRL; off unless a target is
-#     # listed. Paths are in the pod's filesystem, so mount a shared volume for
-#     # another container to read. See docs/file-export.md.
+#     # listed. The root filesystem is read-only, so each target's directory
+#     # must be a writable extraVolumes mount, shared with whatever reads it;
+#     # kubernetes_export usually fits a cluster better. See docs/file-export.md.
 #     file_export:
 #       interval_sec: 0   # 0 = built-in default (60s); at most 300
 #       targets:

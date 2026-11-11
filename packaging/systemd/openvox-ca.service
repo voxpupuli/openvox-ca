@@ -133,8 +133,9 @@ Group=puppet
 #
 # Deliberately narrower than openvox-ca-first-boot.service, which gets the
 # parent /etc/puppetlabs/puppet/ssl because it links certs/ca.pem and crl.pem
-# into the tree above this one. The long-running service never needs to write
-# there, so it does not get to.
+# into the tree above this one. The long-running service does not need to write
+# there unless a file_export target points at those paths (see below), so by
+# default it does not get to.
 #
 # Point cadir somewhere else and the new directory has to be writable too --
 # granted with a drop-in (`systemctl edit openvox-ca`, then [Service] and
@@ -142,7 +143,7 @@ Group=puppet
 # this file on every upgrade, and the edit would go with it. ReadWritePaths= in
 # a drop-in adds to this one rather than replacing it.
 #
-# Two more writers outside cadir need the same drop-in. A managed certificate
+# Three more writers outside cadir need the same drop-in. A managed certificate
 # with a `files` store writes outside cadir by definition; see "managed
 # certificates" in docs/configuration.md. The CA's own serving certificate --
 # `serving_cert` -- always does too, because its `files` store must sit
@@ -150,7 +151,10 @@ Group=puppet
 # the only path this unit makes writable. The difference is the consequence:
 # a managed certificate that cannot be written is logged and retried on the
 # next pass, but the serving certificate is what the listener presents, so an
-# unwritable store is fatal and the CA refuses to start.
+# unwritable store is fatal and the CA refuses to start. A file_export target
+# (docs/file-export.md) needs its directory granted too; one that cannot be
+# written is logged and retried every interval, and OpenVoxCAFileExportStale
+# fires, but the CA keeps serving.
 #
 # A cadir OpenVox Server may take back needs this unit to run as OpenVox
 # Server's user, which User=puppet above already does; see "Sharing the cadir

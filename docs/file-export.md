@@ -154,6 +154,7 @@ for `cadir`:
 # /etc/systemd/system/openvox-ca.service.d/file-export.conf
 [Service]
 ReadWritePaths=/etc/puppetlabs/puppet/ssl /srv/trust
+ReadOnlyPaths=/etc/puppetlabs/puppet/ssl/private_keys
 ```
 
 That covers all three targets in the example above: `/etc/puppetlabs/puppet/ssl`
@@ -163,9 +164,25 @@ target and renames it into place. Without the drop-in every sync fails with a
 read-only filesystem error, and the alert below fires.
 
 `ReadWritePaths=` lifts the read-only mount for the whole tree below each path,
-so granting `/etc/puppetlabs/puppet/ssl` leaves only file permissions between
-the CA's user and everything else in it, the host's own agent key included.
-Prefer a directory that holds nothing else where your consumer allows it.
+so granting `/etc/puppetlabs/puppet/ssl` alone would leave only file
+permissions between the CA's user and everything else in it, the host's own
+agent key included. The `ReadOnlyPaths=` line puts `private_keys/` back under
+the read-only mount: systemd applies the deeper path, whichever order the two
+lines are in (checked on systemd 257). Leave that line out if a
+[`serving_cert`](configuration.md#the-cas-own-serving-certificate) or managed
+certificate `files` store writes its key under `private_keys/`, or that store
+cannot be written. Where your consumer allows it, a directory that holds
+nothing else is simpler still.
+
+### Under Kubernetes
+
+The chart runs the CA with `readOnlyRootFilesystem: true`, so a target's
+directory must be a writable volume: add it with `extraVolumes` and
+`extraVolumeMounts`, as a managed certificate's `files` store needs (see
+[deploying with Helm](helm-chart.md)). Mount the same volume in whichever
+container reads the file. Inside a cluster the
+[Kubernetes export](kubernetes-export.md) is usually the better fit: it puts the
+material in a Secret or ConfigMap that any pod can mount.
 
 ## Metrics and alerting
 
