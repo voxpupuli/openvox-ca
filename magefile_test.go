@@ -1308,6 +1308,356 @@ jobs:
 	})
 })
 
+var _ = Describe("verifyReleasePublishGate", func() {
+	It("finds the real release job renaming, drafting, checking, then publishing", func() {
+		Expect(verifyReleasePublishGate()).To(Succeed())
+	})
+
+	// The shape of the real job, cut to the lines the guard reads. Each
+	// refusal below removes or moves one of them.
+	good := []byte(`
+jobs:
+  release:
+    steps:
+      - uses: actions/download-artifact@0000000000000000000000000000000000000000
+      - run: |
+          cd dist
+          for f in ./*'~'*; do
+            [ -e "$f" ] || continue
+            mv -v -- "$f" "${f//\~/.}"
+          done
+          sha256sum -- *.tar.gz *.deb *.rpm > checksums.txt
+      - run: |
+          gh release create "$TAG" --draft dist/checksums.txt
+      - run: |
+          listed="$(sed -E 's/^[0-9a-f]{64} [ *]//' dist/checksums.txt | sort)"
+          assets="$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)"
+      - run: gh release edit "$TAG" --draft=false
+`)
+
+	// The rename loop exactly as it sits in good, indentation included: the
+	// mutations below edit the raw YAML, where releaseRenameRE (anchored on
+	// the parsed, dedented shell) does not match.
+	loop := []byte(`          for f in ./*'~'*; do
+            [ -e "$f" ] || continue
+            mv -v -- "$f" "${f//\~/.}"
+          done
+`)
+
+	It("accepts the job in that order", func() {
+		Expect(good).To(ContainSubstring(string(loop)), "the loop literal must be the one in the fixture")
+		Expect(verifyReleasePublishGateIn(good, true)).To(Succeed())
+	})
+
+	// The rename is owed only while packageFileNameRE admits a tilde; that is
+	// the coupling this half of the guard pins.
+	It("does not ask for the rename when no package filename can hold a tilde", func() {
+		noRename := bytes.Replace(good, loop, nil, 1)
+		Expect(noRename).NotTo(Equal(good), "the fixture must actually have changed")
+		Expect(verifyReleasePublishGateIn(noRename, false)).To(Succeed())
+		Expect(verifyReleasePublishGateIn(noRename, true)).To(MatchError(ContainSubstring("does not rename ~ to .")))
+	})
+
+	It("reads the real packageFileNameRE as admitting a tilde", func() {
+		Expect(packageFileNameRE.MatchString("~")).To(BeTrue())
+	})
+
+	DescribeTable("refuses a job that could publish before the names are checked",
+		func(mutate func([]byte) []byte, want string) {
+			bad := mutate(good)
+			Expect(bad).NotTo(Equal(good), "the fixture must actually have changed")
+			Expect(verifyReleasePublishGateIn(bad, true)).To(MatchError(ContainSubstring(want)))
+		},
+		Entry("the rename moved after the hashing", func(src []byte) []byte {
+			out := bytes.Replace(src, loop, nil, 1)
+			return bytes.Replace(out, []byte("> checksums.txt\n"), append([]byte("> checksums.txt\n"), loop...), 1)
+		}, "does not rename ~ to ."),
+		Entry("no step writes checksums.txt", func(src []byte) []byte {
+			return bytes.Replace(src, []byte("sha256sum -- *.tar.gz *.deb *.rpm > checksums.txt"),
+				[]byte("echo no checksums"), 1)
+		}, "no release-job step writes checksums.txt"),
+		Entry("no create step", func(src []byte) []byte {
+			return bytes.Replace(src, []byte("gh release create"), []byte("gh release make"), 1)
+		}, "no release-job step runs `gh release create`"),
+		Entry("no --draft on create", func(src []byte) []byte {
+			return bytes.Replace(src, []byte(`"$TAG" --draft dist/`), []byte(`"$TAG" dist/`), 1)
+		}, "does not pass --draft"),
+		Entry("no read-back", func(src []byte) []byte {
+			return bytes.Replace(src, []byte("gh release view"), []byte("gh release list"), 1)
+		}, "reads the draft's asset names"),
+		Entry("the read-back before the create", func(src []byte) []byte {
+			create := []byte("      - run: |\n          gh release create \"$TAG\" --draft dist/checksums.txt\n")
+			out := bytes.Replace(src, create, nil, 1)
+			return bytes.Replace(out, []byte("      - run: gh release edit"), append(create, []byte("      - run: gh release edit")...), 1)
+		}, "reads the draft's asset names"),
+		Entry("no publish step", func(src []byte) []byte {
+			return bytes.Replace(src, []byte("      - run: gh release edit \"$TAG\" --draft=false\n"), nil, 1)
+		}, "last step must publish"),
+		Entry("a step after the publish", func(src []byte) []byte {
+			return append(src, []byte("      - run: echo after\n")...)
+		}, "last step must publish"),
+		Entry("the publish ahead of the read-back", func(src []byte) []byte {
+			out := bytes.Replace(src, []byte("      - run: gh release edit \"$TAG\" --draft=false\n"), nil, 1)
+			return bytes.Replace(out, []byte("      - run: |\n          listed="),
+				[]byte("      - run: gh release edit \"$TAG\" --draft=false\n      - run: |\n          listed="), 1)
+		}, "last step must publish"),
+		Entry("a second publish", func(src []byte) []byte {
+			return bytes.Replace(src, []byte(`gh release create "$TAG" --draft dist/checksums.txt`),
+				[]byte("gh release create \"$TAG\" --draft dist/checksums.txt\n          gh release edit \"$TAG\" --draft=false"), 1)
+		}, "more than one release-job step publishes"),
+	)
+
+	// Pinned directly: in a whole job, a --draft=false on the create step
+	// also trips the single-publish or last-step checks, so no workflow-level
+	// spec can tell this regex from a bare substring match.
+	DescribeTable("releaseDraftFlagRE recognises --draft and nothing near it",
+		func(line string, want bool) {
+			Expect(releaseDraftFlagRE.MatchString(line)).To(Equal(want))
+		},
+		Entry("a trailing flag", `gh release create "$TAG" --draft`, true),
+		Entry("inside an args array", `args=("$TAG" --generate-notes --draft)`, true),
+		Entry("mid-line", `gh release create --draft "$TAG"`, true),
+		Entry("the publish flag", `gh release edit "$TAG" --draft=false`, false),
+		Entry("a longer flag", `gh release create --drafts`, false),
+	)
+
+	// Comments are not shell: a commented-out --draft must not satisfy it.
+	It("does not count a --draft in a comment", func() {
+		bad := bytes.Replace(good, []byte(`"$TAG" --draft dist/`), []byte("\"$TAG\" dist/\n          # --draft"), 1)
+		Expect(bad).NotTo(Equal(good), "the fixture must actually have changed")
+		Expect(verifyReleasePublishGateIn(bad, true)).To(MatchError(ContainSubstring("does not pass --draft")))
+	})
+})
+
+// releaseJobStep returns the shell of the one release-job step in the real
+// release.yml that match selects, and fails if there is not exactly one: a spec
+// that ran the first or last of several would pass while the step that ships
+// went untested.
+func releaseJobStep(match func(run string) bool) (string, error) {
+	src, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	if err != nil {
+		return "", err
+	}
+	steps, err := workflowJobSteps(src, "release")
+	if err != nil {
+		return "", err
+	}
+	var found []string
+	for _, run := range steps {
+		if match(run) {
+			found = append(found, run)
+		}
+	}
+	if len(found) != 1 {
+		return "", fmt.Errorf("release.yml: expected exactly one matching release-job step, found %d", len(found))
+	}
+	return found[0], nil
+}
+
+// specEnv is the environment for shell a spec runs: this process's, with
+// GIT_* removed so nothing it starts can reach the real repository.
+func specEnv(extra ...string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, extra...)
+}
+
+// runReleaseRename runs release.yml's own ~-to-. rename loop, as the release
+// job does, in dir. The loop is taken from the step that writes checksums.txt
+// -- the one verifyReleasePublishGate orders -- by the regex the guard uses, so
+// a spec here exercises the shell that ships rather than a copy.
+func runReleaseRename(dir string) (string, error) {
+	run, err := releaseJobStep(releaseChecksumsRE.MatchString)
+	if err != nil {
+		return "", err
+	}
+	loop := releaseRenameRE.FindString(run)
+	if loop == "" {
+		return "", errors.New("release.yml: the step that writes checksums.txt has no ~-to-. rename loop")
+	}
+	cmd := exec.Command("bash", "-e", "-c", loop)
+	cmd.Dir = dir
+	cmd.Env = specEnv()
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// runReleaseReadBack runs release.yml's own asset-name check in dir, which
+// holds dist/checksums.txt, with a stub gh on PATH that answers `gh release
+// view` with assets, one per line. It runs under the shell the step declares,
+// with the flags GitHub gives it: `shell: bash` is -e and pipefail, and no
+// shell: key is -e alone. ghFails makes the stub exit non-zero instead.
+func runReleaseReadBack(dir string, assets []string, ghFails bool) (string, error) {
+	isReadBack := func(run string) bool {
+		return strings.Contains(run, "gh release view") && strings.Contains(run, "checksums.txt")
+	}
+	run, err := releaseJobStep(isReadBack)
+	if err != nil {
+		return "", err
+	}
+	src, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	if err != nil {
+		return "", err
+	}
+	var doc struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Shell string `yaml:"shell"`
+				Run   string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return "", err
+	}
+	flags := []string{"--noprofile", "--norc", "-e"}
+	for _, st := range doc.Jobs["release"].Steps {
+		if isReadBack(st.Run) && st.Shell == "bash" {
+			flags = []string{"--noprofile", "--norc", "-eo", "pipefail"}
+		}
+	}
+	bin := filepath.Join(dir, "stub-bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		return "", err
+	}
+	answer := filepath.Join(dir, "stub-assets")
+	if err := os.WriteFile(answer, []byte(strings.Join(assets, "\n")+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	called := filepath.Join(dir, "stub-called")
+	// The stub refuses any call but the one the step is meant to make, so a
+	// step that asked GitHub for something else could not pass on its answer.
+	stub := "#!/bin/sh\n" +
+		"[ \"$1 $2 $3\" = \"release view v9.9.9-rc1\" ] || { echo \"unexpected gh call: $*\" >&2; exit 3; }\n" +
+		": > \"$STUB_CALLED\"\n" +
+		"[ -z \"$STUB_FAIL\" ] || exit 1\n" +
+		"cat \"$STUB_ASSETS\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(stub), 0o755); err != nil {
+		return "", err
+	}
+	fail := ""
+	if ghFails {
+		fail = "1"
+	}
+	cmd := exec.Command("bash", append(flags, "-c", run)...)
+	cmd.Dir = dir
+	// Prepended, not the whole PATH: the step needs the host's sed, sort and
+	// comm, and the premise here is only that gh is the stub -- which the
+	// stub-called marker asserts -- not that anything is absent.
+	cmd.Env = specEnv("PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"TAG=v9.9.9-rc1", "STUB_ASSETS="+answer, "STUB_CALLED="+called, "STUB_FAIL="+fail)
+	out, err := cmd.CombinedOutput()
+	// The step reads both lists before judging either, so every run reaches
+	// gh; one that did not ran some other gh, or none.
+	if _, statErr := os.Stat(called); statErr != nil {
+		return string(out), fmt.Errorf("the stub gh was never called (%v); step output: %s", statErr, out)
+	}
+	return string(out), err
+}
+
+var _ = Describe("release.yml's ~-to-. rename", func() {
+	var dir string
+
+	BeforeEach(func() {
+		dir = GinkgoT().TempDir()
+	})
+
+	names := func() []string {
+		entries, err := os.ReadDir(dir)
+		Expect(err).NotTo(HaveOccurred())
+		var out []string
+		for _, e := range entries {
+			out = append(out, e.Name())
+		}
+		return out
+	}
+
+	// A final release has no tilde anywhere, so the glob matches nothing; the
+	// loop has to treat that as nothing to do rather than as a file named
+	// `./*~*`.
+	It("leaves a directory with no tilde-named file alone", func() {
+		Expect(os.WriteFile(filepath.Join(dir, "openvox-ca_9.9.9-1_amd64.deb"), []byte("deb"), 0o644)).To(Succeed())
+		out, err := runReleaseRename(dir)
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(names()).To(ConsistOf("openvox-ca_9.9.9-1_amd64.deb"))
+	})
+
+	It("refuses to overwrite a file already under the dotted name", func() {
+		Expect(os.WriteFile(filepath.Join(dir, "openvox-ca_9.9.9~rc1-1_amd64.deb"), []byte("tilde"), 0o644)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(dir, "openvox-ca_9.9.9.rc1-1_amd64.deb"), []byte("dot"), 0o644)).To(Succeed())
+		out, err := runReleaseRename(dir)
+		Expect(err).To(HaveOccurred())
+		Expect(out).To(ContainSubstring("Cannot rename"))
+		Expect(os.ReadFile(filepath.Join(dir, "openvox-ca_9.9.9.rc1-1_amd64.deb"))).To(Equal([]byte("dot")))
+		Expect(filepath.Join(dir, "openvox-ca_9.9.9~rc1-1_amd64.deb")).To(BeAnExistingFile())
+	})
+})
+
+var _ = Describe("release.yml's asset-name check", func() {
+	// The check that refuses to publish a draft whose assets checksums.txt does
+	// not name -- #603's acceptance criterion -- run from the real workflow
+	// against a stub gh, as the release job runs it after uploading.
+	var dir string
+
+	const (
+		deb = "openvox-ca_9.9.9.rc1-1_amd64.deb"
+		rpm = "openvox-ca-9.9.9.rc1-1.x86_64.rpm"
+	)
+
+	writeChecksums := func(names ...string) {
+		Expect(os.MkdirAll(filepath.Join(dir, "dist"), 0o755)).To(Succeed())
+		var b strings.Builder
+		for _, n := range names {
+			// sha256sum's text-mode line: the hash, two spaces, the name.
+			fmt.Fprintf(&b, "%s  %s\n", strings.Repeat("ab", 32), n)
+		}
+		Expect(os.WriteFile(filepath.Join(dir, "dist", "checksums.txt"), []byte(b.String()), 0o644)).To(Succeed())
+	}
+
+	BeforeEach(func() {
+		dir = GinkgoT().TempDir()
+	})
+
+	It("passes when every listed file is an asset, beside assets it does not list", func() {
+		writeChecksums(deb, rpm)
+		out, err := runReleaseReadBack(dir, []string{"checksums.txt", rpm, deb, "provenance.sigstore.json"}, false)
+		Expect(err).NotTo(HaveOccurred(), out)
+		Expect(out).To(ContainSubstring("All 2 files in checksums.txt are assets of the draft"))
+	})
+
+	// The #603 failure itself: checksums.txt names the tilde form, and GitHub
+	// published the dotted one.
+	It("refuses when a listed file is not an asset, and names it", func() {
+		writeChecksums("openvox-ca_9.9.9~rc1-1_amd64.deb", rpm)
+		out, err := runReleaseReadBack(dir, []string{"checksums.txt", rpm, deb}, false)
+		Expect(err).To(HaveOccurred(), out)
+		Expect(out).To(ContainSubstring("checksums.txt names files the release does not have"))
+		Expect(out).To(ContainSubstring("In checksums.txt but not uploaded:\nopenvox-ca_9.9.9~rc1-1_amd64.deb\n"))
+	})
+
+	It("refuses an empty checksums.txt rather than passing it vacuously", func() {
+		writeChecksums()
+		out, err := runReleaseReadBack(dir, []string{deb, rpm}, false)
+		Expect(err).To(HaveOccurred(), out)
+		Expect(out).To(ContainSubstring("checksums.txt lists no files"))
+	})
+
+	// pipefail: without it the failed gh is masked by sort, the asset list is
+	// empty, and the step fails for a misleading reason -- or, were the
+	// comparison ever inverted, passes.
+	It("stops when gh fails, before comparing anything", func() {
+		writeChecksums(deb, rpm)
+		out, err := runReleaseReadBack(dir, []string{deb, rpm}, true)
+		Expect(err).To(HaveOccurred(), out)
+		Expect(out).NotTo(ContainSubstring("names files the release does not have"))
+		Expect(out).NotTo(ContainSubstring("are assets of the draft"))
+	})
+})
+
 var _ = Describe("verifyDevCheckWiring", func() {
 	// A guard's doc comment saying dev:check runs it is not evidence that it
 	// does. verifyReleaseJobConfinement claimed it twice and was called
@@ -3858,6 +4208,33 @@ var _ = Describe("buildVariantPackages", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rpm.Header.GetString(rpmutils.VERSION)).To(Equal("9.9.9~rc1"))
 			Expect(rpm.Header.GetString(rpmutils.RELEASE)).To(Equal("1"))
+		})
+
+		// The join between the two halves of #603's fix: what this function
+		// writes, put through the rename release.yml actually runs, comes out
+		// under the names GitHub keeps, with the bytes unchanged.
+		It("is published under a dotted name by release.yml's rename", func() {
+			written, err := buildVariantPackages(distDir, pre, variant)
+			Expect(err).NotTo(HaveOccurred())
+			before := map[string][]byte{}
+			for _, p := range written {
+				before[strings.ReplaceAll(filepath.Base(p), "~", ".")], err = os.ReadFile(p)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			out, err := runReleaseRename(distDir)
+			Expect(err).NotTo(HaveOccurred(), out)
+
+			Expect(before).To(HaveKey("openvox-ca_9.9.9.rc1-1_amd64.deb"))
+			Expect(before).To(HaveKey("openvox-ca-9.9.9.rc1-1.x86_64.rpm"))
+			for name, data := range before {
+				Expect(os.ReadFile(filepath.Join(distDir, name))).To(Equal(data), name)
+			}
+			for _, p := range written {
+				Expect(p).NotTo(BeAnExistingFile())
+			}
+			// The tarball has no tilde and is not touched.
+			Expect(filepath.Join(distDir, distArchiveName(pre, variant.name))).To(BeAnExistingFile())
 		})
 	})
 
