@@ -25,11 +25,11 @@ fails the gate instead of shipping mislabelled artefacts.
 | `openvox-ca_X.Y.Z_linux_amd64_fips.tar.gz` | `mage build:distVariant` (`GOEXPERIMENT=boringcrypto`) | GitHub release assets |
 | `openvox-ca_X.Y.Z_linux_arm64_fips.tar.gz` | `mage build:distVariant` (`GOEXPERIMENT=boringcrypto`) | GitHub release assets |
 | `openvox-ca_X.Y.Z_<variant>.spdx.json` / `.cdx.json` | Syft, via [`generate-sbom`](../../.github/actions/generate-sbom/action.yml) (one pair per variant) | GitHub release assets |
-| `openvox-ca_X.Y.Z_<arch>.deb` (one per non-FIPS variant) | `mage build:packages` (Release workflow, packaging job) | GitHub release assets |
-| `openvox-ca-X.Y.Z-<release>.<arch>.rpm` (one per non-FIPS variant) | `mage build:packages` (Release workflow, packaging job) | GitHub release assets |
+| `openvox-ca_X.Y.Z-1_<arch>.deb` (one per non-FIPS variant; a pre-release's name differs, see [packages](#packages)) | `mage build:packages` (Release workflow, packaging job) | GitHub release assets |
+| `openvox-ca-X.Y.Z-<release>.<arch>.rpm` (one per non-FIPS variant; likewise) | `mage build:packages` (Release workflow, packaging job) | GitHub release assets |
 | `checksums.txt` (SHA-256, covers the tarballs, the SBOMs and the packages) | Release workflow (`sha256sum` aggregate step) | GitHub release assets |
 | `provenance.sigstore.json` | `actions/attest`, over every line of `checksums.txt` | GitHub release assets |
-| GitHub release + auto-generated notes | `gh release create --generate-notes` | Releases page |
+| GitHub release + auto-generated notes | `gh release create --draft --generate-notes`, then `gh release edit --draft=false` once the asset names are checked | Releases page |
 | `ghcr.io/voxpupuli/openvox-ca:{X.Y.Z,X.Y,latest}` | *Container images* workflow | GHCR |
 | `…:{X.Y.Z,X.Y,latest}-alpine` | *Container images* workflow | GHCR |
 | `ghcr.io/voxpupuli/openvox-ca-charts/openvox-ca:X.Y.Z` | *Helm chart* workflow | GHCR (OCI, separate package) |
@@ -65,6 +65,17 @@ inside `openvox-ca_X.Y.Z_linux_amd64.tar.gz`. What follows from that:
   `openvox-ca_X.Y.Z_linux_amd64.spdx.json`. The rpm and deb architecture
   spellings are the ones each format uses natively — `x86_64`/`aarch64` for
   rpm, `amd64`/`arm64` for deb — and neither is the variant name.
+- **A pre-release's package has two filenames.** nfpm writes `1.0.0-beta1` as
+  `1.0.0~beta1`, in the package's version (which is what sorts it before
+  `1.0.0` in dpkg and rpm) and in its filename. `mage build:packages` and the
+  Release workflow's package job keep that filename, because a repository
+  that ingests the packages expects nfpm's own names. GitHub renames a release
+  asset with a `~` in it, so the release job swaps the tilde for a dot before
+  it generates `checksums.txt`: the asset, its `checksums.txt` line and its
+  attestation subject are all `openvox-ca_1.0.0.beta1-1_amd64.deb`. The
+  attestation still verifies the tilde-named file from `dist/`, because it
+  matches by digest. `mage build:packages` refuses any other character GitHub
+  might rename, and the release job checks the asset names before publishing.
 - **The packages are attested with no extra step.** They are listed in
   `checksums.txt`, and the attestation's subjects are exactly that file's
   lines, so they acquire the same SLSA provenance the tarballs have.
@@ -115,7 +126,7 @@ never name an image that does not exist.
 
 | Workflow | File | What it does on a `v*` tag |
 | --- | --- | --- |
-| **Release** | [`release.yml`](../../.github/workflows/release.yml) | Verifies the tag equals `"v" +` the `internal/version` constant, builds each variant on a runner native to its architecture (`mage build:distVariant`, no cross toolchain), verifies each built artefact (binaries execute, FIPS variants carry boringcrypto build info), generates each variant's SBOM pair, packages the non-FIPS variants as `.deb` and `.rpm` on a single runner, then aggregates the lot, generates `checksums.txt`, attests provenance over everything it lists, and runs `gh release create` |
+| **Release** | [`release.yml`](../../.github/workflows/release.yml) | Verifies the tag equals `"v" +` the `internal/version` constant, builds each variant on a runner native to its architecture (`mage build:distVariant`, no cross toolchain), verifies each built artefact (binaries execute, FIPS variants carry boringcrypto build info), generates each variant's SBOM pair, packages the non-FIPS variants as `.deb` and `.rpm` on a single runner, then aggregates the lot, generates `checksums.txt`, attests provenance over everything it lists, creates the GitHub release as a draft, checks that every name in `checksums.txt` is one of its assets, and only then publishes it |
 | **Container images** | [`container-images.yml`](../../.github/workflows/container-images.yml) | After the same verify gate, builds both image variants on native amd64 and arm64 runners, attests provenance and an SBOM pair per architecture, publishes multi-arch manifests, then attests and `cosign sign`s each published index. See [publishing container images](publishing-images.md) |
 | **Helm chart** | [`helm-chart.yml`](../../.github/workflows/helm-chart.yml) | After the same verify gate, packages `charts/openvox-ca`, waits for the tag's alpine image to appear, pushes the chart to `ghcr.io/voxpupuli/openvox-ca-charts` as an OCI artefact, attests and signs it against the digest the push reported, then pulls it back to prove the reference resolves |
 
@@ -252,6 +263,14 @@ Notes:
   making a real release.
 - `<commit-sha>` is optional; without it you tag `HEAD`, which is only correct
   if your local `main` is exactly `origin/main`. Being explicit is safer.
+- The Release workflow publishes the GitHub release only after checking that
+  every name in `checksums.txt` is one of its assets. Releases here are
+  immutable once published, so that is the last point at which an asset can
+  be corrected. If the check fails, the run stops with the release still a
+  draft: delete it with `gh release delete v0.9.0` (the tag stays), then fix
+  the cause. A re-run builds from the tagged commit, with that commit's
+  `release.yml` and `magefile.go`, so it fails the same way: the fix goes on
+  `main` and out in a new version and tag.
 - If you have the repository's git hooks installed (`lefthook install`), the
   pre-push hook runs the version-match checks locally — both the
   `internal/version` constant and the chart's `version`/`appVersion` — and
@@ -493,8 +512,15 @@ Worth checking specifically:
   Both binaries should be present and executable, the systemd unit should be
   there, and the version in the filename should be the rehearsal version. Note
   that nfpm rewrites a pre-release version for both formats — `0.9.0-test1`
-  becomes `0.9.0~test1`, which sorts *before* `0.9.0` as it should — so the
-  package filenames will not match the tarballs' character for character.
+  becomes `0.9.0~test1`, which sorts *before* `0.9.0` as it should — while the
+  downloaded filenames read `0.9.0.test1`, because the release job swaps the
+  tilde for a dot that GitHub keeps (see [packages](#packages)). Check the
+  version inside, not just the name:
+
+  ```console
+  $ dpkg-deb -f openvox-ca_*_amd64.deb Version
+  $ rpm -qp --qf '%{VERSION}-%{RELEASE}\n' openvox-ca-*.x86_64.rpm
+  ```
 
 - Each tarball contains both `openvox-ca` and `openvox-ca-ctl`, and both
   report the rehearsal version (with commit metadata) via `--version`.

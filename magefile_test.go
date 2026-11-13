@@ -3821,6 +3821,67 @@ var _ = Describe("buildVariantPackages", func() {
 		Expect(verifyPackagesWritten(written, 1)).To(Succeed())
 	})
 
+	// A pre-release is where the filename and the version part company with
+	// the tarball's spelling (#603), and both halves matter. The version must
+	// carry the tilde so that dpkg and rpm order it before the final release;
+	// the filename keeps it too, because a repository that ingests these
+	// packages expects nfpm's own names. Only release.yml renames it, for
+	// GitHub.
+	Context("for a pre-release version", func() {
+		const pre = "9.9.9-rc1"
+
+		BeforeEach(func() {
+			stageDistTarball(distDir, pre, variant)
+		})
+
+		It("keeps nfpm's tilde in both filenames", func() {
+			written, err := buildVariantPackages(distDir, pre, variant)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(written).To(ConsistOf(
+				filepath.Join(distDir, "openvox-ca_9.9.9~rc1-1_amd64.deb"),
+				filepath.Join(distDir, "openvox-ca-9.9.9~rc1-1.x86_64.rpm"),
+			))
+		})
+
+		It("writes a version that sorts before the final release", func() {
+			_, err := buildVariantPackages(distDir, pre, variant)
+			Expect(err).NotTo(HaveOccurred())
+
+			control, err := debControl(filepath.Join(distDir, "openvox-ca_9.9.9~rc1-1_amd64.deb"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(control["control"]).To(MatchRegexp(`(?m)^Version: 9\.9\.9~rc1-1$`))
+
+			f, err := os.Open(filepath.Join(distDir, "openvox-ca-9.9.9~rc1-1.x86_64.rpm"))
+			Expect(err).NotTo(HaveOccurred())
+			defer f.Close()
+			rpm, err := rpmutils.ReadRpm(f)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rpm.Header.GetString(rpmutils.VERSION)).To(Equal("9.9.9~rc1"))
+			Expect(rpm.Header.GetString(rpmutils.RELEASE)).To(Equal("1"))
+		})
+	})
+
+	// The tilde is the one character the release job maps for GitHub, so any
+	// other that GitHub would rename has to stop the build: published, its
+	// checksums.txt line would name a file the release does not have. `+`
+	// is the realistic case, from semver build metadata, which nfpm copies
+	// into the filename.
+	It("refuses a filename GitHub would rename, and writes nothing", func() {
+		const meta = "9.9.9+build1"
+		stageDistTarball(distDir, meta, variant)
+
+		written, err := buildVariantPackages(distDir, meta, variant)
+		Expect(err).To(MatchError(And(
+			ContainSubstring(`"openvox-ca_9.9.9+build1-1_amd64.deb"`),
+			ContainSubstring("maps only '~'"))))
+		Expect(written).To(BeEmpty())
+		entries, err := os.ReadDir(distDir)
+		Expect(err).NotTo(HaveOccurred())
+		for _, e := range entries {
+			Expect(e.Name()).NotTo(Or(HaveSuffix(".deb"), HaveSuffix(".rpm")))
+		}
+	})
+
 	Describe("the deb's payload", func() {
 		var (
 			modes    map[string]int64

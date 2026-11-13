@@ -3839,8 +3839,11 @@ func writeRenderedUnit(distDir, bindir string) (string, string, error) {
 // distVariantSpec.packaged.
 //
 // The filenames are nfpm's conventional ones, which is what apt and dnf
-// expect: openvox-ca_VER_amd64.deb, openvox-ca-VER-1.x86_64.rpm. They carry no
-// variant name, and nothing downstream should try to derive one from them.
+// expect: openvox-ca_VER-1_amd64.deb, openvox-ca-VER-1.x86_64.rpm. They carry no
+// variant name, and nothing downstream should try to derive one from them. A
+// pre-release keeps nfpm's tilde in the filename as well as the version
+// (openvox-ca_1.0.0~alpha1-1_amd64.deb); the GitHub release publishes it with a
+// dot instead -- see packageFileNameRE.
 func (Build) Packages() error {
 	return buildPackagesInto("dist")
 }
@@ -4033,7 +4036,11 @@ func buildVariantPackages(distDir, ver string, v distVariantSpec) ([]string, err
 				"provide it): %w", format, err)
 		}
 
-		out := filepath.Join(distDir, packager.ConventionalFileName(info))
+		name := packager.ConventionalFileName(info)
+		if err := checkPackageFileName(name); err != nil {
+			return nil, fmt.Errorf("%s for %s: %w", format, v.name, err)
+		}
+		out := filepath.Join(distDir, name)
 		f, err := os.Create(out)
 		if err != nil {
 			// Wrapped like every other error here. Bare, this surfaced as an
@@ -4064,6 +4071,33 @@ func buildVariantPackages(distDir, ver string, v distVariantSpec) ([]string, err
 		written = append(written, out)
 	}
 	return written, nil
+}
+
+// packageFileNameRE is every character a package filename may contain.
+//
+// GitHub renames a release asset whose name holds a character it considers
+// special, and checksums.txt then names a file the release does not have
+// (#603). nfpm writes one such character itself: a pre-release version
+// 1.0.0-alpha1 becomes 1.0.0~alpha1 in both the package and its filename, and
+// the tilde stays in the filename deliberately, because a repository that
+// ingests these packages expects nfpm's own names. release.yml's release job
+// renames ~ to . as it stages the GitHub assets, and that is the only mapping
+// it makes. So this allows the tilde and refuses anything else outside the
+// characters every published name already uses -- `+` from semver build
+// metadata, say -- here, on the pull request that sets the version, rather
+// than at tag time.
+var packageFileNameRE = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
+
+// checkPackageFileName refuses a package filename the release job could not
+// publish under a name checksums.txt agrees with. See packageFileNameRE.
+func checkPackageFileName(name string) error {
+	if packageFileNameRE.MatchString(name) {
+		return nil
+	}
+	return fmt.Errorf("refusing to write %q: a package filename may contain only letters, digits, "+
+		"'.', '_', '-' and '~'. GitHub renames release assets with other characters, and release.yml's "+
+		"release job maps only '~' (to '.'), so the published name would not match checksums.txt; "+
+		"choose a version without the character, or teach that job to map it", name)
 }
 
 // variantGOARCH recovers a variant's target architecture from its build
