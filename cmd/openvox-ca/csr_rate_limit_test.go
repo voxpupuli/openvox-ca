@@ -18,11 +18,18 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 // The CSR rate limit must honour the same "0 disables, unset uses the default"
@@ -100,5 +107,75 @@ var _ = Describe("CSR rate-limit resolution", func() {
 			Expect(cfg.CSRRateLimit).To(Equal(0))
 			Expect(resolveCSRRateLimit(cfg.CSRRateLimit)).To(Equal(0))
 		})
+	})
+})
+
+// The serve command wires the CSR limiter's refusals to
+// openvoxca_csr_rate_limited_total on the metrics exporter. Driven through the
+// command, since the wiring sits inline in the server start-up.
+var _ = Describe("the serve command's CSR rate-limited counter", func() {
+	var configPath, metricsAddr string
+
+	BeforeEach(func() {
+		// Ambient OPENVOX_CA_* would outrank the fixture config.
+		clearServerEnv()
+		caDir := GinkgoT().TempDir()
+		bootstrapCAInDir(caDir, "ca.example.com")
+		// The command points the default logger at logfile and leaves it
+		// there. Registered before the server starts, so the server is
+		// stopped before the logger is restored.
+		DeferCleanup(slog.SetDefault, slog.Default())
+
+		metricsAddr = fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort())
+		configPath = serveConfig(caDir, "", "127.0.0.1", freeLoopbackPort(), false)
+		appendConfig(configPath, fmt.Sprintf("metrics_listen: %s\nlogfile: %s\n",
+			metricsAddr, filepath.Join(GinkgoT().TempDir(), "server.log")))
+	})
+
+	put := func(addr string) int {
+		GinkgoHelper()
+		csrPEM, err := testutil.GenerateCSR("limited-node")
+		Expect(err).NotTo(HaveOccurred())
+		req, err := http.NewRequest(http.MethodPut,
+			"http://"+addr+"/puppet-ca/v1/certificate_request/limited-node", bytes.NewReader(csrPEM))
+		Expect(err).NotTo(HaveOccurred())
+		resp, err := plainClient().Do(req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Body.Close()).To(Succeed())
+		return resp.StatusCode
+	}
+
+	// Takes a Gomega so that Eventually retries a refused connection: the
+	// exporter binds in its own goroutine, unordered against READY=1.
+	scrape := func(g Gomega) string {
+		resp, err := plainClient().Get("http://" + metricsAddr + "/metrics")
+		g.Expect(err).NotTo(HaveOccurred())
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		g.Expect(err).NotTo(HaveOccurred())
+		return string(body)
+	}
+
+	It("counts a submission refused over --csr-rate-limit, and not the one allowed", func() {
+		addr := startServe(configPath, "--csr-rate-limit=1")
+
+		Expect(put(addr)).NotTo(Equal(http.StatusTooManyRequests),
+			"precondition: the first submission is within the limit")
+		Expect(put(addr)).To(Equal(http.StatusTooManyRequests))
+
+		Eventually(scrape).Should(ContainSubstring("\nopenvoxca_csr_rate_limited_total 1\n"))
+	})
+
+	// Exported at 0 rather than absent, so the series is there for a query
+	// before the first refusal, and the spec fails if nothing is wired.
+	It("exports the counter at 0 when csr_rate_limit is 0, whatever is submitted", func() {
+		appendConfig(configPath, "csr_rate_limit: 0\n")
+		addr := startServe(configPath)
+
+		for range 3 {
+			Expect(put(addr)).NotTo(Equal(http.StatusTooManyRequests))
+		}
+
+		Eventually(scrape).Should(ContainSubstring("\nopenvoxca_csr_rate_limited_total 0\n"))
 	})
 })
