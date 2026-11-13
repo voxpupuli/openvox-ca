@@ -21,9 +21,13 @@
 #     last_error series to match on — so the cases below pin which rule owns
 #     which shape, that neither double-pages for the other's, and that a CA not
 #     using the feature at all stays silent under both.
-#   * OpenVoxCAOCSPIndexSyncFailing, whose `increase(...)` over the window stays
-#     true for the whole window after a single failure — so its `for:` delays
-#     the page and then extends it, rather than filtering a transient.
+#   * The three storage-retry rules, OpenVoxCACRLSyncFailing,
+#     OpenVoxCAOCSPIndexSyncFailing and OpenVoxCACRLUpdateFailing, which count
+#     failures against a threshold rather than firing on the first (#596). The
+#     cases pin both sides: one failure from a backend restart stays silent for
+#     the whole window, and a fault that fails every pass still fires, at the
+#     sync interval each one actually runs on. They also pin the window, since
+#     one too short to hold the threshold flaps or never fires at all.
 #   * OpenVoxCASupersedeFailing, where what needs pinning is the debounce: it is
 #     deliberately slower than its neighbours because the sweep retries on its
 #     own interval, so a case asserts it is quiet at 20m and firing at 40m.
@@ -139,11 +143,14 @@ tests:
         alertname: OpenVoxCACRLStale
         exp_alerts: []
 
-  # The sync-failure warning is a plain increase() over a restart-resetting
-  # counter, but it is meant to lead the page above: crlSyncFor (5m) is shorter
-  # than crlLagFor (10m), so at 8m the warning is firing and the critical is not.
+  # The case the sync-failure warning exists for: a replica holding a rotated
+  # CA certificate fails every pass until it restarts. The warning is meant to
+  # lead the page above, so at 8m the warning is firing and the critical is
+  # not. The threshold (3 in 10m) is crossed at 3m and the dwell (2m) runs out
+  # at 5m: quiet at 4m and firing at 6m, which pins that the threshold did not
+  # push the warning past the lag page it explains.
   - interval: 1m
-    name: sync failures warn before the lag pages
+    name: sync failures on every pass warn before the lag pages
     input_series:
       - series: 'openvoxca_crl_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
         values: "0 1+1x30"
@@ -154,18 +161,105 @@ tests:
       - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
         values: "1+0x30"
     alert_rule_test:
-      - eval_time: 8m
+      - eval_time: 4m
         alertname: OpenVoxCACRLSyncFailing
-        exp_alerts:
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: &crlSyncFiring
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
               summary: "OpenVox CA cannot reload its CRL from storage."
-              description: "The OpenVox CA on ca-1:9140 could not reload the stored CRL (openvoxca_crl_sync_failures_total is rising), so it is enforcing whichever CRL it already held. A certificate revoked on another replica may still be accepted here. Check CRL storage, and whether the CA certificate was replaced without restarting this replica."
+              description: "The OpenVox CA on ca-1:9140 could not reload the stored CRL 3 or more times in 10m (openvoxca_crl_sync_failures_total), so it is enforcing whichever CRL it already held; a single failure during a backend restart does not fire this. A certificate revoked on another replica may still be accepted here. Check CRL storage, and whether the CA certificate was replaced without restarting this replica."
+      - eval_time: 8m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: *crlSyncFiring
       - eval_time: 8m
         alertname: OpenVoxCACRLStale
+        exp_alerts: []
+
+  # One failed pass and then success: what a backend restart costs. Before
+  # #596 this held the warning for the whole hour-long window. Asserted across
+  # the span the old rule fired for, so a rule that latches on one failure
+  # fails here at every point.
+  - interval: 1m
+    name: one failed CRL sync during a backend restart does not warn
+    input_series:
+      - series: 'openvoxca_crl_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0 1+0x60"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x60"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: []
+
+  # Two failed passes in a row, a restart slow enough to span a sync, is still
+  # a transient. This is what pins the threshold above two.
+  - interval: 1m
+    name: two consecutive failed CRL syncs do not warn
+    input_series:
+      - series: 'openvoxca_crl_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0 1 2+0x60"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x60"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: []
+
+  # Exactly the threshold: three failed passes, then recovery. The cases above
+  # all rise past three within a minute of each other or stop short of it, so
+  # a `>` in place of `>=`, a threshold of four or a window of three minutes
+  # would still satisfy every firing assertion in them, and only the
+  # description text, which interpolates the knobs, would notice. This one
+  # notices by behaviour. Three failures at 1, 2 and 3m cross the threshold at
+  # 3m, the dwell runs out at 5m, and the 1m failure leaves the window at 10m:
+  # firing at 7m and quiet at 12m. Each of those three mutants is quiet at 7m.
+  - interval: 1m
+    name: three failed CRL syncs then recovery warns
+    input_series:
+      - series: 'openvoxca_crl_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0 1 2 3+0x30"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x33"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: *crlSyncFiring
+      - eval_time: 12m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: []
+
+  # A fault that fails for ten passes and then recovers. Firing while it lasts,
+  # and quiet again once the window has rolled past the last failure: that
+  # second half is what pins crlSyncWindow short, since a window of an hour
+  # would pass every other case here and hold this one for most of it.
+  - interval: 1m
+    name: CRL sync warning clears once the window passes the fault
+    input_series:
+      - series: 'openvoxca_crl_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0 1+1x9 10+0x40"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x50"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: *crlSyncFiring
+      - eval_time: 25m
+        alertname: OpenVoxCACRLSyncFailing
         exp_alerts: []
 
   # --- Kubernetes export ---
@@ -697,62 +791,76 @@ tests:
               summary: "A Kubernetes export target has never been attempted."
               description: "The OpenVox CA on ca-1:9140 has Secret/trust in namespace pki configured for export but has not attempted a single apply in 30m. The exported object holds whatever it held before, and OpenVoxCAKubernetesExportFailing cannot report on a target with no apply results. Check the CA logs for the Kubernetes export job starting, and for errors initialising the in-cluster client."
 
-  # The OCSP index sync failure warning. Its dwell (ocspIndexSyncFor, 15m) is
-  # deliberately longer than the CRL one's, because a missed inventory read is
-  # not fail-open and a single transient failure should not page — so this
-  # checks both sides of that: quiet at 8m, firing at 20m.
+  # The OCSP index sync runs every ocsp_index_sync_interval_sec (5m by
+  # default), so these series step every fifth sample rather than every one: a
+  # rule sized against a counter that rises every minute would pass here and
+  # never fire on a real CA. A fault from 5m onwards fails at 5, 10 and 15m,
+  # crossing the threshold (3 in 30m) at 15m; the dwell (5m) puts the warning
+  # at 20m. Quiet at 18m and firing at 22m pins both, and quiet again at 60m,
+  # thirty minutes after the last failure, pins the window: one of an hour
+  # would still be firing.
   - interval: 1m
-    name: OCSP index sync failures page only after the longer dwell
+    name: OCSP index sync failing every pass warns after the threshold and dwell
     input_series:
       - series: 'openvoxca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
-        values: "0 1+1x40"
+        values: "0x4 1x4 2x4 3x4 4x4 5x4 6+0x40"
       - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
-        values: "1+0x40"
+        values: "1+0x70"
     alert_rule_test:
-      - eval_time: 8m
+      - eval_time: 18m
         alertname: OpenVoxCAOCSPIndexSyncFailing
         exp_alerts: []
-      - eval_time: 20m
+      - eval_time: 22m
         alertname: OpenVoxCAOCSPIndexSyncFailing
-        exp_alerts:
+        exp_alerts: &ocspIndexSyncFiring
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
               summary: "OpenVox CA cannot reload its OCSP serial index from storage."
-              description: "The OpenVox CA on ca-1:9140 could not reload the inventory into its OCSP serial index (openvoxca_ocsp_index_sync_failures_total is rising), so it is answering \"unknown\" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch."
+              description: "The OpenVox CA on ca-1:9140 could not reload the inventory into its OCSP serial index 3 or more times in 30m (openvoxca_ocsp_index_sync_failures_total), so it is answering \"unknown\" for certificates its peers have signed since the last successful pass; a single failure during a backend restart does not fire this. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch."
+      - eval_time: 40m
+        alertname: OpenVoxCAOCSPIndexSyncFailing
+        exp_alerts: *ocspIndexSyncFiring
+      - eval_time: 60m
+        alertname: OpenVoxCAOCSPIndexSyncFailing
+        exp_alerts: []
 
-  # One failure and then nothing: the alert still fires, because increase() over
-  # the window stays true until the window rolls past the step. This pins the
-  # latching behaviour the config comment describes — a `for` cannot debounce
-  # this expression, and a reader who assumed it could would size the knobs
-  # wrongly. It is also the only case that constrains ocspIndexSyncWindow at all
-  # — case 1's counter rises every step, so any window over a couple of minutes
-  # satisfies it. The single step is at t=0 and the assertion is at t=35m, so
-  # increase() sees it only while the window exceeds 35m: any value of 35m or
-  # less fails here.
+  # One failed pass and then success: what a backend restart costs. Before
+  # #596 the rule latched on this for the whole hour-long window, and the
+  # assertions sit where it used to be firing.
   - interval: 1m
-    name: OCSP index sync latches after a single failure
+    name: one failed OCSP index sync during a backend restart does not warn
     input_series:
       - series: 'openvoxca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
-        values: "0 1+0x40"
+        values: "0x4 1+0x60"
       - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
-        values: "1+0x40"
+        values: "1+0x65"
     alert_rule_test:
-      - eval_time: 8m
+      - eval_time: 20m
         alertname: OpenVoxCAOCSPIndexSyncFailing
         exp_alerts: []
       - eval_time: 35m
         alertname: OpenVoxCAOCSPIndexSyncFailing
-        exp_alerts:
-          - exp_labels:
-              severity: warning
-              job: openvox-ca
-              instance: ca-1:9140
-            exp_annotations:
-              summary: "OpenVox CA cannot reload its OCSP serial index from storage."
-              description: "The OpenVox CA on ca-1:9140 could not reload the inventory into its OCSP serial index (openvoxca_ocsp_index_sync_failures_total is rising), so it is answering \"unknown\" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch."
+        exp_alerts: []
+
+  # Two consecutive failed passes, a ten-minute backend outage, is still a
+  # transient. This is what pins the threshold above two.
+  - interval: 1m
+    name: two consecutive failed OCSP index syncs do not warn
+    input_series:
+      - series: 'openvoxca_ocsp_index_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0x4 1x4 2+0x60"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x70"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: OpenVoxCAOCSPIndexSyncFailing
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: OpenVoxCAOCSPIndexSyncFailing
+        exp_alerts: []
 
   # A replica whose index reads are all succeeding must not appear, or the rule
   # would page on every healthy CA in the fleet.
@@ -802,40 +910,90 @@ tests:
         alertname: OpenVoxCACRLUpdateFailing
         exp_alerts: []
 
-  # OpenVoxCACRLUpdateFailing. Its expression is a plain increase() and needs no
-  # pinning, but this branch rewrote its description — it quotes CA log lines,
-  # and the renaming of "failed to revoke replaced certificate" to "failed to
-  # retire replaced certificate" had to be propagated here. A test over the
-  # annotation is what stops the next rename leaving the runbook pointing at a
-  # string the code no longer emits, which is silent: the alert still fires,
-  # and the operator greps for nothing.
+  # OpenVoxCACRLUpdateFailing on a CA that revokes nothing and whose CRL
+  # storage stays broken. Amendments have no cycle of their own, but the CRL
+  # refresh job reads the stored CRL on every pass (hourly by default) and
+  # counts the failure, so this series steps once an hour: at 10m, 70m and
+  # 130m. The second step crosses the threshold (2 in 3h) and the dwell (15m)
+  # runs out at 85m, so quiet at 80m and firing at 90m.
   #
-  # Debounced for 15m, so quiet at 10m and firing at 20m.
+  # Firing at 135m is what pins the window at three intervals rather than two.
+  # A 2h window loses the 10m step just before the 130m one lands, the rule
+  # resolves for a pass, and its 15m dwell starts again from zero: the flap
+  # crlChainWindow's comment describes.
+  #
+  # The description is pinned too: it quotes CA log lines, and a renamed log
+  # line would leave the runbook pointing at a string the code no longer emits,
+  # which is silent — the alert still fires, and the operator greps for nothing.
   - interval: 1m
-    name: CRL update failures warn once debounced
+    name: CRL update failing on every refresh pass warns by the second pass
     input_series:
       - series: 'openvoxca_crl_update_failures_total{job="openvox-ca",instance="ca-1:9140"}'
-        values: "0 1+1x40"
+        values: "0x9 1x59 2x59 3x59"
       - series: 'openvoxca_supersede_failures_total{job="openvox-ca",instance="ca-1:9140"}'
-        values: "0+0x40"
+        values: "0+0x190"
       - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
-        values: "1+0x40"
+        values: "1+0x190"
     alert_rule_test:
-      - eval_time: 10m
+      - eval_time: 80m
         alertname: OpenVoxCACRLUpdateFailing
         exp_alerts: []
-      - eval_time: 20m
+      - eval_time: 90m
         alertname: OpenVoxCACRLUpdateFailing
-        exp_alerts:
+        exp_alerts: &crlUpdateFiring
           - exp_labels:
               severity: warning
               job: openvox-ca
               instance: ca-1:9140
             exp_annotations:
               summary: "OpenVox CA is failing to update its CRL."
-              description: "The OpenVox CA on ca-1:9140 could not amend its CRL (openvoxca_crl_update_failures_total is rising). Revocations may not have taken effect and superseded certificates may still be valid. Check the CA logs to tell the causes apart: \"Renew:\"/\"AutoRenew:\"/\"ReconcileManaged: failed to retire replaced certificate\"/\"Clean:\" warnings are a real failure to maintain the CRL, and on filesystem or SQLite a \"Revoke failed\" warning on a request that took over a minute is instead a revocation that merely queued too long for its subject lock. The superseded-certificate sweep re-signs once per pass rather than once per due entry, so a failing sweep moves this counter once however many certificates were due: read a rising value as a count of failed CRL amendments, not of certificates left unrevoked, and use openvoxca_supersede_pending for those. Then check CRL storage."
-      - eval_time: 20m
+              description: "The OpenVox CA on ca-1:9140 could not amend its CRL 2 or more times in 3h (openvoxca_crl_update_failures_total); a single failure during a backend restart does not fire this. Revocations may not have taken effect and superseded certificates may still be valid. Check the CA logs to tell the causes apart: \"Renew:\"/\"AutoRenew:\"/\"ReconcileManaged: failed to retire replaced certificate\"/\"Clean:\" warnings are a real failure to maintain the CRL, and on filesystem or SQLite a \"Revoke failed\" warning on a request that took over a minute is instead a revocation that merely queued too long for its subject lock. The superseded-certificate sweep re-signs once per pass rather than once per due entry, so a failing sweep moves this counter once however many certificates were due: read a rising value as a count of failed CRL amendments, not of certificates left unrevoked, and use openvoxca_supersede_pending for those. Then check CRL storage."
+      - eval_time: 135m
+        alertname: OpenVoxCACRLUpdateFailing
+        exp_alerts: *crlUpdateFiring
+      - eval_time: 90m
         alertname: OpenVoxCASupersedeFailing
+        exp_alerts: []
+
+  # Two failed refresh passes, at 10m and 70m, and then recovery. The threshold
+  # is crossed at 70m and the warning fires at 85m. It clears once the window
+  # has rolled past the 10m step: the last sample before it is at 9m, so a 3h
+  # window holds both steps until 189m. Firing at 120m and quiet at 195m pins
+  # crlUpdateWindow from above by behaviour, as the CRL sync and OCSP cases do
+  # for theirs: a window of 4h or more would still be firing at 195m, and
+  # without this case only the description text, which interpolates the knob,
+  # would notice.
+  - interval: 1m
+    name: CRL update warning clears once the window passes the failures
+    input_series:
+      - series: 'openvoxca_crl_update_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0x9 1x59 2+0x200"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x270"
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: OpenVoxCACRLUpdateFailing
+        exp_alerts: *crlUpdateFiring
+      - eval_time: 195m
+        alertname: OpenVoxCACRLUpdateFailing
+        exp_alerts: []
+
+  # One failed amendment and then success: a backend restart that caught one
+  # refresh pass, or one sweep. Before #596 this warned for most of an hour;
+  # now it stays silent for the whole window.
+  - interval: 1m
+    name: one failed CRL update during a backend restart does not warn
+    input_series:
+      - series: 'openvoxca_crl_update_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0x9 1+0x200"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x210"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenVoxCACRLUpdateFailing
+        exp_alerts: []
+      - eval_time: 150m
+        alertname: OpenVoxCACRLUpdateFailing
         exp_alerts: []
 
   # --- Upstream CRL chain ---

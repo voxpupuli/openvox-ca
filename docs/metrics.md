@@ -196,7 +196,9 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > budget behind another goroutine *in this process* on the single-node backends,
 > which reach the read with the deadline already gone; see
 > [revocation cost](api.md#certificate-status). So a queued revocation is a
-> benign cause of this alert on filesystem and SQLite. A wait for another
+> benign cause of this alert on filesystem and SQLite, once a second failure
+> lands within its window (see [storage-retry alerts](#storage-retry-alerts)).
+> A wait for another
 > *process* on the host is refused at acquisition instead and never reaches the
 > read, so it does not move this counter — see the uncounted list below. The
 > revoke path is the shared revoke-by-serial code, so it also covers
@@ -416,8 +418,9 @@ A replica reading *above* the others is not a fault: a pass that overlaps a
 local issuance defers its removals, so pruned serials linger an interval or two.
 
 `openvoxca_ocsp_index_sync_failures_total` has a shipped alert
-(`OpenVoxCAOCSPIndexSyncFailing`); the fleet-relative gauge comparison above does
-not, and has to be added by hand if you want it.
+(`OpenVoxCAOCSPIndexSyncFailing`), which needs several failed passes rather than
+one — see [storage-retry alerts](#storage-retry-alerts). The fleet-relative
+gauge comparison above has none, and has to be added by hand if you want it.
 
 ### Delayed supersession
 
@@ -776,3 +779,58 @@ all with configurable thresholds. It does **not**
 alert on the fleet-relative `openvoxca_ocsp_index_serials` comparison — that one
 is left to the operator, since it needs a `by (job)` aggregation to avoid
 fanning in across unrelated CAs and the condition it catches is not fail-open.
+
+### Storage-retry alerts
+
+Three of those rules watch background jobs that retry on their own:
+`OpenVoxCACRLSyncFailing` (`openvoxca_crl_sync_failures_total`),
+`OpenVoxCAOCSPIndexSyncFailing` (`openvoxca_ocsp_index_sync_failures_total`)
+and `OpenVoxCACRLUpdateFailing` (`openvoxca_crl_update_failures_total`). A
+backend that restarts — a PostgreSQL failover or a node drain — fails one pass,
+and the next pass repairs it. So none of the three fires on a single failure.
+Each counts failures over a window against a threshold, and at the mixin's
+defaults:
+
+| Alert | Fires on | A fault on every pass fires after |
+| --- | --- | --- |
+| `OpenVoxCACRLSyncFailing` | 3 failed reloads in 10 minutes | about 5 minutes |
+| `OpenVoxCAOCSPIndexSyncFailing` | 3 failed passes in 30 minutes | 15 to 20 minutes |
+| `OpenVoxCACRLUpdateFailing` | 2 failed amendments in 3 hours | for an unreadable CRL, at most about 2¼ hours on a CA revoking nothing, sooner on a busy one |
+
+The CRL sync and OCSP index sync run on fixed intervals (`crl_sync_interval_sec`,
+`ocsp_index_sync_interval_sec`). CRL amendments have no cycle of their own, but
+the CRL refresh job takes the CRL lock and reads the stored CRL on every replica
+on every pass (`crl_refresh_interval_sec`, hourly by default), so a CRL that
+cannot be read, or whose lock cannot be taken, counts at least once an hour. It
+signs and writes only when the CRL is due for re-signing (a third of its
+validity, about every 20 days at the defaults), so a CRL that reads but cannot
+be signed or written — a full disk, a signer that is down — counts only when
+the CA tries to amend it. With `disable_crl_refresh` set there is no refresh
+pass at all, so every CRL fault counts only that way, and a quiet CA can go
+unreported until something is revoked. Each window holds at least one interval
+more than its threshold. **Lengthening one of those intervals without widening the
+matching window leaves its alert unable to fire at all** — see the knob table in
+the [mixin README](https://github.com/voxpupuli/openvox-ca/tree/main/mixin#configurable-thresholds).
+
+Two failures is enough margin for the CRL-update alert because a restart only
+counts there when it breaks an amendment or a refresh pass in flight, which is
+rare, whereas the two syncs fail on nearly every restart. With
+[`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) set it is
+narrower: the upstream chain refresh takes the same lock, reads the same CRL and
+counts its failures into the same counter on its own hourly pass, started
+alongside the CRL refresh, so a restart that overlaps both passes counts two and
+fires. To keep those silent, set the mixin's `crlUpdateThreshold` to `3` and
+`crlUpdateWindow` to `4h`.
+
+One failure the CA does not retry falls below the CRL-update threshold: a
+best-effort revocation, which the CA logs and abandons rather than returning an
+error. That is the revocation in a clean, and the immediate revocation of a
+certificate that a renewal replaced (where `superseded_cert_revoke_after_sec`
+is `0`) or that a managed certificate's reissue replaced (where its effective
+`revoke_after` is `0`). A failure leaves the certificate valid, and if it is
+the only one in the window — a transient fault, or a sign- or write-only fault
+on a CA that is otherwise quiet — only its log warning reports it. See the note
+under [CRL](#crl) for the lines to grep for. With an overlap window the
+revocation is on the pending list instead, and `OpenVoxCASupersedeFailing`
+still fires on a single failure. A revocation an operator asked for is not
+abandoned: it fails with an error to the caller.
