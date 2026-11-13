@@ -78,9 +78,10 @@ def respond(conn, behaviour):
         time.sleep(STALL_SECONDS)
     elif behaviour == "truncate":
         # Claim the full length, send half, hang up.  curl notices the short
-        # read and exits 18 ("transfer closed with N bytes remaining"), while
-        # a server-side log would record a normal 200 -- exactly the pair of
-        # observations in #208.
+        # read and exits 18 (CURLE_PARTIAL_FILE), while a server-side log
+        # would record a normal 200 -- exactly the pair of observations in
+        # #208.  The suite asserts on that exit status, not on curl's message
+        # for it, which newer curl reworded (#606).
         conn.sendall(raw[: len(raw) // 2])
     else:
         conn.sendall(raw)
