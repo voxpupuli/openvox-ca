@@ -687,6 +687,30 @@ last successful apply. (Alert coverage would survive it — a never-succeeded
 target still trips the `last_error > last_success` arm against a zero — but the
 `unless` arm would become dead code and every derived query would lie.)
 
+### File export
+
+Only present when [file export](file-export.md) targets are configured. Two
+`syncs_total` series per configured target, published at zero before the
+first sync, plus up to one of each timestamp gauge; cardinality is bounded by
+the configuration.
+
+| Metric | Labels | Description |
+| --- | --- | --- |
+| `openvoxca_file_export_syncs_total` | `path`, `result` | Sync attempts per target; `result` is `success` or `error`. A success means the file was confirmed to hold the current material, whether or not it had to be rewritten. |
+| `openvoxca_file_export_last_success_timestamp_seconds` | `path` | Time each target was last confirmed current. |
+| `openvoxca_file_export_last_error_timestamp_seconds` | `path` | Time of the last failed sync for each target. |
+
+Unlike the Kubernetes export, syncs run on a fixed interval
+(`file_export.interval_sec`, 60s by default), so a staleness threshold on
+`last_success` is the right shape here rather than a comparison of the two
+timestamps: `time() - openvoxca_file_export_last_success_timestamp_seconds` is
+how long the file may have been out of date. It also covers a write that never
+returns, which records no error at all. The mixin's `OpenVoxCAFileExportStale`
+alerts on it, and on a target with `syncs_total` but no `last_success`, which
+has never succeeded since the CA started. The timestamp gauges are left absent
+until something happens, for the reason given for the Kubernetes export's
+above.
+
 ## Example queries
 
 ```promql
@@ -713,6 +737,14 @@ openvoxca_k8s_export_last_error_timestamp_seconds
 sum without (result) (
   openvoxca_k8s_export_applies_total
 ) == 0
+
+# File export targets not confirmed current in the last ten minutes, or never
+time() - openvoxca_file_export_last_success_timestamp_seconds > 600
+or
+(
+  sum without (result) (openvoxca_file_export_syncs_total)
+    unless openvoxca_file_export_last_success_timestamp_seconds
+)
 
 # Export targets that keep needing a retry to succeed. No shipped alert covers
 # this: the CA retries a failed cycle after two minutes, well inside the
@@ -771,7 +803,8 @@ rolled back, one removed — plus a file that has never been read at all),
 [client trust domains](#client-trust-domains) whose revocation material has gone
 unusable or stale (`OpenVoxCAClientCRLUnusable`, `OpenVoxCAClientCRLRefusals` and
 `OpenVoxCAClientCRLStale`, and only where `client_ca` is configured), and
-Kubernetes export failures and managed certificates that were never issued —
+Kubernetes export failures, file export targets that have gone stale
+(`OpenVoxCAFileExportStale`), and managed certificates that were never issued —
 all with configurable thresholds. It does **not**
 alert on the fleet-relative `openvoxca_ocsp_index_serials` comparison — that one
 is left to the operator, since it needs a `by (job)` aggregation to avoid

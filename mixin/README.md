@@ -92,6 +92,10 @@ alerting rules for the openvox-ca exporter. It alerts on:
 - **Kubernetes export** targets whose applies keep failing, and targets that are
   configured but never attempted at all (only when the
   [Kubernetes export](../docs/kubernetes-export.md) feature is in use).
+- **File export** targets that have not been confirmed current for more than
+  ten minutes, or have never succeeded since the CA started (only when the
+  [file export](../docs/file-export.md) feature is in use). One alert covers
+  failed writes, failed storage reads and a write that never returns.
 - **Managed certificates** with no usable certificate — never issued at all, or
   holding only revoked ones (only when
   [`managed_certs`](../docs/configuration.md#managed-certificates) or
@@ -206,6 +210,8 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `crlLagFor` | `10m` | How long a replica may keep enforcing a CRL behind the stored one before it is paged on. Raise it if you have raised `crl_sync_interval_sec`. |
 | `k8sExportNotRunningFor` | `30m` | How long a configured export target may go with no apply attempt at all before alerting. Only has to outlast a slow start: the counters reset on restart and the startup export runs immediately. |
 | `k8sExportFailingFor` | `15m` | How long a target's most recent apply may stay failed before alerting. Keep it above the CA's export retry interval, a compile-time constant of two minutes: below that, every blip the retry would have cleared by itself pages. It cannot reach a target that fails once and succeeds on retry every cycle — see [metrics](../docs/metrics.md) for the query that can. |
+| `fileExportStaleAfterSeconds` | 600 (10 minutes) | How long a file export target may go without a sync that confirms it current before `OpenVoxCAFileExportStale` counts it stale. The CA syncs every `file_export.interval_sec` (60s by default, at most 300s), so keep this at least twice that ceiling; a spec in `internal/fileexport` fails if it drops below. |
+| `fileExportStaleFor` | `5m` | `for:` dwell on top of the threshold. Together they page 15 minutes after the last confirmed sync, and 5 minutes into a CA whose target has never synced. |
 | `managedCertNeverIssuedFor` | `1h` | How long a configured managed certificate may go without ever being issued before alerting. Deliberately longer than one reconcile interval: every remedy is manual, and a certificate nothing has yet is not an emergency in the first hour of an install. Raise it if you have raised `managed_cert_interval_sec`. |
 | `supersedeWindow` | `1h` | Window over which delayed-revocation failures are counted (the metric is a restart-resetting counter). |
 | `supersedeFor` | `30m` | `for:` debounce for the delayed-revocation-failure alert. Longer than the CRL ones because the sweep retries on its own interval; raise it if you have raised `superseded_cert_sweep_interval_sec`. |

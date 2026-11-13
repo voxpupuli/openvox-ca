@@ -133,6 +133,7 @@ var _ = Describe("inlineCredentialKeys", func() {
 	It("finds nothing credential-shaped in the blocks it does not scan, but the known one", func() {
 		found, err := inlineCredentialKeysIn(".", []string{
 			"internal/certstore/certconfig/*.go",
+			"internal/fileexport/fileexportconfig/*.go",
 			"internal/k8sexport/exportconfig/*.go",
 		})
 		Expect(err).NotTo(HaveOccurred())

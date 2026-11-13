@@ -478,10 +478,10 @@ in `$credentials`; a new one needs adding there, with a reject case in
 where `config.ServerConfig` and the blocks it embeds are declared, whose yaml
 tag names a password, passphrase, secret, token, credential or DSN
 (`inlineCredentialKeys` in `magefile.go`). It does not scan `managed_certs`,
-`serving_cert` or `kubernetes_export`, which are typed from
-`internal/certstore/certconfig` and `internal/k8sexport/exportconfig`: a
-credential added to one of those needs its refusal and reject case written by
-hand. A magefile spec fails when a credential-shaped key appears there, as a
+`serving_cert`, `kubernetes_export` or `file_export`, which are typed from
+`internal/certstore/certconfig`, `internal/k8sexport/exportconfig` and
+`internal/fileexport/fileexportconfig`: a credential added to one of those needs
+its refusal and reject case written by hand. A magefile spec fails when a credential-shaped key appears there, as a
 reminder, but it cannot check that the refusal was written. The
 `inlineCredentialKeys` scan reads tag names, not paths:
 a key in a nested block such as `openbao` still fails the check, but needs a

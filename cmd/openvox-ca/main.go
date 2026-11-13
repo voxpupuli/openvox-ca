@@ -45,6 +45,7 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/config"
+	"github.com/voxpupuli/openvox-ca/internal/fileexport"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
 	"github.com/voxpupuli/openvox-ca/internal/sdnotify"
@@ -931,6 +932,11 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("resolving --cadir: %w", err)
 			}
+			// Pure configuration, so checked by every process before the role
+			// dispatch and the --daemon fork; see checkFileExport.
+			if err := checkFileExport(cfg, absCADir, resolved); err != nil {
+				return err
+			}
 
 			// Daemonise only when explicitly requested AND we aren't already the daemon child.
 			// Note: --daemon is intentionally excluded from config file / env var support
@@ -1515,6 +1521,19 @@ func newRootCmd() *cobra.Command {
 					func() (*k8sexport.Exporter, error) {
 						return k8sexport.NewInCluster(cfg.KubernetesExport, store, k8sMetrics)
 					})
+			}
+
+			// Optional filesystem export: keep local copies of the CA cert/CRL
+			// current. Validated before the fork (checkFileExport); from here on
+			// it is auxiliary like the Kubernetes export -- a failed sync is
+			// logged, counted and retried, never fatal. Each replica writes its
+			// own host's files, so every instance runs one and none takes a lock.
+			if cfg.FileExport.Enabled() {
+				var fileMetrics *fileexport.Metrics
+				if exporter != nil {
+					fileMetrics = fileexport.NewMetrics(exporter.Registry())
+				}
+				startFileExport(serveGoroutines, cfg.FileExport, store, fileMetrics)
 			}
 
 			// Waits on the group's context rather than the command's, so that

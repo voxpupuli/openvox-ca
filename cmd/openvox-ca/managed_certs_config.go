@@ -317,7 +317,7 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 		}
 		abs, err := filepath.Abs(strings.TrimSpace(r.Path))
 		if err != nil {
-			return nil, fmt.Errorf("resolving %s for the managed_certs path check: %w",
+			return nil, fmt.Errorf("resolving %s for the reserved-path check: %w",
 				r.Setting, err)
 		}
 		r.Path = abs

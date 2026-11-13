@@ -1,5 +1,5 @@
 # promtool rule tests for the CRL-propagation, upstream-chain,
-# Kubernetes-export, delayed-supersession, leaf- and CRL-expiry and
+# Kubernetes-export, file-export, delayed-supersession, leaf- and CRL-expiry and
 # managed-certificate alerts.
 #
 # Run with `mage test:mixin` from the repository root, which renders the mixin
@@ -8,8 +8,8 @@
 # These cover the rules whose firing behaviour is not obvious from reading the
 # PromQL:
 #
-#   * OpenVoxCACRLStale, the only expression in the mixin built from set
-#     operators (`or`, `unless`, `and on(...)`). Its two arms exist for
+#   * OpenVoxCACRLStale, built from set operators (`or`, `unless`,
+#     `and on(...)`) like several rules below. Its two arms exist for
 #     different failure shapes and the qualifier on the second exists to keep it
 #     quiet during a third.
 #   * The upstream CRL chain rules, which turn on a timing argument rather than
@@ -21,6 +21,12 @@
 #     last_error series to match on — so the cases below pin which rule owns
 #     which shape, that neither double-pages for the other's, and that a CA not
 #     using the feature at all stays silent under both.
+#   * OpenVoxCAFileExportStale, one threshold on the age of last_success plus an
+#     arm for a target that has never succeeded. The cases pin that it pages
+#     for a target that stops being confirmed, for one that never was --
+#     whether its syncs fail or never return -- and not for a healthy one, that
+#     a healthy sibling cannot mask a stale target, and that a healthy replica
+#     cannot mask another replica's target at the same path.
 #   * OpenVoxCAOCSPIndexSyncFailing, whose `increase(...)` over the window stays
 #     true for the whole window after a single failure — so its `for:` delays
 #     the page and then extends it, rather than filtering a transient.
@@ -696,6 +702,167 @@ tests:
             exp_annotations:
               summary: "A Kubernetes export target has never been attempted."
               description: "The OpenVox CA on ca-1:9140 has Secret/trust in namespace pki configured for export but has not attempted a single apply in 30m. The exported object holds whatever it held before, and OpenVoxCAKubernetesExportFailing cannot report on a target with no apply results. Check the CA logs for the Kubernetes export job starting, and for errors initialising the in-cluster client."
+
+  # --- File export ---
+
+  # Syncs every minute, then stops being confirmed at t=10m: a write that fails,
+  # a storage read that fails, and a write blocked on a dead mount all look like
+  # this from outside, which is why one threshold covers them. Stale once 600s
+  # have passed, so the expression first holds at the 21m evaluation; then
+  # fileExportStaleFor (5m) more. Quiet at 25m, inside the dwell, and firing at
+  # 26m: that pins the fifteen minutes from the last confirmed sync to the page
+  # which config.libsonnet and README.md promise, where a check at the 20m
+  # boundary would pass with the dwell removed.
+  - interval: 1m
+    name: a file export target that stops being confirmed current
+    input_series:
+      - series: 'openvoxca_file_export_last_success_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem"}'
+        values: "0+60x10 600+0x50"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="success"}'
+        values: "1+1x10 11+0x50"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="error"}'
+        values: "0+0x60"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: OpenVoxCAFileExportStale
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: OpenVoxCAFileExportStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              path: /etc/puppetlabs/puppet/ssl/crl.pem
+            exp_annotations:
+              summary: "A file export target is stale."
+              description: "The OpenVox CA on ca-1:9140 has not confirmed in the last 600 seconds that /etc/puppetlabs/puppet/ssl/crl.pem holds the current CA certificate or CRL, or has not confirmed it once since it started. The file keeps whatever it last held: a CRL copy that passes its NextUpdate makes certificate_revocation = chain fail closed. Check the CA logs for \"File export failed for target\", that the directory exists and is writable by the CA (under systemd, that ReadWritePaths= grants it), and that the filesystem is responding."
+
+  # The healthy case: a success stamped every minute, whether or not the file
+  # needed rewriting, never pages however long it runs.
+  - interval: 1m
+    name: a file export target confirmed every minute stays quiet
+    input_series:
+      - series: 'openvoxca_file_export_last_success_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem"}'
+        values: "0+60x120"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="success"}'
+        values: "1+1x120"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="error"}'
+        values: "0+0x120"
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: OpenVoxCAFileExportStale
+        exp_alerts: []
+
+  # Never confirmed since the CA started: every sync fails, so only the error
+  # counter moves and last_success was never published. The second arm.
+  - interval: 1m
+    name: a file export target that has never succeeded
+    input_series:
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="success"}'
+        values: "0+0x30"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="error"}'
+        values: "1+1x30"
+      - series: 'openvoxca_file_export_last_error_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem"}'
+        values: "0+60x30"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OpenVoxCAFileExportStale
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: OpenVoxCAFileExportStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              path: /etc/puppetlabs/puppet/ssl/crl.pem
+            exp_annotations:
+              summary: "A file export target is stale."
+              description: "The OpenVox CA on ca-1:9140 has not confirmed in the last 600 seconds that /etc/puppetlabs/puppet/ssl/crl.pem holds the current CA certificate or CRL, or has not confirmed it once since it started. The file keeps whatever it last held: a CRL copy that passes its NextUpdate makes certificate_revocation = chain fail closed. Check the CA logs for \"File export failed for target\", that the directory exists and is writable by the CA (under systemd, that ReadWritePaths= grants it), and that the filesystem is responding."
+
+  # Never confirmed, and nothing recorded at all: the first write is blocked, so
+  # neither counter has moved from the zero the CA published at startup. The
+  # second arm again, through the counters alone -- the case the Kubernetes
+  # export's Failing rule could not see.
+  - interval: 1m
+    name: a file export target whose first sync never returns
+    input_series:
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="success"}'
+        values: "0+0x30"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="error"}'
+        values: "0+0x30"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OpenVoxCAFileExportStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              path: /etc/puppetlabs/puppet/ssl/crl.pem
+            exp_annotations:
+              summary: "A file export target is stale."
+              description: "The OpenVox CA on ca-1:9140 has not confirmed in the last 600 seconds that /etc/puppetlabs/puppet/ssl/crl.pem holds the current CA certificate or CRL, or has not confirmed it once since it started. The file keeps whatever it last held: a CRL copy that passes its NextUpdate makes certificate_revocation = chain fail closed. Check the CA logs for \"File export failed for target\", that the directory exists and is writable by the CA (under systemd, that ReadWritePaths= grants it), and that the filesystem is responding."
+
+  # One target going stale does not hide behind a healthy sibling: the arms
+  # match per path.
+  - interval: 1m
+    name: a healthy file export target does not mask a stale sibling
+    input_series:
+      - series: 'openvoxca_file_export_last_success_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/certs/ca.pem"}'
+        values: "0+60x60"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/certs/ca.pem",result="success"}'
+        values: "1+1x60"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="success"}'
+        values: "0+0x60"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="error"}'
+        values: "1+1x60"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenVoxCAFileExportStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              path: /etc/puppetlabs/puppet/ssl/crl.pem
+            exp_annotations:
+              summary: "A file export target is stale."
+              description: "The OpenVox CA on ca-1:9140 has not confirmed in the last 600 seconds that /etc/puppetlabs/puppet/ssl/crl.pem holds the current CA certificate or CRL, or has not confirmed it once since it started. The file keeps whatever it last held: a CRL copy that passes its NextUpdate makes certificate_revocation = chain fail closed. Check the CA logs for \"File export failed for target\", that the directory exists and is writable by the CA (under systemd, that ReadWritePaths= grants it), and that the filesystem is responding."
+
+  # Two replicas exporting to the same path, which is the ordinary shape: every
+  # instance writes its own host's copy. ca-1 is healthy; ca-2 has never
+  # succeeded. The never-succeeded target sits on the replica WITHOUT a
+  # last_success, deliberately -- the other way round, the case passes whatever
+  # the `unless` matches on. An `unless on (path)` would let ca-1's last_success
+  # cancel ca-2's counter, and the host whose copy is going stale would never
+  # page; `sum without (result)` keeps `instance` and so keeps them apart.
+  - interval: 1m
+    name: a healthy replica does not mask another replica's never-succeeded target at the same path
+    input_series:
+      - series: 'openvoxca_file_export_last_success_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem"}'
+        values: "0+60x30"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="success"}'
+        values: "1+1x30"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-1:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="error"}'
+        values: "0+0x30"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-2:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="success"}'
+        values: "0+0x30"
+      - series: 'openvoxca_file_export_syncs_total{job="openvox-ca",instance="ca-2:9140",path="/etc/puppetlabs/puppet/ssl/crl.pem",result="error"}'
+        values: "1+1x30"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OpenVoxCAFileExportStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-2:9140
+              path: /etc/puppetlabs/puppet/ssl/crl.pem
+            exp_annotations:
+              summary: "A file export target is stale."
+              description: "The OpenVox CA on ca-2:9140 has not confirmed in the last 600 seconds that /etc/puppetlabs/puppet/ssl/crl.pem holds the current CA certificate or CRL, or has not confirmed it once since it started. The file keeps whatever it last held: a CRL copy that passes its NextUpdate makes certificate_revocation = chain fail closed. Check the CA logs for \"File export failed for target\", that the directory exists and is writable by the CA (under systemd, that ReadWritePaths= grants it), and that the filesystem is responding."
 
   # The OCSP index sync failure warning. Its dwell (ocspIndexSyncFor, 15m) is
   # deliberately longer than the CRL one's, because a missed inventory read is

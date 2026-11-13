@@ -20,6 +20,7 @@ package config
 
 import (
 	"github.com/voxpupuli/openvox-ca/internal/certstore/certconfig"
+	"github.com/voxpupuli/openvox-ca/internal/fileexport/fileexportconfig"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport/exportconfig"
 )
 
@@ -294,6 +295,14 @@ type ServerConfig struct {
 	// configured. File-only: the nested target list, labels, and annotations are
 	// impractical to express as flags/env. Validated at startup.
 	KubernetesExport exportconfig.Config `yaml:"kubernetes_export"`
+
+	// FileExport optionally keeps local copies of the CA certificate and/or CRL
+	// current, for a consumer on the same host that reads them from a file.
+	// Disabled when no targets are configured. File-only, like
+	// kubernetes_export: a list of structures has no flag or environment
+	// spelling. Validated before the server forks; see
+	// cmd/openvox-ca/fileexport.go.
+	FileExport fileexportconfig.Config `yaml:"file_export"`
 
 	// ManagedCerts optionally issues and renews certificates for OpenVox
 	// components into Kubernetes Secrets or local files, so that bringing up

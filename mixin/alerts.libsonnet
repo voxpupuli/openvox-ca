@@ -657,6 +657,65 @@
         ],
       },
       {
+        name: 'openvox-ca-file-export',
+        rules: [
+          {
+            alert: 'OpenVoxCAFileExportStale',
+            // A file export target that has not been confirmed current for
+            // longer than the export interval can explain. One rule rather
+            // than the Kubernetes export's Failing/NotRunning pair, and the
+            // difference is the point.
+            //
+            // The Kubernetes export is event-driven, so its attempts can be
+            // weeks apart and only a last_error > last_success comparison
+            // survives the gaps. The file export syncs on a fixed interval
+            // (60s by default, 300s at most) and stamps last_success on every
+            // sync that finds the file current, written or not. So the age of
+            // last_success is itself the freshness of the file, and a
+            // threshold on it covers every way of going stale at once: writes
+            // that fail, a storage read that fails, and a write blocked on a
+            // filesystem that has stopped answering -- which records no error
+            // at all, and which the Kubernetes rules' shape cannot see.
+            //
+            // The second arm is a target that has never succeeded since the CA
+            // started, including one whose very first write is still blocked.
+            // It matches because the CA publishes syncs_total at zero for every
+            // configured target before the first sync (see initTargets in
+            // internal/fileexport/metrics.go); last_success is deliberately not
+            // published that way, so its absence means "never".
+            //
+            // `sum without (result)` to collapse the success/error pair while
+            // keeping every label the deployment attached, so the `unless`
+            // matches per target and per scrape target, for the reason
+            // OpenVoxCAKubernetesExportNotRunning gives at length.
+            //
+            // fileExportStaleAfterSeconds must stay at least twice the largest
+            // interval the CA accepts (file_export.interval_sec, capped at
+            // 300s), or one slow sync on a long interval looks like an outage.
+            // fileexportconfig.MaxIntervalSec carries the same argument from
+            // the other side.
+            expr: |||
+              time() - openvoxca_file_export_last_success_timestamp_seconds{%(selector)s}
+                > %(staleAfter)d
+              or
+              (
+                sum without (result) (openvoxca_file_export_syncs_total{%(selector)s})
+                  unless openvoxca_file_export_last_success_timestamp_seconds{%(selector)s}
+              )
+            ||| % {
+              selector: $._config.openvoxCASelector,
+              staleAfter: $._config.fileExportStaleAfterSeconds,
+            },
+            'for': $._config.fileExportStaleFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'A file export target is stale.',
+              description: 'The OpenVox CA on {{ $labels.instance }} has not confirmed in the last %(staleAfter)d seconds that {{ $labels.path }} holds the current CA certificate or CRL, or has not confirmed it once since it started. The file keeps whatever it last held: a CRL copy that passes its NextUpdate makes certificate_revocation = chain fail closed. Check the CA logs for "File export failed for target", that the directory exists and is writable by the CA (under systemd, that ReadWritePaths= grants it), and that the filesystem is responding.' % { staleAfter: $._config.fileExportStaleAfterSeconds },
+            },
+          },
+        ],
+      },
+      {
         name: 'openvox-ca-managed-certificates',
         rules: [
           {
