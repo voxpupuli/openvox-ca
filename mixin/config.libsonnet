@@ -72,9 +72,32 @@
     // certificate valid for its key. Note the default case is NOT here: with a
     // window configured, a renewal records the supersession instead and its
     // failures are counted by OpenVoxCASupersedeFailing. The counter resets on
-    // restart, so the alert looks at increase() over crlUpdateWindow and
-    // debounces with crlUpdateFor.
-    crlUpdateWindow: '1h',
+    // restart, so the alert looks at increase() over crlUpdateWindow.
+    //
+    // It fires on crlUpdateThreshold failures in the window, not on the first.
+    // A backend restart costs one failed amendment, and the next pass succeeds;
+    // increase(...) > 0 held that one failure for the whole window (#596).
+    // Amendments have no cycle of their own, but the CRL refresh job reads the
+    // stored CRL on every replica on every pass (crl_refresh_interval_sec, 1h
+    // by default) and counts a failure, so a CRL that stays unreadable or
+    // unwritable fails at least once an hour even on a CA revoking nothing,
+    // and sooner on a busy one. Not where disable_crl_refresh is set: there
+    // is no refresh pass then, and only the amendments the CA attempts count.
+    //
+    // Size the window to hold threshold + 1 refresh intervals. A persisting
+    // fault adds one per interval, and increase() needs a sample from before
+    // the oldest of them, so a window of exactly threshold intervals loses the
+    // oldest just as the next arrives and the alert flaps — the argument
+    // crlChainWindow makes above. Widen it alongside any increase to
+    // crl_refresh_interval_sec: a window too short to hold the threshold never
+    // fires at all.
+    //
+    // What the threshold gives up is a single failure the CA does not retry:
+    // the best-effort revocation in a clean, or of a superseded certificate
+    // where superseded_cert_revoke_after_sec is 0. Failing once, either is
+    // now reported only by its log warning, and leaves the certificate valid.
+    crlUpdateWindow: '3h',
+    crlUpdateThreshold: 2,
     crlUpdateFor: '15m',
 
     // --- CRL propagation across replicas ---
@@ -90,32 +113,49 @@
     crlLagFor: '10m',
 
     // Failures to reload the CRL from storage. Same shape as the CRL-update
-    // alert — a counter that resets on restart, so increase() over a window.
-    // Deliberately shorter than crlLagFor: both symptoms of a stuck replica
-    // start at the same instant, so the warning that explains why only reaches
-    // the operator before the page it explains if it debounces for less time.
-    crlSyncWindow: '1h',
-    crlSyncFor: '5m',
+    // alert: a counter that resets on restart, so increase() over a window,
+    // and crlSyncThreshold failures in it rather than one. The sync runs every
+    // crl_sync_interval_sec (60s by default) and a backend restart costs one
+    // failed pass, while a replica holding a rotated CA certificate fails
+    // every pass until it restarts. Three in ten minutes tells them apart.
+    //
+    // The window must hold threshold + 1 sync intervals, for the reason
+    // crlUpdateWindow gives; raise it alongside any increase to
+    // crl_sync_interval_sec, or the alert can never fire.
+    //
+    // Threshold plus dwell is deliberately shorter than crlLagFor: both
+    // symptoms of a stuck replica start at the same instant, so the warning
+    // that explains why only reaches the operator before the page it explains
+    // if it fires sooner. At the defaults it fires about five minutes in.
+    crlSyncWindow: '10m',
+    crlSyncThreshold: 3,
+    crlSyncFor: '2m',
 
-    // Window and dwell for OpenVoxCAOCSPIndexSyncFailing. Same shape as the CRL
-    // sync pair above: the counter resets on restart, so the rule alerts on
-    // increase() over a window.
+    // Window, threshold and dwell for OpenVoxCAOCSPIndexSyncFailing. Same
+    // shape as the CRL sync trio above: the counter resets on restart, so the
+    // rule alerts on increase() over a window, and on ocspIndexSyncThreshold
+    // failures in it rather than one. A backend restart costs one failed pass,
+    // which the next pass repairs, so one failure is not worth a warning.
     //
     // Be clear about what the dwell does, because it is not what it looks like.
-    // increase(...[1h]) > 0 stays true for the whole window after a single
-    // failure, so `for` cannot filter a transient — it delays the page by 15
-    // minutes and the alert then latches until the window rolls past the last
-    // failure. That is deliberate: a replica that failed one read is answering
+    // Once the threshold is crossed, increase() stays above it until the window
+    // rolls past the oldest of those failures, so `for` cannot filter anything
+    // the threshold let through — it delays the warning, and the alert then
+    // latches. That is deliberate: a replica that keeps failing is answering
     // `unknown` for peer-signed certificates until its next successful pass, and
     // an alert that cleared before somebody looked would be worse than one that
-    // lingers. The dwell is longer than the CRL sibling's 5m because this
-    // condition is not fail-open and does not warrant waking anyone quickly.
+    // lingers.
     //
-    // Kept as its own knob rather than reusing crlSync* because the two jobs
-    // poll on different intervals and an operator lengthening one has no reason
-    // to lengthen the other.
-    ocspIndexSyncWindow: '1h',
-    ocspIndexSyncFor: '15m',
+    // The window must hold threshold + 1 sync intervals, for the reason
+    // crlUpdateWindow gives. At the 5m default ocsp_index_sync_interval_sec,
+    // the third failure lands 10 to 15 minutes into a fault and the warning
+    // follows five minutes later. Kept as its own knob rather than reusing
+    // crlSync* because the two jobs poll on different intervals: raise this
+    // window alongside any increase to ocsp_index_sync_interval_sec, or the
+    // alert can never fire.
+    ocspIndexSyncWindow: '30m',
+    ocspIndexSyncThreshold: 3,
+    ocspIndexSyncFor: '5m',
     // --- Delayed supersession ---
     // With superseded_cert_revoke_after_sec set, a renewal records the
     // certificate it replaced on a durable list and a sweep revokes it once the

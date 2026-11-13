@@ -57,8 +57,12 @@ Nor is either status code a statement about [`openvoxca_crl_update_failures_tota
 > In the `409` state above that means the whole revoke family does *not* fail
 > closed — the `PUT` refuses, the `DELETE` succeeds. The revoke failure is logged
 > at `WARN` ("stays a valid credential until it expires") and counted in
-> `openvoxca_crl_update_failures_total`, so
-> [`OpenVoxCACRLUpdateFailing`](metrics.md#crl) fires. Recovering means restarting
+> `openvoxca_crl_update_failures_total`. One failure is below
+> [`OpenVoxCACRLUpdateFailing`](metrics.md#storage-retry-alerts)'s threshold,
+> but that replica's hourly CRL refresh is refused for the same reason and
+> counts too, so the alert fires within about an hour and a quarter (unless
+> `disable_crl_refresh` is set, when only further revocations count);
+> `OpenVoxCACRLSyncFailing` fires on the same replica within minutes. Recovering means restarting
 > the stale replica and then revoking the certificate that was deleted but not
 > revoked — `clean` cannot be repeated, because the certificate is no longer in
 > storage. The inventory row outlives the delete, so
