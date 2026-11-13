@@ -85,7 +85,9 @@ alerting rules for the openvox-ca exporter. It alerts on:
   a valid credential. Live on any CA that renews certificates, since
   `superseded_cert_revoke_after_sec` defaults to 24 hours; only where it is set
   to `0` does the revocation happen inside the renewal instead, and a failure
-  there is counted by the CRL-update alert above. Even then a store that cannot
+  there counts towards the CRL-update alert above, which needs a second failure
+  within its window: a single one is left to its log warning. Even then a store
+  that cannot
   serve the pending-supersession key fires this, because the sweep, every
   renewal and every subject revocation read that key whatever the setting says.
   See
@@ -212,8 +214,8 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |
-| `crlUpdateWindow` | `3h` | Window over which CRL-update failures are counted (the metric is a restart-resetting counter). The CRL refresh job reads the stored CRL on every pass, so a fault that persists fails at least once per `crl_refresh_interval_sec` (1h by default). Keep the window at least `crlUpdateThreshold` + 1 intervals: at exactly the threshold a persistent fault flaps, and below it the alert never fires. Raise it alongside that setting. |
-| `crlUpdateThreshold` | `2` | Failures within `crlUpdateWindow` before the CRL-update-failure alert fires. Above one so that a backend restart costing a single amendment stays silent. |
+| `crlUpdateWindow` | `3h` | Window over which CRL-update failures are counted (the metric is a restart-resetting counter). The CRL refresh job takes the CRL lock and reads the stored CRL on every pass, so a CRL that stays unreadable, or whose lock cannot be taken, fails at least once per `crl_refresh_interval_sec` (1h by default); one that reads but cannot be written counts only when the CA tries to amend it. Keep the window at least `crlUpdateThreshold` + 1 intervals: at exactly the threshold a persistent fault flaps, and below it the alert never fires. Raise it alongside that setting. |
+| `crlUpdateThreshold` | `2` | Failures within `crlUpdateWindow` before the CRL-update-failure alert fires. Above one so that a backend restart costing a single amendment stays silent. With `crl_chain_file` set, the upstream chain refresh counts into the same counter on its own hourly pass, so a restart that overlaps both passes counts two and fires; set this to `3`, and `crlUpdateWindow` to `4h`, if you want those silent. |
 | `crlUpdateFor` | `15m` | `for:` debounce for the CRL-update-failure alert. Once the threshold is crossed `increase()` stays above it until the window passes the older failures, so this delays the alert rather than filtering a transient. |
 | `crlSyncWindow` | `10m` | Window over which CRL-reload failures are counted (the metric is a restart-resetting counter). Keep it at least `crlSyncThreshold` + 1 times `crl_sync_interval_sec` (60s by default), and raise it alongside that setting, or the alert can never fire. |
 | `crlSyncThreshold` | `3` | Failed reloads within `crlSyncWindow` before the CRL-reload-failure alert fires. A backend restart costs one; a replica holding a rotated CA certificate fails every pass. |

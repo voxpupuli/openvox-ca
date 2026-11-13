@@ -77,6 +77,16 @@
     // It fires on crlUpdateThreshold failures in the window, not on the first.
     // A backend restart costs one failed amendment, and the next pass succeeds;
     // increase(...) > 0 held that one failure for the whole window (#596).
+    // Two is enough margin because a restart only counts here when it breaks
+    // an amendment or a pass in flight, which with an hourly pass is rare,
+    // unlike the syncs below, which fail on nearly every restart. One case
+    // narrows it: with crl_chain_file set, the upstream chain refresh takes
+    // the same lock, reads the same CRL and counts its failures here too, on
+    // its own hourly ticker started alongside this one. A restart that
+    // overlaps both passes then counts two and fires. A deployment with a
+    // chain file that wants those silent sets crlUpdateThreshold to 3 and
+    // crlUpdateWindow to 4h; it still warns within about two and a quarter
+    // hours of a CRL that stays unreadable, since each tick then counts twice.
     // Amendments have no cycle of their own, but the CRL refresh job takes the
     // CRL lock and reads the stored CRL on every replica on every pass
     // (crl_refresh_interval_sec, 1h by default) and counts a failure, so a CRL

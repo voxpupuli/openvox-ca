@@ -416,7 +416,9 @@
             // could never revoke. Live on any CA that renews certificates,
             // since superseded_cert_revoke_after_sec defaults to 24h; only
             // where it is 0 does the revocation happen inside the renewal, and
-            // a failure there is a CRL failure counted by the alert above.
+            // a failure there is a CRL failure that counts towards the alert
+            // above, which needs crlUpdateThreshold of them in its window, so a
+            // single one is left to its log warning.
             // Even then the sweep, every renewal and every subject revocation
             // read the pending list whatever the setting says, so a store that
             // cannot serve that key fires this with the window closed too.

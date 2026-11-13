@@ -955,6 +955,29 @@ tests:
         alertname: OpenVoxCASupersedeFailing
         exp_alerts: []
 
+  # Two failed refresh passes, at 10m and 70m, and then recovery. The threshold
+  # is crossed at 70m and the warning fires at 85m. It clears once the window
+  # has rolled past the 10m step: the last sample before it is at 9m, so a 3h
+  # window holds both steps until 189m. Firing at 120m and quiet at 195m pins
+  # crlUpdateWindow from above by behaviour, as the CRL sync and OCSP cases do
+  # for theirs: a window of 4h or more would still be firing at 195m, and
+  # without this case only the description text, which interpolates the knob,
+  # would notice.
+  - interval: 1m
+    name: CRL update warning clears once the window passes the failures
+    input_series:
+      - series: 'openvoxca_crl_update_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0x9 1x59 2+0x200"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x270"
+    alert_rule_test:
+      - eval_time: 120m
+        alertname: OpenVoxCACRLUpdateFailing
+        exp_alerts: *crlUpdateFiring
+      - eval_time: 195m
+        alertname: OpenVoxCACRLUpdateFailing
+        exp_alerts: []
+
   # One failed amendment and then success: a backend restart that caught one
   # refresh pass, or one sweep. Before #596 this warned for most of an hour;
   # now it stays silent for the whole window.

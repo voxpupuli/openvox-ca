@@ -807,10 +807,20 @@ validity, about every 20 days at the defaults), so a CRL that reads but cannot
 be signed or written — a full disk, a signer that is down — counts only when
 the CA tries to amend it. With `disable_crl_refresh` set there is no refresh
 pass at all, so every CRL fault counts only that way, and a quiet CA can go
-unreported until something is revoked. Each window is sized to hold one interval more
-than its threshold. **Lengthening one of those intervals without widening the
+unreported until something is revoked. Each window holds at least one interval
+more than its threshold. **Lengthening one of those intervals without widening the
 matching window leaves its alert unable to fire at all** — see the knob table in
 the [mixin README](https://github.com/voxpupuli/openvox-ca/tree/main/mixin#configurable-thresholds).
+
+Two failures is enough margin for the CRL-update alert because a restart only
+counts there when it breaks an amendment or a refresh pass in flight, which is
+rare, whereas the two syncs fail on nearly every restart. With
+[`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) set it is
+narrower: the upstream chain refresh takes the same lock, reads the same CRL and
+counts its failures into the same counter on its own hourly pass, started
+alongside the CRL refresh, so a restart that overlaps both passes counts two and
+fires. To keep those silent, set the mixin's `crlUpdateThreshold` to `3` and
+`crlUpdateWindow` to `4h`.
 
 One failure the CA does not retry falls below the CRL-update threshold: a
 best-effort revocation, which the CA logs and abandons rather than returning an
