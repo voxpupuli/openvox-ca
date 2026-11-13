@@ -82,6 +82,19 @@ ok_contains() {
     esac
 }
 
+# ok_curl_err DESC RC -- assert _HTTP_ERR is curl's own message for exit RC.
+# Keyed on the "curl: (RC) " prefix curl puts on every error it prints, never
+# on the prose after it: curl rewords that between releases (exit 18 went from
+# "transfer closed with N bytes remaining to read" to "end of response with N
+# bytes missing", #606), and a case pinned to the wording fails on whichever
+# runner image moves first.
+ok_curl_err() {
+    case "$_HTTP_ERR" in
+        "curl: ($2) "*) pass "$1" ;;
+        *)              fail "$1" "[$_HTTP_ERR] does not start with [curl: ($2) ]" ;;
+    esac
+}
+
 # -- Fake server lifecycle ----------------------------------------------------
 # start_server BEHAVIOUR... -- (re)start flaky-server.py and set URL.
 start_server() {
@@ -176,7 +189,7 @@ start_server truncate
 http_get "$URL"
 ok_eq   "truncate: curl reports exit 18 (partial transfer)" "18" "$_HTTP_RC"
 ok_eq   "truncate: status code still recorded as 200"       "200" "$_HTTP_CODE"
-ok_contains "truncate: curl's error text is captured"       "transfer closed" "$_HTTP_ERR"
+ok_curl_err "truncate: curl's error text is captured"       18
 ok_contains "truncate: diagnostic names the exit status"    "rc=18" "$_HTTP_INFO"
 ok_contains "truncate: diagnostic names the byte count"     "bytes=$_HTTP_BYTES" "$_HTTP_INFO"
 _trunc_bytes=$_HTTP_BYTES
@@ -207,7 +220,7 @@ http_get "$_dead_url"
 ok_eq   "refused: curl exits 7 (couldn't connect)"  "7"   "$_HTTP_RC"
 ok_eq   "refused: no status code, reported as 000"  "000" "$_HTTP_CODE"
 ok_eq   "refused: body is empty"                    "0"   "$_HTTP_BYTES"
-ok_contains "refused: curl's error text is captured" "onnect" "$_HTTP_ERR"
+ok_curl_err "refused: curl's error text is captured" 7
 
 # 2d: empty 200.  Distinguishable from all of the above.
 start_server empty
@@ -251,7 +264,7 @@ http_get "$URL"
 HTTP_MAX_TIME=$_saved_max_time
 ok_eq   "stall: curl reports exit 28 (timeout)"     "28"  "$_HTTP_RC"
 ok_contains "stall: diagnostic names the timeout"   "rc=28" "$_HTTP_INFO"
-ok_contains "stall: curl's error text is captured"  "imed out" "$_HTTP_ERR"
+ok_curl_err "stall: curl's error text is captured"  28
 
 # 2i: a TLS handshake failure -- the third of the three failure classes #208
 # names as having been indistinguishable ("a transfer truncated mid-flight
@@ -274,11 +287,7 @@ else
          "expected rc 35 or 60, got $_HTTP_RC; $_HTTP_INFO"
 fi
 ok_eq   "tls: no response line, reported as 000"    "000" "$_HTTP_CODE"
-if [ -n "$_HTTP_ERR" ]; then
-    pass "tls: curl's error text is captured"
-else
-    fail "tls: curl's error text is captured" "_HTTP_ERR was empty; $_HTTP_INFO"
-fi
+ok_curl_err "tls: curl's error text is captured" "$_HTTP_RC"
 _info_tls=$_HTTP_INFO
 
 # 2g: every one of the eight produced a distinct diagnostic.  Asserting they
@@ -412,7 +421,7 @@ http_get_retry "BEGIN CERTIFICATE" "$URL" > "$WORK_DIR/retry.out"
 _retry_lines=$(grep -c '^# retry ' "$WORK_DIR/retry.out" | tr -d '[:space:]')
 ok_eq   "retry line: one per attempt except the last" \
         "$(( HTTP_RETRY_ATTEMPTS - 1 ))" "$_retry_lines"
-if grep -q '^# retry 1/'"$HTTP_RETRY_ATTEMPTS"'.*rc=18.*transfer closed' "$WORK_DIR/retry.out"; then
+if grep -q '^# retry 1/'"$HTTP_RETRY_ATTEMPTS"' .*rc=18 .*curl=\[curl: (18) ' "$WORK_DIR/retry.out"; then
     pass "retry line: carries that attempt's own evidence"
 else
     fail "retry line: carries that attempt's own evidence" \
