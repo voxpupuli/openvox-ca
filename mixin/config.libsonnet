@@ -77,12 +77,16 @@
     // It fires on crlUpdateThreshold failures in the window, not on the first.
     // A backend restart costs one failed amendment, and the next pass succeeds;
     // increase(...) > 0 held that one failure for the whole window (#596).
-    // Amendments have no cycle of their own, but the CRL refresh job reads the
-    // stored CRL on every replica on every pass (crl_refresh_interval_sec, 1h
-    // by default) and counts a failure, so a CRL that stays unreadable or
-    // unwritable fails at least once an hour even on a CA revoking nothing,
-    // and sooner on a busy one. Not where disable_crl_refresh is set: there
-    // is no refresh pass then, and only the amendments the CA attempts count.
+    // Amendments have no cycle of their own, but the CRL refresh job takes the
+    // CRL lock and reads the stored CRL on every replica on every pass
+    // (crl_refresh_interval_sec, 1h by default) and counts a failure, so a CRL
+    // that cannot be read, or whose lock cannot be taken, fails at least once
+    // an hour even on a CA revoking nothing, and sooner on a busy one. Not
+    // where disable_crl_refresh is set: there is no refresh pass then, and only
+    // the amendments the CA attempts count. Nor for a CRL that reads but cannot
+    // be signed or written: the pass signs and writes only when the CRL is due
+    // for re-signing (a third of its validity, about every 20 days at the
+    // defaults), so such a fault counts once per amendment the CA attempts.
     //
     // Size the window to hold threshold + 1 refresh intervals. A persisting
     // fault adds one per interval, and increase() needs a sample from before
@@ -93,9 +97,14 @@
     // fires at all.
     //
     // What the threshold gives up is a single failure the CA does not retry:
-    // the best-effort revocation in a clean, or of a superseded certificate
-    // where superseded_cert_revoke_after_sec is 0. Failing once, either is
-    // now reported only by its log warning, and leaves the certificate valid.
+    // the best-effort revocation in a clean, or of a certificate a renewal or
+    // a managed certificate's reissue replaced where its revocation is
+    // immediate (superseded_cert_revoke_after_sec, or the entry's revoke_after,
+    // is 0). Failing once, any of these is now reported only by its log
+    // warning, and leaves the certificate valid — under a sign- or write-only
+    // fault as well as a transient one, since the refresh pass does not count
+    // that fault. A revocation an operator asked for is not in this list: it
+    // fails with an error to the caller.
     crlUpdateWindow: '3h',
     crlUpdateThreshold: 2,
     crlUpdateFor: '15m',
@@ -161,9 +170,10 @@
     // certificate it replaced on a durable list and a sweep revokes it once the
     // window elapses. A failure here is a certificate that a renewal replaced
     // and that is still a valid credential — either because the supersession
-    // was never recorded, or because the sweep could not carry it out. Same
-    // shape as the CRL-update alert: a counter that resets on restart, so
-    // increase() over a window. Debounced for longer, because the sweep retries
+    // was never recorded, or because the sweep could not carry it out. Like the
+    // CRL-update alert, a counter that resets on restart, so increase() over a
+    // window, but with no count threshold: it fires on one failure. Debounced
+    // for longer, because the sweep retries
     // on its own interval (superseded_cert_sweep_interval_sec, 15m by default)
     // and a single transient storage failure between two passes is not worth
     // waking anyone for; raise supersedeFor if you have lengthened that

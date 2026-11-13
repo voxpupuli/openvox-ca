@@ -196,7 +196,9 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > budget behind another goroutine *in this process* on the single-node backends,
 > which reach the read with the deadline already gone; see
 > [revocation cost](api.md#certificate-status). So a queued revocation is a
-> benign cause of this alert on filesystem and SQLite. A wait for another
+> benign cause of this alert on filesystem and SQLite, once a second failure
+> lands within its window (see [storage-retry alerts](#storage-retry-alerts)).
+> A wait for another
 > *process* on the host is refused at acquisition instead and never reaches the
 > read, so it does not move this counter — see the uncounted list below. The
 > revoke path is the shared revoke-by-serial code, so it also covers
@@ -793,23 +795,32 @@ defaults:
 | --- | --- | --- |
 | `OpenVoxCACRLSyncFailing` | 3 failed reloads in 10 minutes | about 5 minutes |
 | `OpenVoxCAOCSPIndexSyncFailing` | 3 failed passes in 30 minutes | 15 to 20 minutes |
-| `OpenVoxCACRLUpdateFailing` | 2 failed amendments in 3 hours | at most about 2¼ hours on a CA revoking nothing, sooner on a busy one |
+| `OpenVoxCACRLUpdateFailing` | 2 failed amendments in 3 hours | for an unreadable CRL, at most about 2¼ hours on a CA revoking nothing, sooner on a busy one |
 
 The CRL sync and OCSP index sync run on fixed intervals (`crl_sync_interval_sec`,
 `ocsp_index_sync_interval_sec`). CRL amendments have no cycle of their own, but
-the CRL refresh job reads the stored CRL on every replica on every pass
-(`crl_refresh_interval_sec`, hourly by default), so storage that stays broken
-counts at least once an hour. With `disable_crl_refresh` set there is no such
-pass, and the alert counts only the amendments the CA attempts: a quiet CA with
-broken CRL storage can then go unreported until something is revoked. Each window is sized to hold one interval more
+the CRL refresh job takes the CRL lock and reads the stored CRL on every replica
+on every pass (`crl_refresh_interval_sec`, hourly by default), so a CRL that
+cannot be read, or whose lock cannot be taken, counts at least once an hour. It
+signs and writes only when the CRL is due for re-signing (a third of its
+validity, about every 20 days at the defaults), so a CRL that reads but cannot
+be signed or written — a full disk, a signer that is down — counts only when
+the CA tries to amend it. With `disable_crl_refresh` set there is no refresh
+pass at all, so every CRL fault counts only that way, and a quiet CA can go
+unreported until something is revoked. Each window is sized to hold one interval more
 than its threshold. **Lengthening one of those intervals without widening the
 matching window leaves its alert unable to fire at all** — see the knob table in
 the [mixin README](https://github.com/voxpupuli/openvox-ca/tree/main/mixin#configurable-thresholds).
 
-One failure the CA does not retry falls below the CRL-update threshold: the
-best-effort revocation of a superseded certificate on a renewal where
-`superseded_cert_revoke_after_sec` is `0`, or of a clean. That leaves the
-certificate valid, and only its log warning reports it — see the note under
-[CRL](#crl) for the lines to grep for. With the default overlap window the
+One failure the CA does not retry falls below the CRL-update threshold: a
+best-effort revocation, which the CA logs and abandons rather than returning an
+error. That is the revocation in a clean, and the immediate revocation of a
+certificate that a renewal replaced (where `superseded_cert_revoke_after_sec`
+is `0`) or that a managed certificate's reissue replaced (where its effective
+`revoke_after` is `0`). A failure leaves the certificate valid, and if it is
+the only one in the window — a transient fault, or a sign- or write-only fault
+on a CA that is otherwise quiet — only its log warning reports it. See the note
+under [CRL](#crl) for the lines to grep for. With an overlap window the
 revocation is on the pending list instead, and `OpenVoxCASupersedeFailing`
-still fires on a single failure.
+still fires on a single failure. A revocation an operator asked for is not
+abandoned: it fails with an error to the caller.

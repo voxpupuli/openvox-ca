@@ -220,6 +220,29 @@ tests:
         alertname: OpenVoxCACRLSyncFailing
         exp_alerts: []
 
+  # Exactly the threshold: three failed passes, then recovery. The cases above
+  # all rise past three within a minute of each other or stop short of it, so
+  # a `>` in place of `>=`, a threshold of four or a window of three minutes
+  # would still satisfy every firing assertion in them, and only the
+  # description text, which interpolates the knobs, would notice. This one
+  # notices by behaviour. Three failures at 1, 2 and 3m cross the threshold at
+  # 3m, the dwell runs out at 5m, and the 1m failure leaves the window at 10m:
+  # firing at 7m and quiet at 12m. Each of those three mutants is quiet at 7m.
+  - interval: 1m
+    name: three failed CRL syncs then recovery warns
+    input_series:
+      - series: 'openvoxca_crl_sync_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0 1 2 3+0x30"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x33"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: *crlSyncFiring
+      - eval_time: 12m
+        alertname: OpenVoxCACRLSyncFailing
+        exp_alerts: []
+
   # A fault that fails for ten passes and then recovers. Firing while it lasts,
   # and quiet again once the window has rolled past the last failure: that
   # second half is what pins crlSyncWindow short, since a window of an hour

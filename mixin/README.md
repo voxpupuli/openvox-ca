@@ -54,10 +54,14 @@ alerting rules for the openvox-ca exporter. It alerts on:
   counted here too, so the alert distinguishes the two by log line — see
   [metrics](../docs/metrics.md). It fires on two failures within three hours,
   not one: a backend restart that catches a single amendment stays silent,
-  while CRL storage that stays broken fails on every hourly refresh pass and
-  warns by the second, 15 minutes after it. A best-effort revocation the CA
-  does not retry — a renewal's, where `superseded_cert_revoke_after_sec` is
-  `0`, or a clean's — failing once is left to its log warning.
+  while a CRL that stays unreadable, or whose lock cannot be taken, fails on
+  every hourly refresh pass and warns by the second, 15 minutes after it. A
+  CRL that reads but cannot be signed or written counts only when the CA
+  tries to amend it, because the refresh pass writes only when the CRL is due.
+  A best-effort revocation the CA does not retry — in a clean, or of a
+  certificate a renewal or managed-certificate reissue replaced with immediate
+  revocation — failing once is left to its log warning. See
+  [storage-retry alerts](../docs/metrics.md#storage-retry-alerts).
 - **CRL propagation** — a replica that cannot reload the stored CRL, or that
   keeps enforcing one behind it. On a shared backend each replica decides
   revocation from its own copy, so a replica left behind still accepts
