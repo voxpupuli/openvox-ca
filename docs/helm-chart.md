@@ -595,6 +595,11 @@ the `tls` Secret, from `config.tls_cert`/`config.tls_key`, or from
 `config.serving_cert` where the CA issues its own. Only set it if
 your controller needs a certificate for SNI routing.
 
+Through a passthrough controller the CA sees every connection come from the
+controller's address, so `csr_rate_limit` and `ocsp_rate_limit` become one
+budget shared by every client, and `rate_limit_ipv6_prefix_length` has no
+effect; see [Rate limit](configuration.md#rate-limit) to size them.
+
 If you deliberately terminate TLS at the edge, set `config.no_tls_required:
 true`, and understand what it costs: the pod serves plain HTTP with no client
 authentication, so the admin API answers anything that reaches the pod's port.

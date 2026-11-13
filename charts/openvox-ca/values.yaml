@@ -78,7 +78,7 @@ commonAnnotations: {}
 #     insecure_allow_plain_http_generate: false  # true lets POST /generate return keys without TLS
 #     enable_ocsp: false  # true serves the unauthenticated OCSP responder at /ocsp; ocsp_url does not
 #     ocsp_rate_limit: 300  # OCSP requests per client IP per minute; behind a proxy every client shares one budget
-#     rate_limit_ipv6_prefix_length: 128  # IPv6 bits both rate limits count as one client; 64 stops one /64 host filling the limiter
+#     rate_limit_ipv6_prefix_length: 128  # IPv6 bits both rate limits count as one client; 64 stops one /64 host filling the limiter (no effect behind a passthrough ingress)
 #     inventory_verify_interval_sec: 0  # periodic inventory integrity check on every replica; 0 = default (5m)
 #     # Certificates openvox-ca issues and renews for OpenVox components. Each
 #     # entry needs a store: a Kubernetes Secret or a local file pair, never

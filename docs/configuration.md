@@ -153,7 +153,7 @@ allow_duplicate_certs: false # let a CSR replace a pending one or queue beside a
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
 csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting; see "Rate limit"
 ocsp_rate_limit: 300  # max OCSP requests per IP per minute while enable_ocsp is set; 0 = disable
-rate_limit_ipv6_prefix_length: 128  # IPv6 bits counted as one client by both limits; 64 = one budget per /64
+rate_limit_ipv6_prefix_length: 128  # IPv6 bits counted as one client by both limits; 64 = one budget per /64; no effect behind a proxy, see "Rate limit"
 # Caps concurrent CA-key signatures across issuance, CRL re-signing and the OCSP
 # responder together. Unset uses max(4, GOMAXPROCS); 0 disables the bound.
 # Lower it to a remote signer's capacity — see "Bounding CA-key signing" below.
@@ -966,11 +966,24 @@ control.
 
 The address is the TCP peer's. `X-Forwarded-For` and similar headers are not
 trusted, because the server takes direct connections and has no trusted-proxy
-setting. So behind a proxy that does not preserve the client's address (an
-`HTTPRoute`, a TLS-terminating ingress, or a passthrough load balancer without
-PROXY protocol), every client behind it shares one budget, and the limit
-becomes one for the whole fleet. Size it for that, or turn it off with `0` and
-limit at the proxy instead. `csr_rate_limit` behaves the same way.
+setting, and the server does not accept the PROXY protocol. So behind a proxy
+that does not preserve the client's address, the per-IP limits become one
+shared bucket per replica. TLS passthrough through haproxy-ingress, the
+chart's [Ingress](helm-chart.md#ingress) setup, is the measured case: the CA
+sees every connection come from the controller's address. Then:
+
+- `csr_rate_limit`, 60 a minute by default, is one budget for every agent
+  submitting a CSR through the proxy, so a fleet enrolling at once is refused
+  past the 60th request in a minute.
+- `ocsp_rate_limit` is likewise one budget for every verifier.
+- The cap of 100,000 tracked addresses below cannot be reached, so the refusal
+  it causes does not arise.
+- `rate_limit_ipv6_prefix_length` has no effect, since every request carries
+  the proxy's one address.
+
+An `HTTPRoute` or a TLS-terminating ingress behaves the same way. Size each
+limit for the whole fleet behind the proxy, or turn it off with `0` and limit at
+the proxy instead.
 
 By default each IPv6 address is its own client. A host holding a routed `/64`
 can then send from as many addresses as it likes and get a budget for each, so
@@ -990,7 +1003,10 @@ inside the prefix shares one budget too: a site whose verifiers or agents
 reach the CA from many addresses in one `/64` needs a limit sized for all of
 them. The setting covers `csr_rate_limit` as well, and IPv4 addresses,
 including IPv4-mapped IPv6 ones, are always counted one by one. A value outside
-1-128 refuses startup.
+1-128 refuses startup. The advice above is for clients that reach the CA
+directly: behind a proxy that hides their addresses, such as TLS passthrough
+through haproxy-ingress, every request carries the proxy's address and the
+setting changes nothing.
 
 The limit and the [CA-key signing bound](#bounding-ca-key-signing) answer
 different questions. The bound caps signatures in flight across every client
