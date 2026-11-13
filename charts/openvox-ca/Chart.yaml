@@ -12,8 +12,8 @@ type: application
 #   .github/workflows/helm-chart.yml                the publish version
 #   .lefthook/pre-push/verify-tags.sh               the local tag gate
 #   magefile.go                                     chartVersions, release:prepare
-version: 1.0.0-alpha1
-appVersion: "1.0.0-alpha1"
+version: 1.0.0-alpha1-dev
+appVersion: "1.0.0-alpha1-dev"
 
 kubeVersion: ">=1.26.0-0"
 

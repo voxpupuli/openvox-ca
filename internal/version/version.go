@@ -41,7 +41,7 @@ import (
 // The Helm chart's version and appVersion (charts/openvox-ca/Chart.yaml)
 // track this constant. release:prepare rewrites them alongside it, and
 // chart:version — plus the tag gates above — refuse a mismatch.
-const Version = "1.0.0-alpha1"
+const Version = "1.0.0-alpha1-dev"
 
 // Full returns Version augmented with the VCS metadata the Go toolchain
 // embeds in binaries built from a git checkout: the commit hash, the commit
