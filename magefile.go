@@ -806,6 +806,154 @@ func verifyReleaseJobConfinementIn(relSrc []byte) error {
 // maintainer to look for a mage call that is not there.
 var releaseJobMageRE = regexp.MustCompile(`(^|[^\w.-])mage\s`)
 
+// verifyReleasePublishGate asserts the order release.yml's release job
+// publishes in, which is what #603's fix rests on and nothing else checks
+// before a tag:
+//
+//   - the step that hashes the artefacts renames ~ to . first, so
+//     checksums.txt names each package as GitHub will publish it, for as long
+//     as packageFileNameRE lets a tilde into a package filename;
+//   - `gh release create` creates a draft;
+//   - a later step reads the draft's asset names back with `gh release view`
+//     and compares them with checksums.txt;
+//   - the job's last step, and only that one, publishes with --draft=false.
+//
+// The repository's releases are immutable once published, so each of these
+// failing open has the same cost: lose the rename and the release is refused at
+// tag time, which spends a version number; lose the draft, or move the
+// publication ahead of the read-back, and the read-back can only report a
+// release that is already wrong for good.
+//
+// Wired into dev:check with its own banner.
+func verifyReleasePublishGate() error {
+	relSrc, err := os.ReadFile(filepath.Join(".github", "workflows", "release.yml"))
+	if err != nil {
+		return err
+	}
+	return verifyReleasePublishGateIn(relSrc, packageFileNameRE.MatchString("~"))
+}
+
+// verifyReleasePublishGateIn is verifyReleasePublishGate over caller-supplied
+// workflow contents. tildeAllowed says whether packageFileNameRE admits a
+// tilde, which is the only case that needs the rename; it is a parameter so
+// both cases are reachable from a spec.
+func verifyReleasePublishGateIn(relSrc []byte, tildeAllowed bool) error {
+	steps, err := workflowJobSteps(relSrc, "release")
+	if err != nil {
+		return fmt.Errorf("release.yml: %w", err)
+	}
+
+	hash, create, readBack, publish := -1, -1, -1, -1
+	for i, run := range steps {
+		if releaseChecksumsRE.MatchString(run) {
+			hash = i
+		}
+		if strings.Contains(run, "gh release create") {
+			create = i
+		}
+		if strings.Contains(run, "gh release view") && strings.Contains(run, "checksums.txt") {
+			readBack = i
+		}
+		if strings.Contains(run, "--draft=false") {
+			if publish != -1 {
+				return fmt.Errorf("release.yml: more than one release-job step publishes with --draft=false; " +
+					"publish once, as the last step, after the asset names are checked")
+			}
+			publish = i
+		}
+	}
+
+	if tildeAllowed {
+		if hash == -1 {
+			return fmt.Errorf("release.yml: no release-job step writes checksums.txt with sha256sum; " +
+				"if it was reshaped, teach verifyReleasePublishGate to find it rather than deleting the check")
+		}
+		rename := releaseRenameRE.FindStringIndex(steps[hash])
+		if rename == nil || rename[0] > releaseChecksumsRE.FindStringIndex(steps[hash])[0] {
+			return fmt.Errorf("release.yml: the step that writes checksums.txt does not rename ~ to . before " +
+				"hashing, but packageFileNameRE lets a tilde into a package filename. GitHub renames ~ in an " +
+				"asset name, so checksums.txt would name files the release does not have (#603)")
+		}
+	}
+	if create == -1 {
+		return fmt.Errorf("release.yml: no release-job step runs `gh release create`; if the release " +
+			"step was reshaped, teach verifyReleasePublishGate to find it rather than deleting the check")
+	}
+	if !releaseDraftFlagRE.MatchString(steps[create]) {
+		return fmt.Errorf("release.yml: `gh release create` does not pass --draft. Releases here are " +
+			"immutable once published, so the asset names must be checked while the release is still a draft")
+	}
+	if readBack == -1 || readBack < create {
+		return fmt.Errorf("release.yml: no step after `gh release create` reads the draft's asset names " +
+			"back with `gh release view` and compares them with checksums.txt")
+	}
+	if publish != len(steps)-1 || publish < readBack {
+		return fmt.Errorf("release.yml: the release job's last step must publish the draft with " +
+			"`gh release edit --draft=false`, after the asset names are checked and with nothing after it")
+	}
+	return nil
+}
+
+// workflowJobSteps returns the shell of each of one job's steps, in order and
+// with whole-line comments removed; a step with no `run:` is an empty string,
+// so indexes are step positions. (Not split: splitting "" yields one empty
+// line, which would come back as "\n" -- the pitfall workflowRunScripts
+// records.) workflowRunScripts flattens a job's shell
+// into one string, which loses the order between steps that
+// verifyReleasePublishGate exists to check.
+func workflowJobSteps(src []byte, job string) ([]string, error) {
+	var doc struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Run string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return nil, err
+	}
+	j, ok := doc.Jobs[job]
+	if !ok {
+		return nil, fmt.Errorf("job %q not found", job)
+	}
+	out := make([]string, 0, len(j.Steps))
+	for _, s := range j.Steps {
+		if s.Run == "" {
+			out = append(out, "")
+			continue
+		}
+		var b strings.Builder
+		for _, line := range strings.Split(s.Run, "\n") {
+			if !isCommentLine(line) {
+				b.WriteString(line)
+				b.WriteByte('\n')
+			}
+		}
+		out = append(out, b.String())
+	}
+	return out, nil
+}
+
+// releaseChecksumsRE finds the line that writes checksums.txt. It is compiled
+// from releaseArtefactSites' own pattern for that line, so teaching that site
+// a new shape teaches this guard too.
+var releaseChecksumsRE = func() *regexp.Regexp {
+	for _, site := range releaseArtefactSites() {
+		if strings.HasPrefix(site.pattern, "sha256sum ") {
+			return regexp.MustCompile(site.pattern)
+		}
+	}
+	panic("releaseArtefactSites has no sha256sum site")
+}()
+
+// releaseRenameRE finds the release job's ~-to-. rename: the loop from its
+// `for` over the tilde-named files to its `done`. Shared with the spec that
+// runs it, so what is checked here is what is executed there.
+var releaseRenameRE = regexp.MustCompile(`(?ms)^for f in \./\*'~'\*; do$.*?^done$`)
+
+// releaseDraftFlagRE matches a --draft flag, and not --draft=false.
+var releaseDraftFlagRE = regexp.MustCompile(`(^|\s)--draft($|[\s)])`)
+
 // distPackageBuildCommand is the command release.yml must run to produce the
 // packages. Named as a constant so the check for it cannot drift from the
 // workflow by a rename that leaves a plausible-looking string behind.
@@ -979,9 +1127,10 @@ func globbedExtensionsIn(src []byte) []string {
 // isCommentLine reports whether a line is a whole-line comment -- its first
 // non-space character is `#`.
 //
-// One implementation shared by both strippers (workflowRunScripts over a
-// step's shell, withoutCommentLines over the whole file), because they had the
-// same rule written twice and only one of them documented its limit. Closing
+// One implementation shared by every stripper (workflowRunScripts over a
+// job's shell, workflowJobSteps over each step's, withoutCommentLines over the
+// whole file), because two of them had the same rule written twice and only
+// one of them documented its limit. Closing
 // that limit in one copy would have left the other keeping it, with nothing
 // pointing at the second.
 //
@@ -3839,8 +3988,11 @@ func writeRenderedUnit(distDir, bindir string) (string, string, error) {
 // distVariantSpec.packaged.
 //
 // The filenames are nfpm's conventional ones, which is what apt and dnf
-// expect: openvox-ca_VER_amd64.deb, openvox-ca-VER-1.x86_64.rpm. They carry no
-// variant name, and nothing downstream should try to derive one from them.
+// expect: openvox-ca_VER-1_amd64.deb, openvox-ca-VER-1.x86_64.rpm. They carry no
+// variant name, and nothing downstream should try to derive one from them. A
+// pre-release keeps nfpm's tilde in the filename as well as the version
+// (openvox-ca_1.0.0~alpha1-1_amd64.deb); the GitHub release publishes it with a
+// dot instead -- see packageFileNameRE.
 func (Build) Packages() error {
 	return buildPackagesInto("dist")
 }
@@ -4033,7 +4185,11 @@ func buildVariantPackages(distDir, ver string, v distVariantSpec) ([]string, err
 				"provide it): %w", format, err)
 		}
 
-		out := filepath.Join(distDir, packager.ConventionalFileName(info))
+		name := packager.ConventionalFileName(info)
+		if err := checkPackageFileName(name); err != nil {
+			return nil, fmt.Errorf("%s for %s: %w", format, v.name, err)
+		}
+		out := filepath.Join(distDir, name)
 		f, err := os.Create(out)
 		if err != nil {
 			// Wrapped like every other error here. Bare, this surfaced as an
@@ -4064,6 +4220,34 @@ func buildVariantPackages(distDir, ver string, v distVariantSpec) ([]string, err
 		written = append(written, out)
 	}
 	return written, nil
+}
+
+// packageFileNameRE is every character a package filename may contain.
+//
+// GitHub renames a release asset whose name holds a character it considers
+// special, and checksums.txt then names a file the release does not have
+// (#603). nfpm writes one such character itself: a pre-release version
+// 1.0.0-alpha1 becomes 1.0.0~alpha1 in both the package and its filename, and
+// the tilde stays in the filename deliberately, because a repository that
+// ingests these packages expects nfpm's own names. release.yml's release job
+// renames ~ to . as it stages the GitHub assets, and that is the only mapping
+// it makes. So this allows the tilde and refuses anything else outside the
+// characters every published name already uses -- `+` from semver build
+// metadata, say -- here, on the pull request that sets the version, rather
+// than at tag time. The other half of the pairing, that release.yml still
+// renames the tilde while this admits one, is verifyReleasePublishGate's.
+var packageFileNameRE = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
+
+// checkPackageFileName refuses a package filename the release job could not
+// publish under a name checksums.txt agrees with. See packageFileNameRE.
+func checkPackageFileName(name string) error {
+	if packageFileNameRE.MatchString(name) {
+		return nil
+	}
+	return fmt.Errorf("refusing to write %q: a package filename may contain only letters, digits, "+
+		"'.', '_', '-' and '~'. GitHub renames release assets with other characters, and release.yml's "+
+		"release job maps only '~' (to '.'), so the published name would not match checksums.txt; "+
+		"choose a version without the character, or teach that job to map it", name)
 }
 
 // variantGOARCH recovers a variant's target architecture from its build
@@ -9600,6 +9784,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking the release job's confinement...")
 	if err := verifyReleaseJobConfinement(); err != nil {
+		return err
+	}
+	fmt.Println("Checking the release is published only after its asset names are checked...")
+	if err := verifyReleasePublishGate(); err != nil {
 		return err
 	}
 	fmt.Println("Checking chart version pins...")
