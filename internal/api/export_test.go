@@ -65,3 +65,10 @@ func PrincipalKeyForTest(cn string, domain *TrustDomain) string {
 func PrincipalLogValueForTest(cn string, domain *TrustDomain) slog.Value {
 	return clientPrincipal{cn: cn, domain: domain}.LogValue()
 }
+
+// SetCSRRateLimitedWarnClockForTest replaces the clock behind the throttled
+// Warn for refused CSR submissions, so a spec can move past its interval
+// without sleeping. Only that throttle's: the limiter keeps real time.
+func SetCSRRateLimitedWarnClockForTest(s *Server, now func() time.Time) {
+	s.csrLimitedWarn.now = now
+}
