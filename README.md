@@ -144,8 +144,8 @@ service should serve — see [installing from a
 package](docs/systemd.md#installing-from-a-package). Sharing the account and
 the layout is not the same as having no decision to make.
 
-**They are not published as release assets yet**, so for now they are built
-from a checkout. [Installing from a
+Each release publishes them as assets beside the tarballs, and they can also be
+built from a checkout. [Installing from a
 package](docs/systemd.md#installing-from-a-package) has the commands, and what
 provisioning does, what an uninstall deliberately leaves behind, and the cost of
 sharing the `puppet` account.
