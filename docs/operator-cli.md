@@ -683,7 +683,8 @@ Deployment was running — the subsection below has how to read that back — an
 with a retrieval step for the key: a `--key-out` path inside a Job pod that is
 then reaped is the same as having no key at all.
 
-One more asymmetry to expect: a running server answers OCSP `unknown` for a
+One more asymmetry to expect: a running server that serves OCSP
+([`enable_ocsp`](configuration.md#serving-ocsp)) answers `unknown` for a
 certificate minted this way until it restarts, because its serial index is built
 at startup. The CRL and the inventory are correct immediately.
 
@@ -961,17 +962,18 @@ inventory lines as they are.
 With no flags it reports and changes nothing, which is the safe way to inspect
 a CA that will not start.
 
-One caveat when the CA is still running, and it applies to **every** backend.
-Reporting takes no store-wide instance lock, and it reads the inventory and the
-stored integrity value as two separate operations — so an append committing between
-them leaves `computed` covering one set of entries and `stored` covering
-another. A `verifies: NO` seen against a live server can therefore be a false
-alarm. This is not about whether the backend's append is atomic: an atomic write
-by the server does not make the reader's two reads one snapshot, so PostgreSQL
-and etcd are as exposed to it as the filesystem backend. Re-check with the
-server stopped before believing a NO — nothing acts on the reading in the
-meantime, because `--yes-re-bless` refuses while a server holds the store, or
-asks for `--replicas-stopped` where no lock can prove that it does not.
+One caveat when the CA is still running, on the `filesystem` backend (scheme
+`whole-blob-hmac`). Reporting takes no store-wide instance lock, and there it
+reads the inventory and the stored integrity value as two separate operations —
+so an append committing between them leaves `computed` covering one set of
+entries and `stored` covering another, and a `verifies: NO` seen against a live
+server can be a false alarm. Re-check with the server stopped before believing
+it; the report says so beside the verdict. The other backends (scheme
+`hash-chain`) read the rows and the stored value from one snapshot, so a NO
+there is a real mismatch even against a live server. Either way nothing acts on
+the reading in the meantime, because `--yes-re-bless` refuses while a server
+holds the store, or asks for `--replicas-stopped` where no lock can prove that
+it does not.
 
 ```console
 $ openvox-ca rebuild-inventory-hmac

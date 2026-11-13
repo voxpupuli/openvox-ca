@@ -187,10 +187,12 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > rather than only the one that noticed. On the revoke paths alone it also counts
 > a malformed serial, or an inventory read that failed while resolving the
 > subject's serial — which on the filesystem backend includes an **integrity
-> MAC that no longer verifies**, since both revoke paths verify there, so this
-> counter is the one a tamper signal reaches on the default backend (see the
-> [inventory integrity threat
+> MAC that no longer verifies**, since both revoke paths verify there, so a
+> tamper signal can surface here too, under a CRL name (see the [inventory
+> integrity threat
 > model](development/inventory-store.md#inventory-integrity-threat-model-and-rationale)).
+> Alert on `openvoxca_inventory_verify_failures_total{reason="tampered"}`
+> ([inventory verification](#inventory-verification)) for that, not on this.
 > That last one
 > includes a revocation whose wait for the per-subject lock spent the 60-second
 > budget behind another goroutine *in this process* on the single-node backends,
@@ -358,8 +360,11 @@ deployment's signer, and the two answers look different:
   signer has capacity to spare → the limit is too low. Raise it.
 - Shedding in bursts that correlate with request volume rather than with
   issuance → something is driving `/ocsp` harder than this responder is sized
-  for. That is either growth to provision for or a caller to rate-limit
-  upstream.
+  for. That is either growth to provision for or a caller to rate-limit. One
+  address driving it is what [`ocsp_rate_limit`](configuration.md#rate-limit)
+  is for: check it is enabled and sized, and compare with
+  `openvoxca_ocsp_rate_limited_total`. A flood spread across many addresses
+  needs limiting upstream.
 
 `openvoxca_ca_signing_limit` is worth an alert of its own where an operator
 intends signing to be bounded, because `0` is a legitimate configured value and
@@ -379,8 +384,15 @@ sum the series across the job to see what the signer actually faces.
 | --- | --- |
 | `openvoxca_ocsp_index_serials` | Number of certificate serials **this replica's** responder recognises. A serial it does not hold is answered `unknown`, before the CRL is consulted. |
 | `openvoxca_ocsp_index_sync_failures_total` | Counter of failures to reload the inventory into that index — an unreadable inventory, or one whose integrity MAC no longer verifies. While it rises the replica keeps whatever index it already held. Resets to `0` on process restart. |
+| `openvoxca_ocsp_rate_limited_total` | Counter of OCSP requests refused with `tryLater` over HTTP `429` because their client address was over [`ocsp_rate_limit`](configuration.md#rate-limit), or was new while the limiter was already tracking its maximum of addresses. Not the same as `openvoxca_ca_signing_shed_total`, which counts the responder at capacity rather than one client over its budget. A steady rise with no flood behind it means a legitimate verifier needs a higher limit, or several share one address through a proxy. Resets to `0` on process restart. |
 
-Both are per-process, like the two CRL series above, and that is the point:
+All three are exported only while [`enable_ocsp`](configuration.md#serving-ocsp)
+serves the responder. With it off nothing answers from the index and no sync
+refreshes it from peers, so the series would describe nothing an operator acts
+on, and `OpenVoxCAOCSPIndexSyncFailing` has nothing to evaluate. No shipped alert reads
+the rate-limit counter.
+
+The two index series are per-process, like the two CRL series above, and that is the point:
 every replica sharing a backend should converge on the same
 `openvoxca_ocsp_index_serials` within one `ocsp_index_sync_interval_sec` (5m by
 default). One persistently below the others is reporting valid certificates as
@@ -418,6 +430,28 @@ local issuance defers its removals, so pruned serials linger an interval or two.
 `openvoxca_ocsp_index_sync_failures_total` has a shipped alert
 (`OpenVoxCAOCSPIndexSyncFailing`); the fleet-relative gauge comparison above does
 not, and has to be added by hand if you want it.
+
+### Inventory verification
+
+| Metric | Description |
+| --- | --- |
+| `openvoxca_inventory_verify_failures_total{reason}` | Counter of failed periodic inventory verifications. `reason="tampered"`: the stored integrity value (whole-blob HMAC or hash-chain head) no longer matches the inventory, so rows were added, removed or edited outside the CA. `reason="read_error"`: the inventory could not be read at all. Both series are always present. Resets to `0` on process restart. |
+
+Every replica runs the verification on every backend, once per
+[`inventory_verify_interval_sec`](configuration.md#inventory-verification) (5m
+by default), whatever `enable_ocsp` says. `OpenVoxCAInventoryTampered` alerts on
+the `tampered` reason, critical and on the first detection. A rising
+`read_error` is a storage problem rather than an integrity one, but it still
+means the inventory is not being verified. On the filesystem backend nothing
+else notices it: readiness reflects only the key and certificate in memory, and
+the collector's scrape does not read the inventory there. On the structured
+backends the scrape reads it through the certificate index, so a failure there
+also shows as `OpenVoxCAScrapeFailing`, without naming the inventory.
+`OpenVoxCAInventoryUnreadable` warns on it once three passes in 30 minutes have
+failed, after a further 5 minutes, so a single failure during a backend restart
+does not raise it. The CA log carries the detail: the
+`inventory HMAC mismatch` line, with the scheme and a repair hint, for a
+mismatch, and `Inventory verification failed` for a failed read.
 
 ### Delayed supersession
 
@@ -762,7 +796,9 @@ CA/CRL/leaf expiry, pending requests, CRL update failures
 (`openvoxca_crl_update_failures_total`), a replica whose CRL has fallen behind
 the stored one (`openvoxca_crl_cached_number`,
 `openvoxca_crl_sync_failures_total`), a replica that cannot reload its OCSP
-serial index (`openvoxca_ocsp_index_sync_failures_total`), delayed revocations
+serial index (`openvoxca_ocsp_index_sync_failures_total`, while `enable_ocsp`
+serves the responder), an inventory that fails its integrity check or cannot
+be read to check it (`openvoxca_inventory_verify_failures_total`), delayed revocations
 that were lost or could not be carried out
 (`openvoxca_supersede_failures_total`), the [upstream CRL
 chain](#upstream-crl-chain) (an ancestor nearing or past its `NextUpdate`, and

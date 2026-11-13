@@ -150,6 +150,31 @@ type Server struct {
 	// address per minute on the unauthenticated PUT /certificate_request
 	// endpoint. Zero (the default) disables rate limiting.
 	CSRRateLimit int
+	// OCSPEnabled registers the OCSP responder's routes, POST /ocsp and
+	// GET /ocsp/{request}. The zero value leaves them unregistered, so a
+	// request answers 404 just as it would from OpenVox Server, which has no
+	// responder. Each nonced request signs with the CA key and the endpoint is
+	// unauthenticated, so a deployment that does not use OCSP should not
+	// expose it.
+	//
+	// This is independent of the CA's OCSPURLs, which only decide what issued
+	// certificates advertise: a URL may name a responder somewhere else.
+	OCSPEnabled bool
+	// OCSPRateLimit is the maximum number of OCSP requests allowed per IP
+	// address per minute, counted in front of the responder whatever the
+	// request holds, so a nonced request that would sign is counted like any
+	// other. Zero (the default) disables it. Its own budget, not
+	// CSRRateLimit's: verifier traffic from an address must not spend that
+	// address's CSR submissions.
+	OCSPRateLimit int
+	// OnOCSPRateLimited, when set, is called once for each request
+	// OCSPRateLimit refuses. The server points it at a Prometheus counter.
+	OnOCSPRateLimited func()
+	// RateLimitIPv6PrefixLength is how many leading bits of an IPv6 client
+	// address CSRRateLimit and OCSPRateLimit count together, so that a host
+	// holding a routed prefix shares one budget across it. Zero (the default)
+	// and 128 both key on the whole address. IPv4 is always per address.
+	RateLimitIPv6PrefixLength int
 	// PlainHTTP is set when the server is running without TLS and the
 	// operator has not set insecure_allow_plain_http_generate. The /generate
 	// endpoint refuses to serve private keys when this is true.
@@ -167,6 +192,7 @@ type Server struct {
 	SerialNumberFormat SerialNumberFormat
 
 	csrLimiter     *ipRateLimiter
+	ocspLimiter    *ipRateLimiter
 	destructiveOps *destructiveOpTracker
 }
 
@@ -182,15 +208,19 @@ func New(c *ca.CA) *Server {
 // so the Go CA can be used directly or behind a stripping proxy.
 func (s *Server) Routes() http.Handler {
 	if s.CSRRateLimit > 0 {
-		s.csrLimiter = newIPRateLimiter(s.CSRRateLimit, time.Minute)
+		s.csrLimiter = newIPRateLimiter("csr", s.CSRRateLimit, time.Minute)
+	}
+	if s.OCSPEnabled && s.OCSPRateLimit > 0 {
+		s.ocspLimiter = newIPRateLimiter("ocsp", s.OCSPRateLimit, time.Minute)
 	}
 
 	mux := http.NewServeMux()
 
-	routes := []struct {
+	type route struct {
 		method, path string
 		handler      http.HandlerFunc
-	}{
+	}
+	routes := []route{
 		{"GET", "/certificate_status/{subject}", s.handleGetStatus},
 		{"PUT", "/certificate_status/{subject}", s.handlePutStatus},
 		{"DELETE", "/certificate_status/{subject}", s.handleDeleteStatus},
@@ -203,14 +233,18 @@ func (s *Server) Routes() http.Handler {
 		{"PUT", "/certificate/{subject}", s.handlePutCert},
 		{"GET", "/certificate_revocation_list/ca", s.handleGetCRL},
 		{"PUT", "/certificate_revocation_list/ca", s.handleReissueCRL},
-		{"POST", "/ocsp", s.handleOCSP},
-		{"GET", "/ocsp/{request}", s.handleOCSP},
 		{"GET", "/expirations", s.handleGetExpirations},
 		{"POST", "/sign", s.handlePostSign},
 		{"POST", "/sign/all", s.handlePostSignAll},
 		{"PUT", "/clean", s.handlePutClean},
 		{"POST", "/generate/{subject}", s.handlePostGenerate},
 		{"POST", "/certificate_renewal", s.handlePostCertificateRenewal},
+	}
+	if s.OCSPEnabled {
+		routes = append(routes,
+			route{"POST", "/ocsp", s.handleOCSP},
+			route{"GET", "/ocsp/{request}", s.handleOCSP},
+		)
 	}
 
 	prefixes := []string{"", "/puppet-ca/v1"}
@@ -816,7 +850,7 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 	// SECURITY: Per-IP rate limiting on the unauthenticated CSR submission
 	// endpoint. Prevents CSR flooding denial-of-service attacks.
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
-	if s.csrLimiter != nil && !s.csrLimiter.Allow(clientIP(r)) {
+	if s.csrLimiter != nil && !s.csrLimiter.Allow(rateLimitKey(r, s.RateLimitIPv6PrefixLength)) {
 		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}

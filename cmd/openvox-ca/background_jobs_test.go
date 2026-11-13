@@ -39,11 +39,33 @@ func jobNames(cfg *serverConfig) []string {
 var _ = Describe("backgroundJobs", func() {
 	// The default backend is filesystem, so the default job set deliberately
 	// does not include the OCSP index sync; the table below owns that decision.
-	It("runs CRL refresh, CRL sync and the superseded sweep by default, and cleanup only on request", func() {
-		Expect(jobNames(&serverConfig{})).To(ConsistOf(jobCRLRefresh, jobCRLSync, jobSupersededSweep))
+	It("runs CRL refresh, CRL sync, inventory verification and the superseded sweep by default, and cleanup only on request", func() {
+		Expect(jobNames(&serverConfig{})).
+			To(ConsistOf(jobCRLRefresh, jobCRLSync, jobInventoryVerify, jobSupersededSweep))
 		Expect(jobNames(&serverConfig{EnableExpiredCertCleanup: true})).
-			To(ConsistOf(jobCRLRefresh, jobCRLSync, jobSupersededSweep, jobCertCleanup))
+			To(ConsistOf(jobCRLRefresh, jobCRLSync, jobInventoryVerify, jobSupersededSweep, jobCertCleanup))
 	})
+
+	// The periodic tamper check. It used to ride on the OCSP index sync, which
+	// runs only on the shared backends and only while the responder is served,
+	// so it must not inherit either condition: every backend, OCSP on or off.
+	DescribeTable("runs inventory verification on every backend, whatever enable_ocsp says",
+		func(backend string, enableOCSP bool) {
+			Expect(jobNames(&serverConfig{
+				StorageConfig: config.StorageConfig{StorageBackend: backend},
+				EnableOCSP:    enableOCSP,
+			})).To(ContainElement(jobInventoryVerify))
+		},
+		Entry("filesystem, OCSP off", "filesystem", false),
+		Entry("the empty default, OCSP off", "", false),
+		Entry("sqlite, OCSP off", "sqlite", false),
+		Entry("etcd, OCSP off", "etcd", false),
+		Entry("redis, OCSP off", "redis", false),
+		Entry("postgres, OCSP off", "postgres", false),
+		Entry("mysql, OCSP off", "mysql", false),
+		Entry("filesystem, OCSP on", "filesystem", true),
+		Entry("postgres, OCSP on", "postgres", true),
+	)
 
 	// The same promise as the CRL-sync one below, for the other list a
 	// configuration change can strand. superseded_cert_revoke_after_sec decides
@@ -76,9 +98,10 @@ var _ = Describe("backgroundJobs", func() {
 	It("still runs both sync jobs and the superseded sweep when every other job is switched off", func() {
 		Expect(jobNames(&serverConfig{
 			StorageConfig:            config.StorageConfig{StorageBackend: "etcd"},
+			EnableOCSP:               true,
 			DisableCRLRefresh:        true,
 			EnableExpiredCertCleanup: false,
-		})).To(ConsistOf(jobCRLSync, jobOCSPIndexSync, jobSupersededSweep))
+		})).To(ConsistOf(jobCRLSync, jobOCSPIndexSync, jobInventoryVerify, jobSupersededSweep))
 	})
 
 	// The OCSP index goes stale when a *second* process issues certificates
@@ -94,7 +117,10 @@ var _ = Describe("backgroundJobs", func() {
 	// and nothing in the logs says why.
 	DescribeTable("starts the OCSP index sync only where a second writer is possible",
 		func(backend string, want bool) {
-			names := jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: backend}})
+			names := jobNames(&serverConfig{
+				StorageConfig: config.StorageConfig{StorageBackend: backend},
+				EnableOCSP:    true,
+			})
 			if want {
 				Expect(names).To(ContainElement(jobOCSPIndexSync))
 			} else {
@@ -114,14 +140,35 @@ var _ = Describe("backgroundJobs", func() {
 
 	// Not gated on ocsp_url, which is a different question: that setting
 	// decides whether issued certificates carry an AIA extension pointing here,
-	// while /ocsp answers either way. On a shared backend the job runs whatever
-	// it says, so an operator distributing the responder URL by another route
-	// still gets correct answers.
+	// while with enable_ocsp set /ocsp answers either way. On a shared backend
+	// with the responder on, the job runs whatever ocsp_url says, so an operator
+	// distributing the responder URL by another route still gets correct
+	// answers.
 	It("runs the OCSP index sync on a shared backend whatever ocsp_url says", func() {
-		Expect(jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: "etcd"}})).To(ContainElement(jobOCSPIndexSync))
-		Expect(jobNames(&serverConfig{StorageConfig: config.StorageConfig{StorageBackend: "etcd"}, OCSPUrl: "http://ca.example.com:8140/ocsp"})).
+		etcd := config.StorageConfig{StorageBackend: "etcd"}
+		Expect(jobNames(&serverConfig{StorageConfig: etcd, EnableOCSP: true})).To(ContainElement(jobOCSPIndexSync))
+		Expect(jobNames(&serverConfig{StorageConfig: etcd, EnableOCSP: true, OCSPUrl: "http://ca.example.com:8140/ocsp"})).
 			To(ContainElement(jobOCSPIndexSync))
 	})
+
+	// The index feeds the responder and nothing else, so with the responder
+	// off a pass re-reads the whole inventory for nobody. A shared backend is
+	// the only place the job would otherwise run, so that is where the switch
+	// has to be seen to win -- ocsp_url included, which advertises a responder
+	// but does not serve one.
+	DescribeTable("does not run the OCSP index sync while enable_ocsp is off",
+		func(backend string) {
+			Expect(jobNames(&serverConfig{
+				StorageConfig: config.StorageConfig{StorageBackend: backend},
+				OCSPUrl:       "http://ca.example.com:8140/ocsp",
+			})).NotTo(ContainElement(jobOCSPIndexSync))
+		},
+		Entry("etcd", "etcd"),
+		Entry("redis", "redis"),
+		Entry("postgres", "postgres"),
+		Entry("mysql", "mysql"),
+		Entry("a name that does not parse", "no-such-backend"),
+	)
 
 	// crl_chain_file gates the chain refresh on its own, and nothing else gates
 	// it. The failure this pins is not "the job is missing" but "the job is
@@ -141,11 +188,12 @@ var _ = Describe("backgroundJobs", func() {
 		// else is required for the chain refresh to be scheduled, and only an
 		// exhaustive assertion can carry it. jobSupersededSweep is in the set
 		// because it registers unconditionally, delay or no delay, so that it
-		// can drain a list an earlier configuration may have filled.
+		// can drain a list an earlier configuration may have filled, and
+		// jobInventoryVerify because it too runs on every configuration.
 		Expect(jobNames(&serverConfig{
 			DisableCRLRefresh:        true,
 			EnableExpiredCertCleanup: false,
 			CRLChainFile:             "/etc/openvox-ca/upstream-crls.pem",
-		})).To(ConsistOf(jobCRLSync, jobSupersededSweep, jobCRLChainRefresh))
+		})).To(ConsistOf(jobCRLSync, jobInventoryVerify, jobSupersededSweep, jobCRLChainRefresh))
 	})
 })

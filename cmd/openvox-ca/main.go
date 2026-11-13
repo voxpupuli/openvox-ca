@@ -40,11 +40,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/config"
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
 	"github.com/voxpupuli/openvox-ca/internal/sdnotify"
@@ -600,6 +602,31 @@ func plainHTTPGenerateNotice(cfg *serverConfig, tlsConfigured bool) string {
 		"returns private keys in cleartext, without client authentication, to any caller that can reach the listener"
 }
 
+// ocspURLWithoutResponderNotice is the startup warning for an ocsp_url set
+// while enable_ocsp is not. Issued certificates then advertise a responder this
+// server does not serve, which is right when the URL names one elsewhere and a
+// mistake when it names this one. Only a warning, because the server cannot
+// tell which. Empty otherwise.
+func ocspURLWithoutResponderNotice(cfg *serverConfig) string {
+	if cfg.EnableOCSP || cfg.OCSPUrl == "" {
+		return ""
+	}
+	return "ocsp_url is set but enable_ocsp is not, so issued certificates advertise an OCSP responder " +
+		"this server does not serve; set enable_ocsp to serve /ocsp, or ignore this if ocsp_url names a " +
+		"responder elsewhere"
+}
+
+// metricsOptions maps cfg to the CA collector's options. It is a function of
+// its own so that the mapping from enable_ocsp to the series it removes can be
+// stated as a table; the serve command's metrics-listener specs in
+// ocsp_serve_test.go pin its call site.
+func metricsOptions(cfg *serverConfig) []metrics.Option {
+	if !cfg.EnableOCSP {
+		return []metrics.Option{metrics.WithoutOCSPResponder()}
+	}
+	return nil
+}
+
 // defaultCSRRateLimit is the built-in CSR submission cap (per IP per minute)
 // applied when no rate limit is configured on any layer.
 const defaultCSRRateLimit = 60
@@ -615,6 +642,62 @@ func resolveCSRRateLimit(configured int) int {
 		return defaultCSRRateLimit
 	}
 	return configured
+}
+
+// defaultOCSPRateLimit is the built-in OCSP request cap (per IP per minute).
+// Five a second: a stapling server or an occasional `openssl ocsp` asks far
+// less often than that, while it holds one anonymous address to at most five
+// CA-key signatures a second. Higher than the CSR limit because a proxy that
+// does not preserve client addresses folds every verifier behind it into one
+// budget.
+const defaultOCSPRateLimit = 300
+
+// resolveOCSPRateLimit maps a configured OCSP rate limit to the value handed to
+// the server, by resolveCSRRateLimit's convention: the -1 sentinel takes
+// defaultOCSPRateLimit, and 0 and positive values pass through.
+func resolveOCSPRateLimit(configured int) int {
+	if configured < 0 {
+		return defaultOCSPRateLimit
+	}
+	return configured
+}
+
+// applyRateLimits hands srv the per-IP rate limits in cfg. For both limits an
+// explicit 0 from any layer (flag, environment or file) disables it, and the
+// unset sentinel (-1) falls back to the default. A function of its own so that
+// a spec can pin the join from configuration to server, which would otherwise
+// sit inline in the server start-up where nothing can reach it. It logs the
+// effective CSR limit and keying, since the prefix length is otherwise visible
+// nowhere; the OCSP limit has its own line with the responder.
+func applyRateLimits(srv *api.Server, cfg *serverConfig) {
+	srv.CSRRateLimit = resolveCSRRateLimit(cfg.CSRRateLimit)
+	srv.OCSPRateLimit = resolveOCSPRateLimit(cfg.OCSPRateLimit)
+	srv.RateLimitIPv6PrefixLength = cfg.RateLimitIPv6PrefixLength
+	// A limit of 0 is off, not "nothing allowed", so it is not logged as a
+	// rate: the OCSP line makes the same distinction.
+	csr := []any{"csr_rate_limit_per_minute", srv.CSRRateLimit}
+	if srv.CSRRateLimit == 0 {
+		csr = []any{"csr_rate_limit", "off"}
+	}
+	slog.Info("Per-IP rate limits",
+		append(csr, "rate_limit_ipv6_prefix_length", srv.RateLimitIPv6PrefixLength)...)
+}
+
+// newOCSPRateLimitedCounter registers openvoxca_ocsp_rate_limited_total on reg.
+// Only while the responder is served, like the openvoxca_ocsp_index_* series.
+func newOCSPRateLimitedCounter(reg prometheus.Registerer) prometheus.Counter {
+	c := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: constants.MetricsNamespace,
+		Subsystem: "ocsp",
+		Name:      "rate_limited_total",
+		Help: "Total OCSP requests refused with RFC 6960 tryLater over HTTP 429 because their " +
+			"client address was over ocsp_rate_limit, or was new while the limiter was already " +
+			"tracking its maximum of addresses and no sweep freed room. Unlike " +
+			"openvoxca_ca_signing_shed_total, which counts the responder at capacity, this " +
+			"counts clients over their own budget.",
+	})
+	reg.MustRegister(c)
+	return c
 }
 
 // serialNumberFormat parses cfg's serial_number_format, naming the key in the
@@ -735,9 +818,12 @@ func newRootCmd() *cobra.Command {
 		noTLSRequired           bool
 		allowPublicStatus       bool
 		ocspURL                 string
+		enableOCSP              bool
 		crlURL                  string
 		metricsListen           string
 		csrRateLimit            int
+		ocspRateLimit           int
+		rateLimitIPv6Prefix     int
 		caSigningConcurrency    int
 		configFile              string
 		encryptCAKey            bool
@@ -852,6 +938,9 @@ func newRootCmd() *cobra.Command {
 			if cmd.Flags().Changed("ocsp-url") {
 				cfg.OCSPUrl = ocspURL
 			}
+			if cmd.Flags().Changed("enable-ocsp") {
+				cfg.EnableOCSP = enableOCSP
+			}
 			if cmd.Flags().Changed("crl-url") {
 				cfg.CRLUrl = crlURL
 			}
@@ -860,6 +949,15 @@ func newRootCmd() *cobra.Command {
 			}
 			if cmd.Flags().Changed("csr-rate-limit") {
 				cfg.CSRRateLimit = csrRateLimit
+			}
+			if cmd.Flags().Changed("ocsp-rate-limit") {
+				cfg.OCSPRateLimit = ocspRateLimit
+			}
+			if cmd.Flags().Changed("rate-limit-ipv6-prefix-length") {
+				if err := checkRateLimitIPv6PrefixLength(rateLimitIPv6Prefix); err != nil {
+					return err
+				}
+				cfg.RateLimitIPv6PrefixLength = rateLimitIPv6Prefix
 			}
 			if cmd.Flags().Changed("ca-signing-concurrency") {
 				cfg.CASigningConcurrency = caSigningConcurrency
@@ -1153,6 +1251,9 @@ func newRootCmd() *cobra.Command {
 			if msg := plainHTTPGenerateNotice(cfg, tlsConfigured); msg != "" {
 				slog.Warn(msg)
 			}
+			if msg := ocspURLWithoutResponderNotice(cfg); msg != "" {
+				slog.Warn(msg, "ocsp_url", cfg.OCSPUrl)
+			}
 			if !tlsConfigured && (cfg.PuppetServer != "" || cfg.PuppetServerFile != "") {
 				slog.Warn("--puppet-server / --puppet-server-file have no effect without TLS; " +
 					"all endpoints are accessible without authentication in plain HTTP mode.")
@@ -1338,11 +1439,18 @@ func newRootCmd() *cobra.Command {
 			// --- HTTP(S) Server ---
 			srv := api.New(myCA)
 
-			// CSR rate limiting: an explicit 0 from any layer (flag/env/file)
-			// disables it; the unset sentinel (-1) falls back to the default.
-			srv.CSRRateLimit = resolveCSRRateLimit(cfg.CSRRateLimit)
+			applyRateLimits(srv, cfg)
 			srv.SignBatchLimit = 50 // Default max batch size for sign operations
 			srv.PlainHTTP = generateRefusesPlainHTTP(cfg, tlsConfigured)
+			srv.OCSPEnabled = cfg.EnableOCSP
+			switch {
+			case cfg.EnableOCSP && srv.OCSPRateLimit > 0:
+				slog.Info("OCSP responder enabled at /ocsp", "rate_limit_per_minute", srv.OCSPRateLimit)
+			case cfg.EnableOCSP:
+				slog.Info("OCSP responder enabled at /ocsp without a rate limit (ocsp_rate_limit is 0)")
+			default:
+				slog.Info("OCSP responder disabled; /ocsp is not served (set enable_ocsp to serve it)")
+			}
 			if err := applyResponseFormats(srv, cfg); err != nil {
 				return err
 			}
@@ -1372,10 +1480,15 @@ func newRootCmd() *cobra.Command {
 			// request metrics. When enabled, the API handler is instrumented so
 			// openvoxca_http_* counts requests to the Puppet API, while /metrics is
 			// served on a separate listener (see metricsServer below).
-			handler := srv.Routes()
 			var exporter *metrics.Exporter
 			if cfg.MetricsListen != "" {
-				exporter = metrics.NewExporter(myCA)
+				exporter = metrics.NewExporter(myCA, metricsOptions(cfg)...)
+				if cfg.EnableOCSP {
+					srv.OnOCSPRateLimited = newOCSPRateLimitedCounter(exporter.Registry()).Inc
+				}
+			}
+			handler := srv.Routes()
+			if exporter != nil {
 				handler = exporter.InstrumentHandler(handler)
 			}
 
@@ -1624,10 +1737,13 @@ func newRootCmd() *cobra.Command {
 	f.StringVar(&clientRevocationPolicy, "client-revocation-policy", "", "Revocation checking for client_ca domains: require (default), check, or skip. Our own CA always checks its own CRL")
 	f.BoolVar(&noTLSRequired, "no-tls-required", false, "Allow plain HTTP on non-loopback addresses (use only behind a trusted TLS proxy or in test environments)")
 	f.BoolVar(&allowPublicStatus, "allow-public-status", false, "Allow unauthenticated GET /certificate_status (by default this route is admin-only)")
-	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://openvox-ca:8140/ocsp)")
+	f.StringVar(&ocspURL, "ocsp-url", "", "OCSP responder URL to embed in issued certificates (e.g. http://openvox-ca:8140/ocsp); does not enable the responder")
+	f.BoolVar(&enableOCSP, "enable-ocsp", false, "Serve the unauthenticated OCSP responder at /ocsp (off by default; each nonced request costs a CA-key signature)")
 	f.StringVar(&crlURL, "crl-url", "", "CRL distribution point URL to embed in issued certificates (e.g. http://openvox-ca:8140/puppet-ca/v1/certificate_revocation_list/ca)")
 	f.StringVar(&metricsListen, "metrics-listen", "", "Address for the Prometheus metrics exporter (e.g. 127.0.0.1:9140 or :9140); empty disables it. Serves /metrics over plain HTTP on a separate listener; restrict to a trusted network as it reveals node hostnames")
 	f.IntVar(&csrRateLimit, "csr-rate-limit", -1, "Max CSR submissions per IP per minute on the public PUT /certificate_request endpoint (0 disables; unset uses the default of 60)")
+	f.IntVar(&rateLimitIPv6Prefix, "rate-limit-ipv6-prefix-length", 128, "Leading bits of an IPv6 client address that csr_rate_limit and ocsp_rate_limit count as one client (1-128; 128, the default, is per address; 64 shares one budget across a /64)")
+	f.IntVar(&ocspRateLimit, "ocsp-rate-limit", -1, "Max OCSP requests per IP per minute while --enable-ocsp serves /ocsp; the excess gets RFC 6960 tryLater over HTTP 429 (0 disables; unset uses the default of 300)")
 	f.IntVar(&caSigningConcurrency, "ca-signing-concurrency", -1, "Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound; unset uses max(4, GOMAXPROCS)). Lower it to a remote signer's capacity")
 	f.BoolVar(&encryptCAKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (AES-256-GCM + Argon2id). Requires a passphrase source: --ca-key-passphrase-file or OPENVOX_CA_KEY_PASSPHRASE")
 	f.BoolVar(&insecureAllowWorldKeys, "insecure-allow-world-readable-keys", false,

@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"log/slog"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -37,6 +38,10 @@ func (b failEntriesBackend) Entries(context.Context) ([]InventoryEntry, error) {
 	return nil, b.err
 }
 
+func (b failEntriesBackend) EntriesWithHead(context.Context) ([]InventoryEntry, []byte, bool, error) {
+	return nil, nil, false, b.err
+}
+
 func (b failEntriesBackend) AppendEntry(context.Context, CertRecord, func([]byte) []byte) error {
 	return nil
 }
@@ -51,6 +56,18 @@ func (b failEntriesBackend) PruneEntries(context.Context, func(InventoryEntry) b
 	return nil, nil
 }
 
+// snapshotWithoutHeadBackend answers the snapshot read with no rows and no
+// stored head, as a structured store with no baseline does, while every other
+// read of the rows fails: the baseline's own read, after the snapshot has
+// decided a baseline is needed.
+type snapshotWithoutHeadBackend struct {
+	failEntriesBackend
+}
+
+func (snapshotWithoutHeadBackend) EntriesWithHead(context.Context) ([]InventoryEntry, []byte, bool, error) {
+	return nil, nil, false, nil
+}
+
 // emptyEntriesBackend answers as a structured backend with no decomposed rows,
 // over whatever blob the embedded backend still holds.
 type emptyEntriesBackend struct {
@@ -58,6 +75,19 @@ type emptyEntriesBackend struct {
 }
 
 func (emptyEntriesBackend) Entries(context.Context) ([]InventoryEntry, error) { return nil, nil }
+
+// EntriesWithHead reports no rows, as Entries does, beside whatever head the
+// embedded backend holds.
+func (b emptyEntriesBackend) EntriesWithHead(ctx context.Context) ([]InventoryEntry, []byte, bool, error) {
+	head, err := b.Get(ctx, KeyInventoryHMAC)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, false, nil
+	}
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return nil, head, true, nil
+}
 
 func (emptyEntriesBackend) AppendEntry(context.Context, CertRecord, func([]byte) []byte) error {
 	return nil
@@ -184,6 +214,27 @@ var _ = Describe("InventoryIntegrityReport", func() {
 			_, readErr := svc.InventoryEntries(ctx)
 			Expect(readErr).To(MatchError(ErrInventoryTampered),
 				"and the ordinary path really is fail-closed, so the contrast is real")
+		})
+	})
+
+	// The twin of the spec below. A baseline over an empty chain stores the
+	// nil fold, which SQL reads back as an empty value, and that must come
+	// back as present: the report reads the head with the rows, not through
+	// Get, so it repeats Get's distinction between empty and absent.
+	Describe("when an empty structured inventory has been baselined", func() {
+		It("reports the baseline as stored and verifying", func() {
+			b := newSQLiteBackend()
+			svc := NewWithBackend(b, "")
+			Expect(svc.TouchInventory(ctx)).To(Succeed())
+			Expect(svc.InitHMAC(ctx)).To(Succeed())
+
+			rep, err := svc.InventoryIntegrityReport(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(rep.Entries).To(BeZero(), "premise: the inventory is empty")
+			Expect(rep.StoredHead).NotTo(BeNil(), "a stored empty head is a baseline, not its absence")
+			Expect(rep.StoredHead).To(BeEmpty())
+			Expect(rep.Verifies).To(BeTrue())
 		})
 	})
 

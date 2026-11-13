@@ -289,6 +289,62 @@ func (b *SQLBackend) Entries(ctx context.Context) ([]InventoryEntry, error) {
 	return entries, nil
 }
 
+// EntriesWithHead returns every inventory entry in issuance order and the
+// stored integrity head, both read inside one transaction.
+//
+// One transaction is not enough on its own: at PostgreSQL's default READ
+// COMMITTED each statement takes a fresh snapshot, so an append committed
+// between the two SELECTs would still split them. REPEATABLE READ gives the
+// whole transaction the snapshot of its first read, on PostgreSQL and on
+// MySQL alike. SQLite takes no isolation option and needs none: its read
+// transaction already sees one snapshot until it ends.
+func (b *SQLBackend) EntriesWithHead(ctx context.Context) ([]InventoryEntry, []byte, bool, error) {
+	ctx, cancel := b.callCtx(ctx)
+	defer cancel()
+
+	var opts *sql.TxOptions
+	if b.db.Dialect().Name() != dialect.SQLite {
+		opts = &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}
+	}
+	var (
+		entries []InventoryEntry
+		head    []byte
+		present bool
+	)
+	err := b.db.RunInTx(ctx, opts, func(ctx context.Context, tx bun.Tx) error {
+		var rows []sqlInventoryRow
+		if err := tx.NewSelect().Model(&rows).
+			Column(inventoryEntryColumns...).
+			Order("id ASC").
+			Scan(ctx); err != nil {
+			return err
+		}
+		entries = make([]InventoryEntry, len(rows))
+		for i, r := range rows {
+			entries[i] = r.entry()
+		}
+
+		blob := new(sqlBlob)
+		switch err := tx.NewSelect().Model(blob).Column("data").
+			Where("blob_key = ?", KeyInventoryHMAC).Scan(ctx); {
+		case err == nil:
+			// As Get does: a present but empty value is not an absent one.
+			head, present = blob.Data, true
+			if head == nil {
+				head = []byte{}
+			}
+		case errors.Is(err, sql.ErrNoRows):
+		default:
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return entries, head, present, nil
+}
+
 // LatestSerialForSubject returns the most recently issued serial for subject,
 // wrapping fs.ErrNotExist when the subject has no entry.
 func (b *SQLBackend) LatestSerialForSubject(ctx context.Context, subject string) (string, error) {

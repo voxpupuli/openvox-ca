@@ -26,7 +26,8 @@ re-asserting inventory integrity on a CA that will not start.
 | `--no-pp-cli-auth` | `false` | Disable `pp_cli_auth` extension as an admin credential **for certificates this CA issued**; require CN allow list only. It does not reach `client_ca` entries, which each carry their own `allow_pp_cli_auth` and default to off — see [trusting client certificates from another CA](#trusting-client-certificates-from-another-ca) |
 | `--no-tls-required` | `false` | Allow plain HTTP on non-loopback addresses; use only behind a trusted TLS proxy or in test environments |
 | `--allow-public-status` | `false` | Allow unauthenticated `GET /certificate_status`; by default this endpoint is admin-only, matching Puppet Server's shipped `auth.conf`. "Admin" means an admin CN of the trust domain that verified the client, or `pp_cli_auth` where that domain honours it — see [trusting client certificates from another CA](#trusting-client-certificates-from-another-ca) |
-| `--ocsp-url` | `""` | OCSP responder URL to embed in issued certificates |
+| `--ocsp-url` | `""` | OCSP responder URL to embed in issued certificates. Does not serve the responder; see `--enable-ocsp` |
+| `--enable-ocsp` | `false` | Serve the unauthenticated OCSP responder at `/ocsp`. See [serving OCSP](#serving-ocsp) |
 | `--crl-url` | `""` | CRL distribution point URL to embed in issued certificates |
 | `--metrics-listen` | `""` | Address for the Prometheus exporter (e.g. `127.0.0.1:9140`); empty disables it. See [metrics & monitoring](metrics.md) |
 | `--encrypt-ca-key` | `false` | Encrypt the CA private key at rest (AES-256-GCM + Argon2id). See [CA key security](ca-key-security.md) |
@@ -34,7 +35,9 @@ re-asserting inventory integrity on a CA that will not start.
 | `--insecure-allow-unsafe-autosign-path` | `false` | Run the autosign executable even when someone other than root or the CA's own user could replace it, warning instead of refusing. See [the autosign executable's path](#the-autosign-executables-path) |
 | `--insecure-allow-plain-http-generate` | `false` | Let `POST /generate` return private keys when the server has no TLS, to any caller. See [server-side key generation without TLS](#server-side-key-generation-without-tls) |
 | `--ca-key-passphrase-file` | `""` | Path to file containing the CA key passphrase (first line used) |
-| `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables) |
+| `--csr-rate-limit` | `60` | Max CSR submissions per IP per minute on the public `PUT /certificate_request` endpoint (0 disables). Keyed and bounded as [rate limit](#rate-limit) describes |
+| `--ocsp-rate-limit` | `300` | Max OCSP requests per IP per minute while `--enable-ocsp` serves `/ocsp` (0 disables). See [serving OCSP](#serving-ocsp) |
+| `--rate-limit-ipv6-prefix-length` | `128` | Leading bits of an IPv6 client address that `--csr-rate-limit` and `--ocsp-rate-limit` count as one client (1-128). See [rate limit](#rate-limit) |
 | `--ca-signing-concurrency` | `max(4, GOMAXPROCS)` | Max concurrent CA-key signatures across issuance, CRL re-signing and the OCSP responder (0 disables the bound) |
 | `--single-process` | `false` | Disable CA key isolation (run signer and frontend in a single process) |
 | `--storage-backend` | `filesystem` | Storage backend for CA state: `filesystem`, `sqlite`, `postgres`, `mysql`, `etcd`, or `redis`. See [storage backends](storage-backends.md) |
@@ -117,6 +120,7 @@ autosign_config: ""
 logfile: ""
 verbosity: 0
 ocsp_url: ""
+enable_ocsp: false # serve the OCSP responder at /ocsp; see "Serving OCSP"
 crl_url: ""
 shutdown_timeout_sec: 0  # graceful HTTP-drain budget on SIGTERM; 0 = built-in default (25s)
 # Memory budget for the process tree (launcher + isolated signer + frontend).
@@ -147,7 +151,9 @@ promote_cn_to_san: true # add the CN as a DNS SAN when a CSR carries none (RFC 2
 allow_subject_alt_names: false # let a CSR request SANs of its own; see "Subject alternative names requested by a CSR"
 allow_duplicate_certs: false # let a CSR replace a pending one or queue beside a certificate; see "Duplicate certificate requests"
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
-csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting
+csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting; see "Rate limit"
+ocsp_rate_limit: 300  # max OCSP requests per IP per minute while enable_ocsp is set; 0 = disable
+rate_limit_ipv6_prefix_length: 128  # IPv6 bits counted as one client by both limits; 64 = one budget per /64; no effect behind a proxy, see "Rate limit"
 # Caps concurrent CA-key signatures across issuance, CRL re-signing and the OCSP
 # responder together. Unset uses max(4, GOMAXPROCS); 0 disables the bound.
 # Lower it to a remote signer's capacity — see "Bounding CA-key signing" below.
@@ -169,10 +175,15 @@ crl_chain_file: ""
 crl_chain_refresh_interval_sec: 0  # how often to re-read it; 0 = built-in default (1h)
 # Background OCSP index sync reloads the inventory into the serial index this
 # replica's OCSP responder answers from, so a certificate signed on another
-# replica stops being reported as "unknown". Read-only; runs on the shared
-# backends only, since nothing else can be writing certificates on filesystem
-# or sqlite. See "OCSP status across replicas" below.
+# replica stops being reported as "unknown". Read-only; runs only while
+# enable_ocsp is set, and on the shared backends only, since nothing else can be
+# writing certificates on filesystem or sqlite. See "OCSP status across
+# replicas" below.
 ocsp_index_sync_interval_sec: 0  # how often to reload; 0 = built-in default (5m)
+# Background inventory verification re-checks the inventory's integrity value on
+# every replica and every backend, whatever enable_ocsp says. Read-only. See
+# "Inventory verification" below.
+inventory_verify_interval_sec: 0  # how often to verify; 0 = built-in default (5m)
 # Background expired-certificate cleanup (opt-in). When enabled, a job removes
 # certificates that expired more than the retention grace period ago from the
 # inventory and the CRL, and deletes their stored signed certificate. Safe to run
@@ -250,9 +261,12 @@ Environment variables mirror the CLI flags:
 | `--no-tls-required` | `OPENVOX_CA_NO_TLS_REQUIRED` |
 | `--allow-public-status` | `OPENVOX_CA_ALLOW_PUBLIC_STATUS` |
 | `--ocsp-url` | `OPENVOX_CA_OCSP_URL` |
+| `--enable-ocsp` | `OPENVOX_CA_ENABLE_OCSP` |
 | `--crl-url` | `OPENVOX_CA_CRL_URL` |
 | `--metrics-listen` | `OPENVOX_CA_METRICS_LISTEN` |
 | `--csr-rate-limit` | `OPENVOX_CA_CSR_RATE_LIMIT` |
+| `--ocsp-rate-limit` | `OPENVOX_CA_OCSP_RATE_LIMIT` |
+| `--rate-limit-ipv6-prefix-length` | `OPENVOX_CA_RATE_LIMIT_IPV6_PREFIX_LENGTH` |
 | `--ca-signing-concurrency` | `OPENVOX_CA_SIGNING_CONCURRENCY` |
 | `--encrypt-ca-key` | `OPENVOX_CA_ENCRYPT_CA_KEY` |
 | `--insecure-allow-world-readable-keys` | `OPENVOX_CA_INSECURE_ALLOW_WORLD_READABLE_KEYS` |
@@ -314,6 +328,7 @@ A database password needs the same care. Give it in `--sql-dsn-file`,
 | `crl_chain_file` | `OPENVOX_CA_CRL_CHAIN_FILE` |
 | `crl_chain_refresh_interval_sec` | `OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC` |
 | `ocsp_index_sync_interval_sec` | `OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC` |
+| `inventory_verify_interval_sec` | `OPENVOX_CA_INVENTORY_VERIFY_INTERVAL_SEC` |
 | `enable_expired_cert_cleanup` | `OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP` |
 | `expired_cert_retention_sec` | `OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC` |
 | `expired_cert_cleanup_interval_sec` | `OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC` |
@@ -604,9 +619,9 @@ Three things the window does not cover, all worth knowing before you rely on it:
   the revocation can keep treating the certificate as valid for that long. The
   replica drops its own cached responses for a serial whenever it installs a
   CRL revoking it — by any route, not only the sync — but answers already in a
-  client's or proxy's cache cannot be recalled. This applies whether or not you
-  set `--ocsp-url`: that flag decides whether issued certificates advertise the
-  responder, not whether `/ocsp` answers. An `unknown` is treated differently
+  client's or proxy's cache cannot be recalled. This applies whenever
+  `enable_ocsp` serves the responder, whether or not you set `--ocsp-url`: that
+  flag decides only whether issued certificates advertise it. An `unknown` is treated differently
   and is not subject to this — see
   [OCSP status across replicas](#ocsp-status-across-replicas).
 - **Certificates issued to the agent before it was locked out.** Revoking one
@@ -873,7 +888,136 @@ configured but has never been opened.
 > `crl_chain_file`. Preservation is a no-op on a single-CRL deployment, so that
 > ordering costs nothing.
 
+## Serving OCSP
+
+The OCSP responder, `POST /ocsp` and `GET /ocsp/{request}` (also under
+`/puppet-ca/v1/`), is off by default. Set `enable_ocsp` to serve it:
+
+```yaml
+enable_ocsp: true
+```
+
+It is off by default because it is an unauthenticated endpoint that signs. A
+request carrying a nonce bypasses the response cache, so each one costs a CA-key
+signature, and under `ca_key_provider: openbao` a Transit call as well. Puppet
+agents check revocation against the CRL and never query it, so a deployment
+without OCSP verifiers loses nothing by leaving it off. While it is off both
+paths answer `404`, as they would from OpenVox Server, which has no responder.
+
+`enable_ocsp` and `ocsp_url` are independent. `ocsp_url` decides only whether
+issued certificates advertise a responder in their authority information
+access extension, and it may name one somewhere else; it does not serve this
+one. If `ocsp_url` is set and `enable_ocsp` is not, the server logs a warning at
+startup, because certificates then advertise a responder this server does not
+serve. That is expected when the URL names an external responder, and a mistake
+when it names this one.
+
+With the responder off, nothing reads the serial index it answers from, so the
+OCSP index sync job is not started on any backend and the
+`openvoxca_ocsp_index_*` series are not exported. See
+[OCSP status across replicas](#ocsp-status-across-replicas). The inventory's
+integrity is still re-checked on a timer, by the separate
+[inventory verification](#inventory-verification) job.
+
+### Rate limit
+
+While the responder is served, `ocsp_rate_limit` caps the OCSP requests each
+client IP address may make per minute. The default is 300, five a second. How a
+client is identified and how its budget behaves behind a proxy apply to
+`csr_rate_limit` as well, which is the only per-IP limit a deployment without
+OCSP has.
+
+```yaml
+ocsp_rate_limit: 300   # -1/unset = 300; 0 = no limit
+```
+
+Every request counts, whatever it holds: nonced, nonce-free, malformed, and
+either method on either path. The nonced ones are the reason for the limit,
+since each costs a signature, and counting a malformed one keeps a flood from
+going uncounted for being malformed. A client over its budget is answered RFC
+6960 `tryLater` over HTTP `429 Too Many Requests` until its minute is up, which
+costs no CA-key work. The budget is separate from `csr_rate_limit`'s, so
+verifier traffic from an address does not spend its agents' CSR submissions.
+
+Five a second is far above what a stapling server or an occasional `openssl
+ocsp` needs, and holds one anonymous address to at most five CA-key signatures
+a second on each replica. Raise it for a verifier that checks every connection
+without caching, which a limit hit shows as `openvoxca_ocsp_rate_limited_total`
+rising.
+
+The budget is kept in memory by each replica, so behind a load balancer a
+client's ceiling is `ocsp_rate_limit` times the number of replicas it can
+reach. Size the setting, or a limit at the proxy, with that in mind.
+
+Each replica tracks at most 100,000 addresses at once. A new address arriving
+while every tracked window is still live is refused as if over its limit, until
+windows expire: past that point the choice is between refusing new clients and
+not limiting them, and the second is the flood winning. Addresses already
+tracked keep their budgets throughout. `csr_rate_limit` has the same cap. While
+a replica is in that state it logs `Per-IP rate limiter is full` at `Warn`,
+naming the limiter (`ocsp` or `csr`), at most once every 6 seconds.
+
+That refusal can be provoked. With each IPv6 address counted on its own, one
+host holding a routed `/64` can fill the cap by itself, at about 1,700 requests
+a second for a minute, and every new client on that replica is then refused
+until windows expire: new verifiers, and new agents submitting their first
+CSR. Plan for it if the CA is reachable over IPv6 from networks you do not
+control.
+
+The address is the TCP peer's. `X-Forwarded-For` and similar headers are not
+trusted, because the server takes direct connections and has no trusted-proxy
+setting, and the server does not accept the PROXY protocol. So behind a proxy
+that does not preserve the client's address, the per-IP limits become one
+shared bucket per replica. TLS passthrough through haproxy-ingress, the
+chart's [Ingress](helm-chart.md#ingress) setup, is the measured case: the CA
+sees every connection come from the controller's address. Then:
+
+- `csr_rate_limit`, 60 a minute by default, is one budget for every agent
+  submitting a CSR through the proxy, so a fleet enrolling at once is refused
+  past the 60th request in a minute.
+- `ocsp_rate_limit` is likewise one budget for every verifier.
+- The cap of 100,000 tracked addresses below cannot be reached, so the refusal
+  it causes does not arise.
+- `rate_limit_ipv6_prefix_length` has no effect, since every request carries
+  the proxy's one address.
+
+An `HTTPRoute` or a TLS-terminating ingress behaves the same way. Size each
+limit for the whole fleet behind the proxy, or turn it off with `0` and limit at
+the proxy instead.
+
+By default each IPv6 address is its own client. A host holding a routed `/64`
+can then send from as many addresses as it likes and get a budget for each, so
+against such a client the limit does not bound the signatures it can provoke
+(the signing bound below still caps the total), and it can fill the cap on
+tracked addresses described above. `rate_limit_ipv6_prefix_length` closes both
+by counting every address under a prefix as one client:
+
+```yaml
+rate_limit_ipv6_prefix_length: 64   # 1-128; 128, the default, is per address
+```
+
+`64` is the usual choice, since a `/64` is the smallest prefix normally routed
+to one host or one LAN, and `56` or `48` suit sites where one customer or
+attacker holds a larger allocation. The cost is that every legitimate client
+inside the prefix shares one budget too: a site whose verifiers or agents
+reach the CA from many addresses in one `/64` needs a limit sized for all of
+them. The setting covers `csr_rate_limit` as well, and IPv4 addresses,
+including IPv4-mapped IPv6 ones, are always counted one by one. A value outside
+1-128 refuses startup. The advice above is for clients that reach the CA
+directly: behind a proxy that hides their addresses, such as TLS passthrough
+through haproxy-ingress, every request carries the proxy's address and the
+setting changes nothing.
+
+The limit and the [CA-key signing bound](#bounding-ca-key-signing) answer
+different questions. The bound caps signatures in flight across every client
+together, and the limit caps one address's request rate. Without the limit, one
+address could keep the bound full by itself and leave every other verifier
+answered `tryLater`.
+
 ## OCSP status across replicas
+
+Everything in this section applies only while `enable_ocsp` serves the
+responder.
 
 The responder answers from a second per-process copy of shared state: an index
 of every serial this CA has issued, built from the inventory. A serial the index
@@ -916,7 +1060,8 @@ What that window does and does not mean:
   downward as well as upward.
 - **`filesystem` and `sqlite` are single-node**, so the job has nothing to find
   there and is not started at all: the index stays as it was built at startup,
-  and no periodic inventory read is paid.
+  and this job pays no periodic inventory read
+  ([inventory verification](#inventory-verification) still does).
 
 The read takes no cluster lock and does not re-sign anything, but it is not
 free: it is the whole inventory, so unlike the CRL sync its cost grows with the
@@ -924,9 +1069,9 @@ number of certificates ever issued — one read of the whole thing, as a blob or
 as a row fetch depending on how the backend stores it, plus the small integrity
 value either way. That is what the five-minute default is buying
 back. Lengthening the interval trades cost against the window; there is no
-switch to turn it off, for the same reason the CRL sync has none — a deployment
-cannot opt out of `/ocsp` answering, so it should not be able to opt out of
-answering correctly.
+separate switch to turn it off, because a deployment that serves `/ocsp` should
+not be able to opt out of answering correctly. One that does not serve it
+stops the job with `enable_ocsp`.
 
 Note what the cost scales with: certificates **ever issued**, not certificates
 currently valid, because the inventory keeps a row per issuance for the life of
@@ -943,12 +1088,50 @@ replica reading *above* its peers is not a fault: a pass that overlaps a local
 issuance defers its removals to the next one, so a busy replica can hold pruned
 serials a little longer.
 
+## Inventory verification
+
+Every replica re-reads the whole inventory once per
+`inventory_verify_interval_sec` (five minutes by default) and checks it against
+its stored integrity value: the whole-blob HMAC, or the hash-chain head on the
+backends that store rows. It runs on every backend, whatever `enable_ocsp`
+says, so an edit made outside the CA is reported within an interval rather
+than at the next restart.
+
+```yaml
+inventory_verify_interval_sec: 0   # 0 = built-in default (5m); at most 30 days
+```
+
+A pass takes no cluster lock and writes nothing. A mismatch counts into
+`openvoxca_inventory_verify_failures_total{reason="tampered"}`, which the
+shipped `OpenVoxCAInventoryTampered` alert pages on, and an inventory that
+cannot be read at all counts under `reason="read_error"` instead. Neither stops
+the CA. What a mismatch means is in
+[the inventory store's design notes](development/inventory-store.md), and once
+the cause is established,
+[`openvox-ca rebuild-inventory-hmac`](operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity)
+is the supported way back.
+
+The cost is one read of the whole inventory per replica per interval, so like
+the OCSP index sync it grows with every certificate ever issued, and
+`enable_expired_cert_cleanup` is what bounds it. With `enable_ocsp` set on a
+shared backend the inventory is read twice per interval, once by each job.
+
+The shipped mixin's two inventory alerts are sized for the default interval.
+`OpenVoxCAInventoryTampered` counts over one hour, which needs an interval of
+30 minutes or less; past that, raise `inventoryTamperWindow` to at least twice
+the interval, or the page resolves and re-fires between passes.
+`OpenVoxCAInventoryUnreadable` warns on three failed passes in 30 minutes, so
+its window must hold four intervals; past 7.5 minutes, raise
+`inventoryUnreadableWindow` with it, or that alert can never fire. See the
+[mixin's configuration table](../mixin/README.md#configurable-thresholds).
+
 ## Bounding CA-key signing
 
 `ca_signing_concurrency` caps how many CA-key signatures may be in flight at
 once. The cap is shared across certificate issuance, CRL re-signing and the
 OCSP responder, because they share one key: what needs bounding is the load on
-whatever holds that key, not the load on any one endpoint.
+whatever holds that key, not the load on any one endpoint. With `enable_ocsp`
+off, issuance and CRL re-signing are its only consumers, and nothing sheds.
 
 ```yaml
 ca_signing_concurrency: -1   # -1/unset = max(4, GOMAXPROCS); 0 = unbounded
@@ -956,10 +1139,11 @@ ca_signing_concurrency: -1   # -1/unset = max(4, GOMAXPROCS); 0 = unbounded
 
 ### Why there is a bound at all
 
-`/ocsp` is unauthenticated, the rate limiter in front of the API covers CSR
-submissions only, and an OCSP cache miss signs. Without a cap, an anonymous
-caller can drive as many concurrent signatures as it can open connections,
-against the same key and the same signer that issuance uses.
+While `enable_ocsp` serves it, `/ocsp` is unauthenticated and an OCSP cache
+miss signs. [`ocsp_rate_limit`](#rate-limit) caps each client address's request
+rate, but not the total across addresses. Without a cap, anonymous callers can
+drive as many concurrent signatures as they can open connections, against the
+same key and the same signer that issuance uses.
 
 ### Issuance waits; OCSP is refused
 

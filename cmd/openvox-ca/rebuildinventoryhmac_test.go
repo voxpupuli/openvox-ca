@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -112,6 +113,19 @@ type legacyStructuredBackend struct {
 
 func (legacyStructuredBackend) Entries(context.Context) ([]storage.InventoryEntry, error) {
 	return nil, nil
+}
+
+// EntriesWithHead reports no rows, as Entries does, beside whatever head the
+// cadir underneath holds.
+func (b legacyStructuredBackend) EntriesWithHead(ctx context.Context) ([]storage.InventoryEntry, []byte, bool, error) {
+	head, err := b.Get(ctx, storage.KeyInventoryHMAC)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, false, nil
+	}
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return nil, head, true, nil
 }
 
 func (legacyStructuredBackend) AppendEntry(context.Context, storage.CertRecord, func([]byte) []byte) error {
@@ -1280,3 +1294,27 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac, before it can reach a store
 		Expect(stdout).NotTo(ContainSubstring("Inventory integrity"))
 	})
 })
+
+// The torn-read caveat beside a NO is true only where the report reads the
+// inventory and the stored value apart. Printed on the structured backends, it
+// sent operators to stop every replica to re-confirm a reading that is already
+// consistent.
+var _ = DescribeTable("the live-server caveat beside a NO",
+	func(scheme string, printed bool) {
+		var buf bytes.Buffer
+		reportInventoryIntegrity(&buf, storage.InventoryIntegrityReport{
+			Scheme:       scheme,
+			KeyState:     storage.HMACKeyUsable,
+			StoredHead:   []byte{1, 2, 3, 4},
+			ComputedHead: []byte{5, 6, 7, 8},
+		})
+		Expect(buf.String()).To(ContainSubstring("verifies:      NO"), "premise: a mismatch")
+		if printed {
+			Expect(buf.String()).To(ContainSubstring("re-check with it stopped"))
+		} else {
+			Expect(buf.String()).NotTo(ContainSubstring("re-check with it stopped"))
+		}
+	},
+	Entry("is printed for the whole-blob scheme, which reads twice", storage.InventorySchemeWholeBlob, true),
+	Entry("is not printed for the hash chain, read in one snapshot", storage.InventorySchemeHashChain, false),
+)

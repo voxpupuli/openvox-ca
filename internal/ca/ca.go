@@ -376,6 +376,14 @@ type CA struct {
 	// (openvoxca_ocsp_index_sync_failures_total) for alerting.
 	serialIndexSyncFailures atomic.Uint64
 
+	// inventoryVerifyTampered and inventoryVerifyReadErrors count failed
+	// passes of the periodic inventory verification (see VerifyInventory): an
+	// integrity value that no longer matches, and an inventory that could not
+	// be read at all. Kept apart because only the first is a tamper signal.
+	// Exposed as openvoxca_inventory_verify_failures_total{reason}.
+	inventoryVerifyTampered   atomic.Uint64
+	inventoryVerifyReadErrors atomic.Uint64
+
 	// crlUpdateFailures counts failures to amend the CRL: a CRL that could not
 	// be re-signed, written or read, on any of the five paths that write one
 	// (revoke by subject, revoke by serial, cleanup, reissue, refresh) — the

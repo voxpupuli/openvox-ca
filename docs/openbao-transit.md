@@ -610,12 +610,16 @@ failure and throughput profile; plan for it:
   OCSP responder signs outside the CA's process-wide lock
   ([#197](https://github.com/voxpupuli/openvox-ca/issues/197)), so concurrent
   OCSP requests produce concurrent Transit `sign` calls against the same
-  backend that issuance uses. Two consequences worth planning for:
+  backend that issuance uses. This applies only while
+  [`enable_ocsp`](configuration.md#serving-ocsp) serves the responder, which
+  is off by default. Two consequences worth planning for:
 
-  - `/ocsp` is **unauthenticated**, and the only rate limiter in the server
-    applies to CSR submission, so the request rate is not something the CA
-    bounds for you. A response that misses the cache signs, and an RFC 8954
-    nonced request misses on every request.
+  - `/ocsp` is **unauthenticated**, and its rate limit (`ocsp_rate_limit`, 300
+    a minute by default) is per client address and per replica, so the CA
+    bounds what one address can make each replica sign but not the total
+    across many addresses or replicas. A response that
+    misses the cache signs, and an RFC 8954 nonced request misses on every
+    request.
   - OCSP load and issuance load land on one OpenBao, so a burst of the first
     can consume capacity the second needs. Size and place OpenBao for the sum,
     and if `/ocsp` is exposed to untrusted clients consider fronting it with a

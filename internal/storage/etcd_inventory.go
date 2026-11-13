@@ -280,6 +280,35 @@ func (b *EtcdBackend) Entries(ctx context.Context) ([]InventoryEntry, error) {
 	return entriesOf(recs), nil
 }
 
+// EntriesWithHead returns every inventory entry in issuance order and the
+// stored integrity head, read in one Txn and so at one revision. AppendEntry
+// and PruneEntries write the head in the same Txn as the entries it covers,
+// so the two always describe the same inventory.
+func (b *EtcdBackend) EntriesWithHead(ctx context.Context) ([]InventoryEntry, []byte, bool, error) {
+	ctx, cancel := b.callCtx(ctx)
+	defer cancel()
+	resp, err := b.client.Txn(ctx).Then(
+		clientv3.OpGet(b.invPhys(etcdInvEntriesSub), clientv3.WithPrefix()),
+		clientv3.OpGet(b.invPhys(etcdInvHMACSub)),
+	).Commit()
+	if err != nil {
+		return nil, nil, false, err
+	}
+	recs, err := decodeIndexedRecords(b.invPhys(etcdInvEntriesSub), resp.Responses[0].GetResponseRange().Kvs)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	headKVs := resp.Responses[1].GetResponseRange().Kvs
+	if len(headKVs) == 0 {
+		return entriesOf(recs), nil, false, nil
+	}
+	_, head, err := decodeBlob(headKVs[0].Value)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("decoding inventory head: %w", err)
+	}
+	return entriesOf(recs), head, true, nil
+}
+
 // LatestSerialForSubject returns the most recently issued serial for subject,
 // wrapping fs.ErrNotExist when the subject has no entry. This is a single
 // point read of the by-subject index key.

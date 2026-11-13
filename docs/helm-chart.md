@@ -406,8 +406,9 @@ replicas within `crl_sync_interval_sec` (60s by
 default) rather than instantly, since each answers revocation checks from its own
 copy of the CRL — see
 [revocation across replicas](configuration.md#revocation-across-replicas).
-A certificate signed on one replica is likewise reported `unknown` by the
-others until they reload the inventory into the index their OCSP responder
+With `config.enable_ocsp` set, a certificate signed on one replica is likewise
+reported `unknown` by the others until they reload the inventory into the index
+their OCSP responder
 answers from, within `ocsp_index_sync_interval_sec` (5m by default) — see
 [OCSP status across replicas](configuration.md#ocsp-status-across-replicas).
 
@@ -594,6 +595,11 @@ the `tls` Secret, from `config.tls_cert`/`config.tls_key`, or from
 `config.serving_cert` where the CA issues its own. Only set it if
 your controller needs a certificate for SNI routing.
 
+Through a passthrough controller the CA sees every connection come from the
+controller's address, so `csr_rate_limit` and `ocsp_rate_limit` become one
+budget shared by every client, and `rate_limit_ipv6_prefix_length` has no
+effect; see [Rate limit](configuration.md#rate-limit) to size them.
+
 If you deliberately terminate TLS at the edge, set `config.no_tls_required:
 true`, and understand what it costs: the pod serves plain HTTP with no client
 authentication, so the admin API answers anything that reaches the pod's port.
@@ -624,7 +630,14 @@ implementation serves it elsewhere.
 
 An **HTTPRoute** (`gateway.httpRoute`) is also available, but it makes the
 Gateway terminate TLS. Reserve it for the anonymous endpoints — CRL
-distribution, OCSP, health — where no client certificate is involved:
+distribution, OCSP, health — where no client certificate is involved. OCSP is
+served only with `config.enable_ocsp` set; see
+[serving OCSP](configuration.md#serving-ocsp). Through an HTTPRoute every
+verifier arrives from the Gateway's address and shares one `ocsp_rate_limit`
+budget on each CA replica it reaches, 300 a minute by default, so size it for
+the whole fleet behind the Gateway, or
+set it to `0` and limit at the Gateway; see
+[rate limit](configuration.md#rate-limit):
 
 ```yaml
 gateway:

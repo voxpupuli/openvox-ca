@@ -91,7 +91,9 @@ var _ = Describe("OCSP handler when the CA-key signing bound is full", func() {
 		// setting the docs recommend for a constrained remote signer.
 		myCA.SigningConcurrency = 1
 		Expect(myCA.Init(ctx)).To(Succeed())
-		mux = api.New(myCA).Routes()
+		srv := api.New(myCA)
+		srv.OCSPEnabled = true
+		mux = srv.Routes()
 
 		leaf = signCert(myCA, "shed-node")
 

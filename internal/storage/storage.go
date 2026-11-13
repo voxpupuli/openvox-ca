@@ -619,7 +619,12 @@ func (s *StorageService) InventoryEntries(ctx context.Context) ([]InventoryEntry
 	defer s.inventoryMu.RUnlock()
 
 	if store, ok := asInventoryStore(s.backend); ok {
-		entries, err := store.Entries(ctx)
+		// Rows and stored head from one snapshot. inventoryMu orders this
+		// read against this process's own writes only; another replica's
+		// append or prune can commit at any moment, and a head read
+		// separately could then describe a different inventory from the
+		// rows, which would read as tampering.
+		entries, stored, present, err := store.EntriesWithHead(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -630,7 +635,7 @@ func (s *StorageService) InventoryEntries(ctx context.Context) ([]InventoryEntry
 			for _, e := range entries {
 				head = chainInventoryMAC(s.hmacKey, head, canonicalInventoryLine(e))
 			}
-			if err := s.compareInventoryMACLocked(ctx, head); err != nil {
+			if err := s.compareInventoryMAC(stored, present, head); err != nil {
 				return nil, err
 			}
 		}
@@ -681,10 +686,21 @@ func (s *StorageService) compareInventoryMACLocked(ctx context.Context, computed
 	storedMAC, err := s.backend.Get(ctx, KeyInventoryHMAC)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("No inventory HMAC stored; skipping the integrity check for this read")
-			return nil
+			return s.compareInventoryMAC(nil, false, computed)
 		}
 		return fmt.Errorf("reading inventory HMAC: %w", err)
+	}
+	return s.compareInventoryMAC(storedMAC, true, computed)
+}
+
+// compareInventoryMAC is compareInventoryMACLocked's comparison, for a caller
+// that already holds the stored value: an InventoryStore read through
+// EntriesWithHead, which has the head from the same snapshot as the rows and
+// must not fetch it again. present is false when no value is stored.
+func (s *StorageService) compareInventoryMAC(storedMAC []byte, present bool, computed []byte) error {
+	if !present {
+		slog.Warn("No inventory HMAC stored; skipping the integrity check for this read")
+		return nil
 	}
 	if !hmac.Equal(storedMAC, computed) {
 		scheme := s.inventoryScheme()
@@ -1497,6 +1513,13 @@ func (s *StorageService) computeInventoryHMAC(ctx context.Context, hmacKey []byt
 	return foldInventoryHead(hmacKey, nil, data, false), nil
 }
 
+// The two inventory integrity schemes, as InventoryIntegrityReport.Scheme
+// names them.
+const (
+	InventorySchemeHashChain = "hash-chain"
+	InventorySchemeWholeBlob = "whole-blob-hmac"
+)
+
 // inventoryScheme names the integrity scheme this backend computes under. One
 // definition for the same reason foldInventoryHead has one: the value is now
 // operator-facing on both the report and the two mismatch warnings, and a
@@ -1504,9 +1527,9 @@ func (s *StorageService) computeInventoryHMAC(ctx context.Context, hmacKey []byt
 // scheme contradicts the log line that sent them to it.
 func (s *StorageService) inventoryScheme() string {
 	if _, ok := asInventoryStore(s.backend); ok {
-		return "hash-chain"
+		return InventorySchemeHashChain
 	}
-	return "whole-blob-hmac"
+	return InventorySchemeWholeBlob
 }
 
 // foldInventoryHead computes the integrity value from inventory contents
@@ -1862,14 +1885,20 @@ func (s *StorageService) InventoryIntegrityReport(ctx context.Context) (Inventor
 		entries []InventoryEntry
 		blob    []byte
 		chained bool
+		// The stored head, when it came from the same snapshot as the rows.
+		// Reporting runs against a live CA, so on a structured backend a head
+		// read apart from the rows could describe a peer's later append and
+		// report a store that verifies as one that does not.
+		snapHead    []byte
+		snapPresent bool
 	)
 	if store, ok := asInventoryStore(s.backend); ok {
 		chained = true
-		got, err := store.Entries(ctx)
+		got, head, present, err := store.EntriesWithHead(ctx)
 		if err != nil {
 			return rep, fmt.Errorf("reading inventory entries: %w", err)
 		}
-		entries = got
+		entries, snapHead, snapPresent = got, head, present
 	} else {
 		data, err := s.readInventoryForHMAC(ctx)
 		if err != nil {
@@ -1918,15 +1947,27 @@ func (s *StorageService) InventoryIntegrityReport(ctx context.Context) (Inventor
 		rep.KeyState = HMACKeyAbsent
 	}
 
-	switch storedHead, err := s.backend.Get(ctx, KeyInventoryHMAC); {
-	case err == nil:
-		rep.StoredHead = storedHead
-	case errors.Is(err, fs.ErrNotExist):
-		// No baseline yet. Not an error: a CA that has never run the
-		// verification path has nothing stored, and the caller must be able to
-		// tell that apart from a mismatch.
-	default:
-		return rep, fmt.Errorf("reading inventory HMAC: %w", err)
+	if chained {
+		// Read with the rows. As Get does, a present but empty value is not
+		// an absent one. Every backend already returns a present head
+		// non-nil; this keeps the distinction against one that does not.
+		if snapPresent {
+			rep.StoredHead = snapHead
+			if rep.StoredHead == nil {
+				rep.StoredHead = []byte{}
+			}
+		}
+	} else {
+		switch storedHead, err := s.backend.Get(ctx, KeyInventoryHMAC); {
+		case err == nil:
+			rep.StoredHead = storedHead
+		case errors.Is(err, fs.ErrNotExist):
+			// No baseline yet. Not an error: a CA that has never run the
+			// verification path has nothing stored, and the caller must be
+			// able to tell that apart from a mismatch.
+		default:
+			return rep, fmt.Errorf("reading inventory HMAC: %w", err)
+		}
 	}
 
 	if rep.KeyState == HMACKeyUsable {
@@ -1962,17 +2003,12 @@ func (s *StorageService) VerifyInventoryHMAC(ctx context.Context, hmacKey []byte
 }
 
 func (s *StorageService) verifyInventoryHMACLocked(ctx context.Context, hmacKey []byte) error {
-	storedMAC, err := s.backend.Get(ctx, KeyInventoryHMAC)
+	storedMAC, present, computedMAC, err := s.storedAndComputedInventoryHMAC(ctx, hmacKey)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return s.baselineInventoryHMACLocked(ctx, hmacKey)
-		}
-		return fmt.Errorf("reading inventory HMAC: %w", err)
+		return err
 	}
-
-	computedMAC, err := s.computeInventoryHMAC(ctx, hmacKey)
-	if err != nil {
-		return fmt.Errorf("computing inventory HMAC for verification: %w", err)
+	if !present {
+		return s.baselineInventoryHMACLocked(ctx, hmacKey)
 	}
 
 	if !hmac.Equal(storedMAC, computedMAC) {
@@ -1988,6 +2024,44 @@ func (s *StorageService) verifyInventoryHMACLocked(ctx context.Context, hmacKey 
 		return ErrInventoryTampered
 	}
 	return nil
+}
+
+// storedAndComputedInventoryHMAC returns the stored integrity value, whether one
+// is stored, and the value computed over the inventory now, for
+// verifyInventoryHMACLocked to compare. computed is nil when nothing is stored,
+// since the caller then baselines instead.
+//
+// On an InventoryStore backend the two come from one snapshot
+// (EntriesWithHead). inventoryMu, which every caller holds, orders this read
+// against this process's writes and nothing else, so with the head read apart
+// from the rows a peer's append or prune landing in between would read as
+// tampering, and at startup that refuses the start. The blob path keeps its two
+// reads: only the filesystem backend takes it, and it supports one running
+// instance, so no peer writes between them.
+func (s *StorageService) storedAndComputedInventoryHMAC(ctx context.Context, hmacKey []byte) (stored []byte, present bool, computed []byte, err error) {
+	if store, ok := asInventoryStore(s.backend); ok {
+		entries, head, present, err := store.EntriesWithHead(ctx)
+		if err != nil {
+			return nil, false, nil, fmt.Errorf("reading inventory and its HMAC: %w", err)
+		}
+		if !present {
+			return nil, false, nil, nil
+		}
+		return head, true, foldInventoryHead(hmacKey, entries, nil, true), nil
+	}
+
+	stored, err = s.backend.Get(ctx, KeyInventoryHMAC)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil, nil
+		}
+		return nil, false, nil, fmt.Errorf("reading inventory HMAC: %w", err)
+	}
+	computed, err = s.computeInventoryHMAC(ctx, hmacKey)
+	if err != nil {
+		return nil, false, nil, fmt.Errorf("computing inventory HMAC for verification: %w", err)
+	}
+	return stored, true, computed, nil
 }
 
 // baselineInventoryHMACLocked writes an integrity value over the inventory as

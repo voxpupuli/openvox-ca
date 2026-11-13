@@ -298,6 +298,112 @@ var _ = Describe("ocspIndexSyncInterval", func() {
 	})
 })
 
+var _ = Describe("rate_limit_ipv6_prefix_length", func() {
+	BeforeEach(func() { clearServerEnv() })
+
+	It("defaults to 128, the whole address", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.RateLimitIPv6PrefixLength).To(Equal(128))
+	})
+
+	It("is read from the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("rate_limit_ipv6_prefix_length: 64\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.RateLimitIPv6PrefixLength).To(Equal(64))
+	})
+
+	It("accepts 1, the shortest prefix, which is the lower bound and not past it", func() {
+		cfg, err := loadServerConfig(writeTempConfig("rate_limit_ipv6_prefix_length: 1\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.RateLimitIPv6PrefixLength).To(Equal(1))
+	})
+
+	DescribeTable("refuses a value that is not a prefix length, naming the key",
+		func(value string) {
+			_, err := loadServerConfig(writeTempConfig("rate_limit_ipv6_prefix_length: " + value + "\n"))
+			Expect(err).To(MatchError(ContainSubstring("rate_limit_ipv6_prefix_length must be between 1 and 128")))
+		},
+		Entry("zero, which would put every IPv6 client in one budget", "0"),
+		Entry("a negative value", "-64"),
+		Entry("more bits than an address has", "129"),
+	)
+
+	It("refuses the same values from the environment", func() {
+		setEnv("OPENVOX_CA_RATE_LIMIT_IPV6_PREFIX_LENGTH", "0")
+		_, err := loadServerConfig("")
+		Expect(err).To(MatchError(ContainSubstring("rate_limit_ipv6_prefix_length must be between 1 and 128")))
+	})
+})
+
+var _ = Describe("applyRateLimits", func() {
+	It("hands the server both resolved limits and the prefix length", func() {
+		srv := api.New(nil)
+		applyRateLimits(srv, &serverConfig{CSRRateLimit: -1, OCSPRateLimit: 7, RateLimitIPv6PrefixLength: 56})
+		Expect(srv.CSRRateLimit).To(Equal(defaultCSRRateLimit))
+		Expect(srv.OCSPRateLimit).To(Equal(7))
+		Expect(srv.RateLimitIPv6PrefixLength).To(Equal(56))
+	})
+
+	DescribeTable("logs the CSR limit, and a limit of 0 as off rather than as a rate",
+		func(limit int, want, notWant string) {
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+			defer slog.SetDefault(orig)
+
+			applyRateLimits(api.New(nil), &serverConfig{CSRRateLimit: limit, RateLimitIPv6PrefixLength: 128})
+			Expect(buf.String()).To(ContainSubstring(want))
+			Expect(buf.String()).NotTo(ContainSubstring(notWant))
+		},
+		Entry("a positive limit as a rate", 7, "csr_rate_limit_per_minute=7", "csr_rate_limit=off"),
+		Entry("zero as off", 0, "csr_rate_limit=off", "csr_rate_limit_per_minute"),
+	)
+})
+
+var _ = Describe("inventoryVerifyInterval", func() {
+	BeforeEach(func() { clearServerEnv() })
+
+	It("returns the default when unset", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.inventoryVerifyInterval()).To(Equal(defaultInventoryVerifyInterval))
+	})
+
+	It("is read from the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("inventory_verify_interval_sec: 45\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.inventoryVerifyInterval()).To(Equal(45 * time.Second))
+	})
+
+	// A value that wraps the seconds-to-nanoseconds multiply would reach
+	// time.NewTicker in a goroutine nothing recovers, and one that does not
+	// wrap but is huge turns the tamper check off. Either is refused.
+	DescribeTable("refuses a value over 30 days, naming the key",
+		func(value string) {
+			_, err := loadServerConfig(writeTempConfig("inventory_verify_interval_sec: " + value + "\n"))
+			Expect(err).To(MatchError(ContainSubstring("inventory_verify_interval_sec must not exceed")))
+		},
+		Entry("one second over", "2592001"),
+		Entry("one that wraps a time.Duration", "9300000000"),
+	)
+
+	It("accepts exactly 30 days", func() {
+		cfg, err := loadServerConfig(writeTempConfig("inventory_verify_interval_sec: 2592000\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.inventoryVerifyInterval()).To(Equal(30 * 24 * time.Hour))
+	})
+
+	// The guard in front of time.NewTicker, which panics on a non-positive
+	// duration. The environment drops one (config.Positive leaves the field
+	// alone) before it gets here; the file does not.
+	It("falls back to the default for a negative value in the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("inventory_verify_interval_sec: -5\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.inventoryVerifyInterval()).To(Equal(defaultInventoryVerifyInterval))
+	})
+})
+
 // crl_sync_interval_sec bounds how long a certificate revoked on another
 // replica keeps working here, so its resolution is worth pinning end to end
 // rather than only from a struct literal: a typo in the env key, or a guard
@@ -1003,6 +1109,14 @@ var _ = Describe("applyServerEnv each variable", func() {
 		Entry("INSECURE_ALLOW_PLAIN_HTTP_GENERATE", "OPENVOX_CA_INSECURE_ALLOW_PLAIN_HTTP_GENERATE", "true",
 			func(c *serverConfig) bool { return c.InsecureAllowPlainHTTPGenerate },
 			"InsecureAllowPlainHTTPGenerate"),
+		Entry("ENABLE_OCSP", "OPENVOX_CA_ENABLE_OCSP", "true",
+			func(c *serverConfig) bool { return c.EnableOCSP }, "EnableOCSP"),
+		Entry("OCSP_RATE_LIMIT", "OPENVOX_CA_OCSP_RATE_LIMIT", "17",
+			func(c *serverConfig) bool { return c.OCSPRateLimit == 17 }, "OCSPRateLimit"),
+		Entry("INVENTORY_VERIFY_INTERVAL_SEC", "OPENVOX_CA_INVENTORY_VERIFY_INTERVAL_SEC", "45",
+			func(c *serverConfig) bool { return c.InventoryVerifyIntervalSec == 45 }, "InventoryVerifyIntervalSec"),
+		Entry("RATE_LIMIT_IPV6_PREFIX_LENGTH", "OPENVOX_CA_RATE_LIMIT_IPV6_PREFIX_LENGTH", "56",
+			func(c *serverConfig) bool { return c.RateLimitIPv6PrefixLength == 56 }, "RateLimitIPv6PrefixLength"),
 		Entry("CLIENT_REVOCATION_POLICY", "OPENVOX_CA_CLIENT_REVOCATION_POLICY", "check",
 			func(c *serverConfig) bool { return c.ClientRevocationPolicy == "check" }, "ClientRevocationPolicy"),
 		Entry("CLIENT_CRL_REFRESH_INTERVAL_SEC", "OPENVOX_CA_CLIENT_CRL_REFRESH_INTERVAL_SEC", "300",
@@ -1508,6 +1622,53 @@ var _ = Describe("insecure_allow_plain_http_generate wiring", func() {
 		cfg, err := loadServerConfig(writeTempConfig("insecure_allow_plain_http_generate: true\n"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.InsecureAllowPlainHTTPGenerate).To(BeTrue())
+	})
+})
+
+var _ = Describe("enable_ocsp wiring", func() {
+	// The environment route is in the table above, and the flag route is
+	// driven end to end by ocsp_serve_test.go.
+	BeforeEach(func() { clearServerEnv() })
+
+	It("is false by default", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.EnableOCSP).To(BeFalse())
+	})
+
+	It("is read from the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("enable_ocsp: true\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.EnableOCSP).To(BeTrue())
+	})
+})
+
+var _ = Describe("ocsp_rate_limit wiring", func() {
+	BeforeEach(func() { clearServerEnv() })
+
+	It("is the unset sentinel by default", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.OCSPRateLimit).To(Equal(-1))
+	})
+
+	// An explicit 0 must survive loading: it is the off switch, and the
+	// sentinel is what takes the default.
+	It("reads an explicit zero from the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("ocsp_rate_limit: 0\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.OCSPRateLimit).To(Equal(0))
+	})
+
+	// The interval variables beside it drop a non-positive value; this one
+	// must not, or the documented way to hand limiting to a proxy would
+	// silently leave the default in force.
+	It("reads an explicit zero from the environment, and resolves it to off", func() {
+		setEnv("OPENVOX_CA_OCSP_RATE_LIMIT", "0")
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.OCSPRateLimit).To(Equal(0))
+		Expect(resolveOCSPRateLimit(cfg.OCSPRateLimit)).To(Equal(0))
 	})
 })
 

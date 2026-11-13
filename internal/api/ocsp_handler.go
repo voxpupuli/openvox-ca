@@ -38,6 +38,28 @@ import (
 //
 // Both paths are also registered under the /puppet-ca/v1 prefix via Routes().
 func (s *Server) handleOCSP(w http.ResponseWriter, r *http.Request) {
+	// SECURITY: Per-IP rate limiting on an unauthenticated endpoint that signs.
+	// First, before the request is read, so a malformed request is counted as
+	// well: a flood should not go uncounted for being malformed.
+	// NIST 800-53: SC-5 (Denial-of-Service Protection)
+	if s.ocspLimiter != nil && !s.ocspLimiter.Allow(rateLimitKey(r, s.RateLimitIPv6PrefixLength)) {
+		if s.OnOCSPRateLimited != nil {
+			s.OnOCSPRateLimited()
+		}
+		// Debug for the shed's reason below: the caller decides how often
+		// this fires, and the counter behind OnOCSPRateLimited is what an
+		// operator watches.
+		slog.Debug("OCSP request refused: rate limit exceeded", "client_ip", clientIP(r))
+		// tryLater in the body, because an OCSP client reads its status from
+		// there, over 429 rather than the bound's 503 so that HTTP tooling
+		// and access logs can tell a client over its own limit from a
+		// responder at capacity.
+		w.Header().Set("Content-Type", "application/ocsp-response")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write(xocsp.TryLaterErrorResponse)
+		return
+	}
+
 	var (
 		reqDER []byte
 		err    error
