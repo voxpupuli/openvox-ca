@@ -150,6 +150,10 @@ type Server struct {
 	// address per minute on the unauthenticated PUT /certificate_request
 	// endpoint. Zero (the default) disables rate limiting.
 	CSRRateLimit int
+	// OnCSRRateLimited, when set, is called once for each CSR submission
+	// CSRRateLimit refuses, so that the caller can count them. When nil, a
+	// refusal is only logged.
+	OnCSRRateLimited func()
 	// PlainHTTP is set when the server is running without TLS and the
 	// operator has not set insecure_allow_plain_http_generate. The /generate
 	// endpoint refuses to serve private keys when this is true.
@@ -167,6 +171,7 @@ type Server struct {
 	SerialNumberFormat SerialNumberFormat
 
 	csrLimiter     *ipRateLimiter
+	csrLimitedWarn logThrottle
 	destructiveOps *destructiveOpTracker
 }
 
@@ -817,7 +822,7 @@ func (s *Server) handlePutRequest(w http.ResponseWriter, r *http.Request) {
 	// endpoint. Prevents CSR flooding denial-of-service attacks.
 	// NIST 800-53: SC-5 (Denial-of-Service Protection)
 	if s.csrLimiter != nil && !s.csrLimiter.Allow(clientIP(r)) {
-		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		s.refuseCSRRateLimited(w, r)
 		return
 	}
 

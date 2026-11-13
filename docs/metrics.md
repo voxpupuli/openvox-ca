@@ -66,6 +66,31 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 > API paths embed per-node subjects (e.g. `/certificate_status/<hostname>`),
 > which would otherwise explode metric cardinality.
 
+### CSR submissions
+
+| Metric | Description |
+| --- | --- |
+| `openvoxca_csr_rate_limited_total` | Counter of CSR submissions (`PUT /certificate_request`) refused with `429 Too Many Requests` because their client address was over [`csr_rate_limit`](configuration.md). Exported whenever the exporter is enabled, and stays at `0` while `csr_rate_limit` is `0`. Unlabelled: a label per client address would be unbounded, and any client could add to it. Resets to `0` on process restart. |
+
+The same refusals also show in `openvoxca_http_requests_total` as
+`method="put",code="429"`. This counter names them, so a query does not have to
+assume that nothing else answers `429`.
+
+What a rise means depends on how clients reach the CA. Exposed directly, each
+address has its own budget, so refusals mean one client is submitting faster
+than an agent would: a flood, or a broken agent retrying in a loop. Behind a
+proxy that does not preserve client addresses, such as TLS passthrough through
+an L4 ingress, every agent shares one budget, and refusals can be a fleet
+enrolling or renewing at once. There, size `csr_rate_limit` for the whole fleet,
+or set it to `0` and limit at the proxy.
+
+While refusals are happening the CA also logs `CSR submission refused` at
+`Warn`, at most once a minute, with the client address of the refusal that
+triggered it. Refusals between those lines log at `Debug`. No shipped alert
+reads the counter, because a refusal is the limiter doing its job and the rate
+worth paging on depends on the deployment; see the
+[example queries](#example-queries).
+
 ### Exporter health
 
 | Metric | Description |
@@ -701,6 +726,10 @@ openvoxca_leaf_certificate_info{state="requested"} == 1
 
 # CA API error rate
 sum(rate(openvoxca_http_requests_total{code=~"5.."}[5m]))
+
+# CSR submissions refused by csr_rate_limit in the last 15 minutes, per replica.
+# No shipped alert reads this; pick a threshold that suits the deployment.
+increase(openvoxca_csr_rate_limited_total[15m]) > 0
 
 # Kubernetes export targets whose most recent apply failed
 openvoxca_k8s_export_last_error_timestamp_seconds

@@ -40,11 +40,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/config"
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 	"github.com/voxpupuli/openvox-ca/internal/k8sexport"
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
 	"github.com/voxpupuli/openvox-ca/internal/sdnotify"
@@ -625,6 +627,23 @@ func serialNumberFormat(cfg *serverConfig) (api.SerialNumberFormat, error) {
 		return "", fmt.Errorf("invalid serial_number_format: %w", err)
 	}
 	return f, nil
+}
+
+// newCSRRateLimitedCounter registers openvoxca_csr_rate_limited_total on reg.
+// Registered whatever csr_rate_limit says, since PUT /certificate_request is
+// always served: with the limit off it stays at 0.
+func newCSRRateLimitedCounter(reg prometheus.Registerer) prometheus.Counter {
+	c := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: constants.MetricsNamespace,
+		Subsystem: "csr",
+		Name:      "rate_limited_total",
+		Help: "Total CSR submissions (PUT /certificate_request) refused with HTTP 429 because " +
+			"their client address was over csr_rate_limit. Behind a proxy that does not " +
+			"preserve client addresses every agent shares one budget, so a rise there can " +
+			"be a fleet enrolling at once rather than a flood.",
+	})
+	reg.MustRegister(c)
+	return c
 }
 
 // applyResponseFormats hands srv the settings in cfg that shape response
@@ -1369,13 +1388,15 @@ func newRootCmd() *cobra.Command {
 			// --- Prometheus exporter ---
 			// The exporter owns a private registry holding the Go/process
 			// collectors, the CA/CRL/leaf certificate collector, and the HTTP
-			// request metrics. When enabled, the API handler is instrumented so
+			// request metrics; openvoxca_csr_rate_limited_total is added to it
+			// below. When enabled, the API handler is instrumented so
 			// openvoxca_http_* counts requests to the Puppet API, while /metrics is
 			// served on a separate listener (see metricsServer below).
 			handler := srv.Routes()
 			var exporter *metrics.Exporter
 			if cfg.MetricsListen != "" {
 				exporter = metrics.NewExporter(myCA)
+				srv.OnCSRRateLimited = newCSRRateLimitedCounter(exporter.Registry()).Inc
 				handler = exporter.InstrumentHandler(handler)
 			}
 
