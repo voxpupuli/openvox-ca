@@ -518,20 +518,24 @@
             // index, so OpenVoxCAScrapeFailing fires too, but names the gather
             // rather than the inventory.
             //
-            // A warning, with a dwell, like the CRL and OCSP index sync
-            // failures. As the config comment for the OCSP pair explains,
-            // increase() over the window latches, so the dwell delays the
-            // warning rather than filtering a transient: one failed pass
-            // warns after it and stays up until the window has passed it.
-            expr: 'increase(openvoxca_inventory_verify_failures_total{%(selector)s,reason="read_error"}[%(window)s]) > 0' % {
+            // A warning, on inventoryUnreadableThreshold failures in the
+            // window rather than one: a backend restart costs the job one
+            // failed pass, which the next repairs, while an inventory that
+            // cannot be read fails every pass. config.libsonnet sizes the
+            // window. The counter resets on restart, hence increase().
+            expr: 'increase(openvoxca_inventory_verify_failures_total{%(selector)s,reason="read_error"}[%(window)s]) >= %(threshold)d' % {
               selector: $._config.openvoxCASelector,
               window: $._config.inventoryUnreadableWindow,
+              threshold: $._config.inventoryUnreadableThreshold,
             },
             'for': $._config.inventoryUnreadableFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'OpenVox CA cannot read its inventory to verify it.',
-              description: 'The OpenVox CA on {{ $labels.instance }} could not read its certificate inventory for the periodic integrity check (openvoxca_inventory_verify_failures_total{reason="read_error"} is rising), so the inventory is not being verified. Check inventory storage and the "Inventory verification failed" warnings in the CA log.',
+              description: 'The OpenVox CA on {{ $labels.instance }} could not read its certificate inventory for the periodic integrity check %(threshold)d or more times in %(window)s (openvoxca_inventory_verify_failures_total{reason="read_error"}), so the inventory is not being verified; a single failure during a backend restart does not fire this. Check inventory storage and the "Inventory verification failed" warnings in the CA log.' % {
+                threshold: $._config.inventoryUnreadableThreshold,
+                window: $._config.inventoryUnreadableWindow,
+              },
             },
           },
           {

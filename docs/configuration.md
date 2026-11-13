@@ -1116,10 +1116,13 @@ the OCSP index sync it grows with every certificate ever issued, and
 `enable_expired_cert_cleanup` is what bounds it. With `enable_ocsp` set on a
 shared backend the inventory is read twice per interval, once by each job.
 
-The shipped mixin's two inventory alerts count over a one-hour window, which
-assumes an interval of 30 minutes or less. Lengthen the interval past that and
-raise `inventoryTamperWindow` and `inventoryUnreadableWindow` to at least twice
-it, or the tamper page resolves and re-fires between passes; see the
+The shipped mixin's two inventory alerts are sized for the default interval.
+`OpenVoxCAInventoryTampered` counts over one hour, which needs an interval of
+30 minutes or less; past that, raise `inventoryTamperWindow` to at least twice
+the interval, or the page resolves and re-fires between passes.
+`OpenVoxCAInventoryUnreadable` warns on three failed passes in 30 minutes, so
+its window must hold four intervals; past 7.5 minutes, raise
+`inventoryUnreadableWindow` with it, or that alert can never fire. See the
 [mixin's configuration table](../mixin/README.md#configurable-thresholds).
 
 ## Bounding CA-key signing

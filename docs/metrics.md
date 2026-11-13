@@ -447,8 +447,9 @@ else notices it: readiness reflects only the key and certificate in memory, and
 the collector's scrape does not read the inventory there. On the structured
 backends the scrape reads it through the certificate index, so a failure there
 also shows as `OpenVoxCAScrapeFailing`, without naming the inventory.
-`OpenVoxCAInventoryUnreadable` warns on it,
-after a 15-minute dwell. The CA log carries the detail: the
+`OpenVoxCAInventoryUnreadable` warns on it once three passes in 30 minutes have
+failed, after a further 5 minutes, so a single failure during a backend restart
+does not raise it. The CA log carries the detail: the
 `inventory HMAC mismatch` line, with the scheme and a repair hint, for a
 mismatch, and `Inventory verification failed` for a failed read.
 

@@ -127,10 +127,26 @@
     // re-fires on every pass instead of staying up.
     inventoryTamperWindow: '1h',
 
-    // Window and dwell for OpenVoxCAInventoryUnreadable, the same shape as
-    // the OCSP index sync pair above and for the same reasons.
-    inventoryUnreadableWindow: '1h',
-    inventoryUnreadableFor: '15m',
+    // Window, threshold and dwell for OpenVoxCAInventoryUnreadable. The
+    // inventory-verify job runs every inventory_verify_interval_sec (5m by
+    // default), and a backend restart costs it one failed pass, which the
+    // next pass repairs. So the rule counts inventoryUnreadableThreshold
+    // failures in the window rather than alerting on the first: two
+    // consecutive failed passes, a ten-minute outage, stay under three, while
+    // an inventory that cannot be read at all crosses it 10 to 15 minutes in
+    // and warns five minutes after that.
+    //
+    // The window must hold threshold + 1 intervals. A persisting fault adds
+    // one failure per pass, and increase() needs a sample from before the
+    // oldest of them, so a window of exactly threshold intervals loses the
+    // oldest just as the next arrives and the alert flaps. Raise it alongside
+    // any increase to inventory_verify_interval_sec, or the alert can never
+    // fire. Once crossed, increase() stays at or above the threshold until the
+    // window rolls past the oldest of those failures, so the dwell delays the
+    // warning rather than filtering anything.
+    inventoryUnreadableWindow: '30m',
+    inventoryUnreadableThreshold: 3,
+    inventoryUnreadableFor: '5m',
     // --- Delayed supersession ---
     // With superseded_cert_revoke_after_sec set, a renewal records the
     // certificate it replaced on a durable list and a sweep revokes it once the

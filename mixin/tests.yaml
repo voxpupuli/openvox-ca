@@ -27,7 +27,10 @@
 #   * OpenVoxCAInventoryTampered and OpenVoxCAInventoryUnreadable, keyed on
 #     the two label values of one counter: the cases pin that each stays
 #     silent for the other's reason, because an unreadable backend paged as
-#     tampering would teach operators to ignore the page.
+#     tampering would teach operators to ignore the page. Tampered fires on
+#     one detection; Unreadable counts failures against a threshold, and its
+#     cases pin both that a restart's single failure stays silent and that a
+#     failure on every pass fires.
 #   * OpenVoxCASupersedeFailing, where what needs pinning is the debounce: it is
 #     deliberately slower than its neighbours because the sweep retries on its
 #     own interval, so a case asserts it is quiet at 20m and firing at 40m.
@@ -747,26 +750,31 @@ tests:
         alertname: OpenVoxCAInventoryUnreadable
         exp_alerts: []
 
-  # An unreadable inventory has its own warning, after its dwell, and is not
-  # tampering: the read_error reason rising on every pass must not raise the
-  # tamper alert.
+  # The inventory-verify job runs every inventory_verify_interval_sec (5m by
+  # default), so these series step every fifth sample: a rule sized against a
+  # counter that rises every minute would pass here and never fire on a real
+  # CA. A fault from 5m onwards fails at 5, 10 and 15m, crossing the threshold
+  # (3 in 30m) at 15m; the dwell (5m) puts the warning at 20m. Quiet at 18m and
+  # firing at 22m pin both, and quiet again at 60m, thirty minutes after the
+  # last failure, pins the window. Throughout, the read_error reason must not
+  # raise the tamper page.
   - interval: 1m
-    name: An unreadable inventory warns after the dwell and does not page as tampering
+    name: An inventory unreadable on every pass warns after the threshold and dwell, and does not page as tampering
     input_series:
       - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="read_error"}'
-        values: "0 1+1x30"
+        values: "0x4 1x4 2x4 3x4 4x4 5x4 6+0x40"
       - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="tampered"}'
-        values: "0+0x31"
+        values: "0+0x70"
     alert_rule_test:
-      - eval_time: 20m
+      - eval_time: 22m
         alertname: OpenVoxCAInventoryTampered
         exp_alerts: []
-      - eval_time: 8m
+      - eval_time: 18m
         alertname: OpenVoxCAInventoryUnreadable
         exp_alerts: []
-      - eval_time: 20m
+      - eval_time: 22m
         alertname: OpenVoxCAInventoryUnreadable
-        exp_alerts:
+        exp_alerts: &inventoryUnreadableFiring
           - exp_labels:
               severity: warning
               job: openvox-ca
@@ -774,34 +782,46 @@ tests:
               reason: read_error
             exp_annotations:
               summary: "OpenVox CA cannot read its inventory to verify it."
-              description: "The OpenVox CA on ca-1:9140 could not read its certificate inventory for the periodic integrity check (openvoxca_inventory_verify_failures_total{reason=\"read_error\"} is rising), so the inventory is not being verified. Check inventory storage and the \"Inventory verification failed\" warnings in the CA log."
+              description: "The OpenVox CA on ca-1:9140 could not read its certificate inventory for the periodic integrity check 3 or more times in 30m (openvoxca_inventory_verify_failures_total{reason=\"read_error\"}), so the inventory is not being verified; a single failure during a backend restart does not fire this. Check inventory storage and the \"Inventory verification failed\" warnings in the CA log."
+      - eval_time: 40m
+        alertname: OpenVoxCAInventoryUnreadable
+        exp_alerts: *inventoryUnreadableFiring
+      - eval_time: 60m
+        alertname: OpenVoxCAInventoryUnreadable
+        exp_alerts: []
 
-  # One failed pass, then recovery: the dwell does not filter it. The warning
-  # still fires once the dwell has passed and holds until the window has moved
-  # past the failure, which pins inventoryUnreadableWindow as well.
+  # One failed pass and then success: what a backend restart costs. The old
+  # rule (any increase in an hour, for 15m) fired on this from 16m to an hour
+  # in, and the assertions sit inside that span.
   - interval: 1m
-    name: An unreadable inventory warning latches after a single failure
+    name: one failed inventory read during a backend restart does not warn
     input_series:
       - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="read_error"}'
-        values: "0 1+0x70"
+        values: "0x4 1+0x60"
       - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="tampered"}'
-        values: "0+0x71"
+        values: "0+0x65"
     alert_rule_test:
-      - eval_time: 8m
+      - eval_time: 25m
         alertname: OpenVoxCAInventoryUnreadable
         exp_alerts: []
-      - eval_time: 35m
+      - eval_time: 40m
         alertname: OpenVoxCAInventoryUnreadable
-        exp_alerts:
-          - exp_labels:
-              severity: warning
-              job: openvox-ca
-              instance: ca-1:9140
-              reason: read_error
-            exp_annotations:
-              summary: "OpenVox CA cannot read its inventory to verify it."
-              description: "The OpenVox CA on ca-1:9140 could not read its certificate inventory for the periodic integrity check (openvoxca_inventory_verify_failures_total{reason=\"read_error\"} is rising), so the inventory is not being verified. Check inventory storage and the \"Inventory verification failed\" warnings in the CA log."
-      - eval_time: 64m
+        exp_alerts: []
+
+  # Two consecutive failed passes, a ten-minute outage, are still a transient.
+  # This is what pins the threshold above two.
+  - interval: 1m
+    name: two consecutive failed inventory reads do not warn
+    input_series:
+      - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="read_error"}'
+        values: "0x4 1x4 2+0x60"
+      - series: 'openvoxca_inventory_verify_failures_total{job="openvox-ca",instance="ca-1:9140",reason="tampered"}'
+        values: "0+0x70"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: OpenVoxCAInventoryUnreadable
+        exp_alerts: []
+      - eval_time: 30m
         alertname: OpenVoxCAInventoryUnreadable
         exp_alerts: []
 
