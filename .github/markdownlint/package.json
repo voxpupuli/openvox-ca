@@ -3,6 +3,6 @@
   "private": true,
   "description": "Pins the markdownlint-cli2 that CI's Markdown lint job runs; package-lock.json pins its whole dependency tree by integrity hash",
   "devDependencies": {
-    "markdownlint-cli2": "0.24.0"
+    "markdownlint-cli2": "0.24.1"
   }
 }
