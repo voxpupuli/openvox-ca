@@ -155,6 +155,7 @@ ca_signing_concurrency: -1     # -1/unset = max(4, GOMAXPROCS); 0 = unbounded
 # Background CRL refresh keeps the CRL's NextUpdate from lapsing on a low-churn CA.
 # Safe to run on every replica (serialised on the shared CRL lock).
 disable_crl_refresh: false     # true = never auto-refresh the CRL
+# Raising crl_refresh_interval_sec? Widen the alerting mixin's crlUpdateWindow too.
 crl_refresh_interval_sec: 0    # how often to check; 0 = built-in default (1h)
 crl_refresh_before_sec: 0      # re-sign when remaining validity < this; 0 = crl_validity/3
 # Background CRL sync reloads the stored CRL into the copy this replica's
@@ -629,7 +630,10 @@ Three things the window does not cover, all worth knowing before you rely on it:
 
 The read is one small blob, takes no cluster lock, and writes nothing, so it
 costs the same on every backend and needs no leader. Lengthening the interval
-trades that cost against the window; there is no switch to turn it off, and
+trades that cost against the window, and if you use the shipped alerting
+mixin, widen its `crlSyncWindow` with it or `OpenVoxCACRLSyncFailing` can no
+longer fire (see [storage-retry alerts](metrics.md#storage-retry-alerts)).
+There is no switch to turn the sync off, and
 `disable_crl_refresh` does not — that setting governs whether this deployment
 *re-signs* the CRL on a timer, which is a separate question from whether
 revocations reach it.
@@ -938,7 +942,10 @@ index build) has to read. Worth turning on before the inventory is large rather
 than after.
 
 Watch `openvoxca_ocsp_index_serials` across replicas to confirm they agree, and
-`openvoxca_ocsp_index_sync_failures_total` for a replica that cannot catch up. A
+`openvoxca_ocsp_index_sync_failures_total` for a replica that cannot catch up.
+The shipped alerting mixin counts those failures over `ocspIndexSyncWindow`,
+which has to grow with `ocsp_index_sync_interval_sec` or the alert can no longer
+fire (see [storage-retry alerts](metrics.md#storage-retry-alerts)). A
 replica reading *above* its peers is not a fault: a pass that overlaps a local
 issuance defers its removals to the next one, so a busy replica can hold pruned
 serials a little longer.

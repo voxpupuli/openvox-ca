@@ -387,16 +387,23 @@
             // issuance in this same process past lockTimeout fails at its first
             // storage read and is counted: a benign cause worth ruling out
             // first on those backends. See docs/metrics.md. The counter resets on restart, so
-            // alert on increase() over a window rather than a raw value.
-            expr: 'increase(openvoxca_crl_update_failures_total{%(selector)s}[%(window)s]) > 0' % {
+            // alert on increase() over a window rather than a raw value, and
+            // on crlUpdateThreshold failures rather than one: a backend
+            // restart costs a single failed amendment, and config.libsonnet
+            // explains why a fault that persists still crosses the threshold.
+            expr: 'increase(openvoxca_crl_update_failures_total{%(selector)s}[%(window)s]) >= %(threshold)d' % {
               selector: $._config.openvoxCASelector,
               window: $._config.crlUpdateWindow,
+              threshold: $._config.crlUpdateThreshold,
             },
             'for': $._config.crlUpdateFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'OpenVox CA is failing to update its CRL.',
-              description: 'The OpenVox CA on {{ $labels.instance }} could not amend its CRL (openvoxca_crl_update_failures_total is rising). Revocations may not have taken effect and superseded certificates may still be valid. Check the CA logs to tell the causes apart: "Renew:"/"AutoRenew:"/"ReconcileManaged: failed to retire replaced certificate"/"Clean:" warnings are a real failure to maintain the CRL, and on filesystem or SQLite a "Revoke failed" warning on a request that took over a minute is instead a revocation that merely queued too long for its subject lock. The superseded-certificate sweep re-signs once per pass rather than once per due entry, so a failing sweep moves this counter once however many certificates were due: read a rising value as a count of failed CRL amendments, not of certificates left unrevoked, and use openvoxca_supersede_pending for those. Then check CRL storage.',
+              description: 'The OpenVox CA on {{ $labels.instance }} could not amend its CRL %(threshold)d or more times in %(window)s (openvoxca_crl_update_failures_total); a single failure during a backend restart does not fire this. Revocations may not have taken effect and superseded certificates may still be valid. Check the CA logs to tell the causes apart: "Renew:"/"AutoRenew:"/"ReconcileManaged: failed to retire replaced certificate"/"Clean:" warnings are a real failure to maintain the CRL, and on filesystem or SQLite a "Revoke failed" warning on a request that took over a minute is instead a revocation that merely queued too long for its subject lock. The superseded-certificate sweep re-signs once per pass rather than once per due entry, so a failing sweep moves this counter once however many certificates were due: read a rising value as a count of failed CRL amendments, not of certificates left unrevoked, and use openvoxca_supersede_pending for those. Then check CRL storage.' % {
+                threshold: $._config.crlUpdateThreshold,
+                window: $._config.crlUpdateWindow,
+              },
             },
           },
           {
@@ -409,7 +416,9 @@
             // could never revoke. Live on any CA that renews certificates,
             // since superseded_cert_revoke_after_sec defaults to 24h; only
             // where it is 0 does the revocation happen inside the renewal, and
-            // a failure there is a CRL failure counted by the alert above.
+            // a failure there is a CRL failure that counts towards the alert
+            // above, which needs crlUpdateThreshold of them in its window, so a
+            // single one is left to its log warning.
             // Even then the sweep, every renewal and every subject revocation
             // read the pending list whatever the setting says, so a store that
             // cannot serve that key fires this with the window closed too.
@@ -432,17 +441,24 @@
             // different CA certificate than the one this process loaded (the
             // usual cause of the latter is a rotated CA certificate on a replica
             // that has not restarted). Counter resets on restart, so alert on
-            // increase() over a window. It leads the lag alert below by design —
-            // this says why a replica is falling behind, that one says it has.
-            expr: 'increase(openvoxca_crl_sync_failures_total{%(selector)s}[%(window)s]) > 0' % {
+            // increase() over a window, and on crlSyncThreshold failures in it:
+            // a backend restart costs one failed pass, which the next repairs,
+            // while the rotated certificate fails every pass. It leads the lag
+            // alert below by design — this says why a replica is falling
+            // behind, that one says it has.
+            expr: 'increase(openvoxca_crl_sync_failures_total{%(selector)s}[%(window)s]) >= %(threshold)d' % {
               selector: $._config.openvoxCASelector,
               window: $._config.crlSyncWindow,
+              threshold: $._config.crlSyncThreshold,
             },
             'for': $._config.crlSyncFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'OpenVox CA cannot reload its CRL from storage.',
-              description: 'The OpenVox CA on {{ $labels.instance }} could not reload the stored CRL (openvoxca_crl_sync_failures_total is rising), so it is enforcing whichever CRL it already held. A certificate revoked on another replica may still be accepted here. Check CRL storage, and whether the CA certificate was replaced without restarting this replica.',
+              description: 'The OpenVox CA on {{ $labels.instance }} could not reload the stored CRL %(threshold)d or more times in %(window)s (openvoxca_crl_sync_failures_total), so it is enforcing whichever CRL it already held; a single failure during a backend restart does not fire this. A certificate revoked on another replica may still be accepted here. Check CRL storage, and whether the CA certificate was replaced without restarting this replica.' % {
+                threshold: $._config.crlSyncThreshold,
+                window: $._config.crlSyncWindow,
+              },
             },
           },
           {
@@ -458,22 +474,28 @@
             // rather than a critical. It is still worth paging on: a verifier
             // that hard-fails on "unknown" rejects against this replica and no
             // other, which is a split that is unpleasant to diagnose from the
-            // client end. Counter resets on restart, hence increase().
+            // client end. Counter resets on restart, hence increase(), and it
+            // takes ocspIndexSyncThreshold failures in the window: a backend
+            // restart costs one failed pass, which the next repairs.
             //
             // The fleet-relative comparison of openvoxca_ocsp_index_serials is
             // deliberately not shipped: it needs a by (job) aggregation to
             // avoid fanning in across unrelated CAs, and a replica reading
             // above its peers is a deferred removal rather than a fault. See
             // docs/metrics.md for the query to add by hand.
-            expr: 'increase(openvoxca_ocsp_index_sync_failures_total{%(selector)s}[%(window)s]) > 0' % {
+            expr: 'increase(openvoxca_ocsp_index_sync_failures_total{%(selector)s}[%(window)s]) >= %(threshold)d' % {
               selector: $._config.openvoxCASelector,
               window: $._config.ocspIndexSyncWindow,
+              threshold: $._config.ocspIndexSyncThreshold,
             },
             'for': $._config.ocspIndexSyncFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'OpenVox CA cannot reload its OCSP serial index from storage.',
-              description: 'The OpenVox CA on {{ $labels.instance }} could not reload the inventory into its OCSP serial index (openvoxca_ocsp_index_sync_failures_total is rising), so it is answering "unknown" for certificates its peers have signed since the last successful pass. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch.',
+              description: 'The OpenVox CA on {{ $labels.instance }} could not reload the inventory into its OCSP serial index %(threshold)d or more times in %(window)s (openvoxca_ocsp_index_sync_failures_total), so it is answering "unknown" for certificates its peers have signed since the last successful pass; a single failure during a backend restart does not fire this. Check inventory storage, and the inventory integrity MAC if the logs report a mismatch.' % {
+                threshold: $._config.ocspIndexSyncThreshold,
+                window: $._config.ocspIndexSyncWindow,
+              },
             },
           },
           {

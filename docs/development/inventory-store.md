@@ -607,7 +607,9 @@ backend. On the shared backends the tick counts into
 On filesystem the tick does not run, but a revocation that meets the mismatch
 does count: both revoke paths read through a verifying call there, so the failure
 lands in `openvoxca_crl_update_failures_total` and can raise
-`OpenVoxCACRLUpdateFailing` — an alert that fires for a tamper signal while naming
+`OpenVoxCACRLUpdateFailing` once a second failure follows within its window
+(see [storage-retry alerts](../metrics.md#storage-retry-alerts)) — an alert that
+fires for a tamper signal while naming
 it a CRL problem. SQLite is the one backend where neither happens: no tick, and
 the by-subject and by-serial lookups verify nothing, so no metric moves for a
 mismatch at all and the signals are the log line and a failed start. A refused
