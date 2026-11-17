@@ -265,6 +265,28 @@ jobs:
             echo "::error::Expected 2 release rpm packages, found $rpms"
             exit 1
           fi
+          # GitHub renames a release asset whose name has a character it
+          # considers special, and nfpm writes a pre-release's version into
+          # each package filename with a tilde (openvox-ca_1.0.0~alpha1-1_amd64.deb).
+          # Uploaded as built, the package became openvox-ca_1.0.0.alpha1-1_amd64.deb
+          # and checksums.txt named a file the release did not have (#603).
+          # So the tilde becomes a dot here, as the assets are staged, and
+          # nowhere earlier: build:packages and the package job's artefact
+          # keep nfpm's own names, which is what a repository ingesting the
+          # packages expects. The version inside each package keeps its
+          # tilde; that is what sorts a pre-release before the final release.
+          # This is the only mapping made. build:packages refuses any other
+          # character GitHub might rename (packageFileNameRE in magefile.go),
+          # and the step after the upload checks the names GitHub kept.
+          for f in ./*'~'*; do
+            [ -e "$f" ] || continue
+            to="${f//\~/.}"
+            if [ -e "$to" ]; then
+              echo "::error::Cannot rename $f for GitHub: $to already exists"
+              exit 1
+            fi
+            mv -v -- "$f" "$to"
+          done
           # The SBOMs and packages are checksummed alongside the tarballs: they
           # are published artefacts in their own right, and the attestation
           # below takes its subject list from this file. A package left out of
@@ -308,16 +330,22 @@ jobs:
         run: |
           cp -- "$BUNDLE" dist/provenance.sigstore.json
           ls -l dist/provenance.sigstore.json
-      - name: Publish GitHub release
+      - name: Create the release as a draft
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
+        # A draft first, published by the last step only once the asset names
+        # are checked. The repository's releases are immutable: once
+        # published, an asset can be neither replaced nor renamed, so a check
+        # that ran after publication could only report a release that is
+        # already wrong for good.
+        #
         # A semver pre-release tag (any tag with a hyphen, e.g. v0.9.0-rc1)
         # is published as a GitHub pre-release, so RCs and rehearsals never
         # appear as the latest stable release.
         run: |
-          args=("$TAG" --title "$TAG" --verify-tag --generate-notes)
+          args=("$TAG" --title "$TAG" --verify-tag --generate-notes --draft)
           case "$TAG" in
             *-*) args+=(--prerelease) ;;
           esac
@@ -329,3 +357,41 @@ jobs:
             dist/*.rpm \
             dist/provenance.sigstore.json \
             dist/checksums.txt
+      - name: Check the uploaded asset names
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        # Every name in checksums.txt must be an asset of the draft, under
+        # exactly that name, or `sha256sum -c checksums.txt` fails for whoever
+        # downloads the release. Read back from GitHub rather than predicted:
+        # the rename in "Generate checksums" covers the one character known
+        # to be renamed, and this is what notices if GitHub renames another.
+        #
+        # shell: bash for pipefail, so a failed read of either list fails the
+        # step instead of reaching the comparison empty. An empty
+        # checksums.txt list would pass it vacuously, so that is refused too.
+        shell: bash
+        run: |
+          listed="$(sed -E 's/^[0-9a-f]{64} [ *]//' dist/checksums.txt | sort)"
+          assets="$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)"
+          if [ -z "$listed" ]; then
+            echo "::error::checksums.txt lists no files, so there is nothing to check"
+            exit 1
+          fi
+          missing="$(comm -23 <(printf '%s\n' "$listed") <(printf '%s\n' "$assets"))"
+          if [ -n "$missing" ]; then
+            echo "::error::checksums.txt names files the release does not have. The release is still a draft; delete it with \`gh release delete $TAG\` (the tag stays). A re-run builds from the same commit and fails the same way, so fix the cause on main and release a new version."
+            printf 'In checksums.txt but not uploaded:\n%s\n\nUploaded:\n%s\n' "$missing" "$assets"
+            exit 1
+          fi
+          echo "All $(grep -c . <<<"$listed") files in checksums.txt are assets of the draft."
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        # Publishing is what makes the release, and its assets, immutable. It
+        # keeps the --prerelease flag set at creation; a stable release becomes
+        # the latest, as GitHub does by default for one newly published.
+        run: gh release edit "$TAG" --draft=false

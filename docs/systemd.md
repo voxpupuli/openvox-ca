@@ -235,7 +235,7 @@ $ systemd-analyze security openvox-ca.service
 
 ## Installing from a package
 
-**Where the packages come from, first.** They are not published as release assets yet — `release.yml` has no packaging job, and adding one is [#266](https://github.com/voxpupuli/openvox-ca/pull/266). Until it lands, build them from a checkout:
+**Where the packages come from, first.** Each release publishes a `.deb` and an `.rpm` for amd64 and arm64 as release assets; see [release tarballs](../README.md#release-tarballs) for downloading and checking them. To build them from a checkout instead:
 
 ```console
 $ mage build:distVariant linux_amd64
