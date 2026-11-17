@@ -118,8 +118,35 @@ var _ = Describe("Inventory verification on a structured backend", func() {
 func expectVerificationBesidePeerAppends(reader, writer *StorageService) {
 	GinkgoHelper()
 	ctx := context.Background()
-	const appends = 150
+	const appends, maxRounds = 150, 5
 
+	// Whether a read lands while the peer is appending is up to the scheduler
+	// and the backend's speed, not the code under test, so a round that never
+	// overlaps is run again rather than failed: on a fast backend or a loaded
+	// runner the writer can finish before the reader's first read. Tampering
+	// in any round fails at once.
+	var reads, midway int
+	for round := 0; round < maxRounds && midway == 0; round++ {
+		r, m := verifyBesidePeerAppendRound(ctx, reader, writer, round, appends)
+		reads += r
+		midway += m
+	}
+	// The floor: without a read that landed while the peer was appending,
+	// nothing above was exercised, and a backend that read rows and head
+	// apart would pass as readily as one that does not.
+	Expect(midway).To(BeNumerically(">", 0),
+		"no verification overlapped the peer's appends in %d rounds (%d reads), so the race was not exercised",
+		maxRounds, reads)
+	Expect(reader.VerifyInventoryHMAC(ctx, reader.hmacKey)).To(Succeed(),
+		"the store must verify once the peer has finished")
+}
+
+// verifyBesidePeerAppendRound has writer append appends entries, each with a
+// serial no other round uses, while reader verifies the inventory in a loop.
+// It fails the spec on any verification read as tampering, and returns how
+// many reads it made and how many saw some but not all of the round's appends.
+func verifyBesidePeerAppendRound(ctx context.Context, reader, writer *StorageService, round, appends int) (reads, midway int) {
+	GinkgoHelper()
 	before, err := reader.InventoryEntries(ctx)
 	Expect(err).NotTo(HaveOccurred())
 	start := len(before)
@@ -128,7 +155,8 @@ func expectVerificationBesidePeerAppends(reader, writer *StorageService) {
 	go func() {
 		defer GinkgoRecover()
 		for i := range appends {
-			line := fmt.Sprintf("%X 2024-06-01T00:00:00UTC 2029-06-01T00:00:00UTC /peer-%d.example.com", 0x10000+i, i)
+			n := round*appends + i
+			line := fmt.Sprintf("%X 2024-06-01T00:00:00UTC 2029-06-01T00:00:00UTC /peer-%d.example.com", 0x10000+n, n)
 			if err := writer.AppendInventoryRecord(ctx, line, nil); err != nil {
 				done <- err
 				return
@@ -137,7 +165,7 @@ func expectVerificationBesidePeerAppends(reader, writer *StorageService) {
 		done <- nil
 	}()
 
-	var reads, tampered, midway int
+	var tampered int
 	for running := true; running; {
 		select {
 		case err := <-done:
@@ -159,13 +187,7 @@ func expectVerificationBesidePeerAppends(reader, writer *StorageService) {
 	}
 	Expect(tampered).To(BeZero(),
 		"%d of %d verifications read a peer's append as tampering", tampered, reads)
-	// The floor: without a read that landed while the peer was appending,
-	// nothing above was exercised, and a backend that read rows and head
-	// apart would pass as readily as one that does not.
-	Expect(midway).To(BeNumerically(">", 0),
-		"no verification overlapped the peer's appends (%d reads), so the race was not exercised", reads)
-	Expect(reader.VerifyInventoryHMAC(ctx, reader.hmacKey)).To(Succeed(),
-		"the store must verify once the peer has finished")
+	return reads, midway
 }
 
 var _ = Describe("SQLBackend.EntriesWithHead", func() {
