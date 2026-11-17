@@ -1,5 +1,6 @@
-# Build context for every image built from the repository root: Dockerfile and
-# Dockerfile.alpine, whose `COPY . .` takes everything not excluded here, and
+# Build context for every image built from the repository root: Dockerfile,
+# Dockerfile.alpine and Dockerfile.distroless, whose `COPY . .` takes
+# everything not excluded here, and
 # test/Dockerfile.run, which the test/compose*.yml suites build with
 # `context: ..` and which copies the binaries out of bin/.
 #

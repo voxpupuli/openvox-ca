@@ -32,6 +32,7 @@ fails the gate instead of shipping mislabelled artefacts.
 | GitHub release + auto-generated notes | `gh release create --draft --generate-notes`, then `gh release edit --draft=false` once the asset names are checked | Releases page |
 | `ghcr.io/voxpupuli/openvox-ca:{X.Y.Z,X.Y,latest}` | *Container images* workflow | GHCR |
 | `…:{X.Y.Z,X.Y,latest}-alpine` | *Container images* workflow | GHCR |
+| `…:{X.Y.Z,X.Y,latest}-distroless` | *Container images* workflow | GHCR |
 | `ghcr.io/voxpupuli/openvox-ca-charts/openvox-ca:X.Y.Z` | *Helm chart* workflow | GHCR (OCI, separate package) |
 
 Every tarball, SBOM and package above, plus each published image and the chart,
@@ -127,7 +128,7 @@ never name an image that does not exist.
 | Workflow | File | What it does on a `v*` tag |
 | --- | --- | --- |
 | **Release** | [`release.yml`](../../.github/workflows/release.yml) | Verifies the tag equals `"v" +` the `internal/version` constant, builds each variant on a runner native to its architecture (`mage build:distVariant`, no cross toolchain), verifies each built artefact (binaries execute, FIPS variants carry boringcrypto build info), generates each variant's SBOM pair, packages the non-FIPS variants as `.deb` and `.rpm` on a single runner, then aggregates the lot, generates `checksums.txt`, attests provenance over everything it lists, creates the GitHub release as a draft, checks that every name in `checksums.txt` is one of its assets, and only then publishes it |
-| **Container images** | [`container-images.yml`](../../.github/workflows/container-images.yml) | After the same verify gate, builds both image variants on native amd64 and arm64 runners, attests provenance and an SBOM pair per architecture, publishes multi-arch manifests, then attests and `cosign sign`s each published index. See [publishing container images](publishing-images.md) |
+| **Container images** | [`container-images.yml`](../../.github/workflows/container-images.yml) | After the same verify gate, builds every image variant on native amd64 and arm64 runners, attests provenance and an SBOM pair per architecture, publishes multi-arch manifests, then attests and `cosign sign`s each published index. See [publishing container images](publishing-images.md) |
 | **Helm chart** | [`helm-chart.yml`](../../.github/workflows/helm-chart.yml) | After the same verify gate, packages `charts/openvox-ca`, waits for the tag's alpine image to appear, pushes the chart to `ghcr.io/voxpupuli/openvox-ca-charts` as an OCI artefact, attests and signs it against the digest the push reported, then pulls it back to prove the reference resolves |
 
 > **CI's full suite does not re-run on tags.** Instead, all three
@@ -416,7 +417,8 @@ pre-release tag for anything you do not want users upgrading to by default.
 
 A plain `v0.9.0`, by contrast, is **not** a pre-release in semver terms
 despite the `0.` major: it publishes as the latest stable GitHub release and
-claims `ghcr.io/voxpupuli/openvox-ca:latest` and `:latest-alpine`. The only
+claims `ghcr.io/voxpupuli/openvox-ca:latest`, `:latest-alpine` and
+`:latest-distroless`. The only
 `v0.*` concession is the suppressed major-only container tag. If you want a
 `0.x` release marked as a GitHub pre-release anyway, fix it afterwards with
 `gh release edit v0.9.0 --prerelease`.

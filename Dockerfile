@@ -13,7 +13,7 @@ COPY . .
 ENV GOTOOLCHAIN=auto CGO_ENABLED=0 GOOS=linux
 # -trimpath, as the release tarballs are built (buildDistVariant in
 # magefile.go): it keeps the builder's paths -- /src, and the toolchain's own
-# location, which differs between the two images -- out of the binaries.
+# location, which differs between the images -- out of the binaries.
 RUN go build -trimpath -ldflags="-s -w" -o /openvox-ca     ./cmd/openvox-ca/ && \
     go build -trimpath -ldflags="-s -w" -o /openvox-ca-ctl ./cmd/openvox-ca-ctl/
 

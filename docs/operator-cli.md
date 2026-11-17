@@ -684,8 +684,8 @@ container writes on-disk state that the server wrote and will read again when it
 restarts, the inventory and its integrity record among it, so a version
 difference here is between two writers of the same data rather than between a
 client and a server. The image must be fully qualified — an unqualified name
-will not resolve without registry search configured. The images run as
-uid 1000 (the `puppet` user), so under rootless podman a bind mount owned by your host user is
+will not resolve without registry search configured. The CentOS Stream and
+Alpine images run as uid 1000 (the `puppet` user), so under rootless podman a bind mount owned by your host user is
 not writable inside the container — the mint then fails at the key write,
 cleanly but confusingly. Hence the `podman unshare chown`: it sets the
 directory's owner to whatever container uid 1000 maps to on the host, which is
@@ -704,11 +704,11 @@ Resist fixing that with `--userns` instead. A remap applies to every path the
 container touches, `ca-data` included, so mapping yourself onto uid 1000 shifts
 the CA files the server left behind out from under it — and the failure moves
 from the key write to the CA directory, which is a worse place to discover it.
-The images create `puppet` with no explicit id, so it takes the distro's first
-regular uid; confirm yours with
-`podman run --rm --entrypoint id ghcr.io/voxpupuli/openvox-ca:<tag>`. The
-`--entrypoint` is needed because the images set one — which is also why the
-recipe above appends `generate ...` rather than a shell command. And the mount
+The `-distroless` images run as uid 65532 instead, so with one of those the
+first `podman unshare chown` takes `65532:65532`. Read the uid of the image you are using with
+`podman image inspect --format '{{.Config.User}}' ghcr.io/voxpupuli/openvox-ca:<tag>`.
+The images set an entrypoint, which is why the recipe above appends
+`generate ...` rather than a shell command. And the mount
 is a dedicated directory with `:Z` rather than `$PWD` with `:z`, because `:Z`
 relabels its target private to the container — pointing that at a whole project
 or home directory would relabel unrelated files with it.
@@ -743,8 +743,9 @@ podman inspect --format '{{index .RepoDigests 0}}' \
 it is named for the project and service; `podman ps` will tell you. The command
 prints `ghcr.io/voxpupuli/openvox-ca@sha256:…`, which goes into the `podman run`
 above in place of the tag. Prefer that digest to the
-`org.opencontainers.image.version` label: the label is stamped from the git ref,
-so on a release it reads `v1.2.3` while the published tag is `1.2.3`, and
+`org.opencontainers.image.version` label: the label is stamped from the git ref
+and the variant's tag suffix, so on a release it reads `v1.2.3` (or
+`v1.2.3-alpine`, `v1.2.3-distroless`) while the published tag is `1.2.3`, and
 pasting it back gives `manifest unknown` at the point you have already stopped
 the CA.
 
