@@ -219,8 +219,6 @@ func compressedIPv6(at string) contractException {
 // extensions.
 func cornerExtExtensions(at string) []contractException {
 	return []contractException{
-		{at + `.authorization_extensions["1.3.6.1.4.1.34380.1.3"]: not in upstream`,
-			"#409: an extension with the authorisation arc's own OID is listed"},
 		{at + `.authorization_extensions["1.3.6.1.4.1.34380.1.3.98"]: value 6c6567616379, upstream legacy`,
 			"kept: a value that is not a DER string renders as hex"},
 	}

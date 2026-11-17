@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -1204,13 +1205,26 @@ var responseOIDKeys = map[string]string{
 	"pp_auth_auto_renew": "1.3.6.1.4.1.34380.1.3.2",
 }
 
+// authArcKey is how ca.AuthExtensionMap keys an extension whose OID is the
+// authorisation arc itself rather than something below it.
+var authArcKey = asn1.ObjectIdentifier(ca.PuppetAuthOIDArc).String()
+
 // responseAuthExtensions keys an authorisation-extension map as OpenVox
 // Server's authorization_extensions does. Like responseFingerprint, it is
 // applied when a response is built, so index rows that store the CA's own
 // keys need no rewrite. Always returns a non-nil map.
+//
+// It also leaves out an extension whose OID is exactly the arc, which OpenVox
+// Server does not list: its subtree test requires an OID longer than the arc
+// (#409). ca.IsAuthOID stays inclusive, because it is also what strips the
+// arc from a CSR when signing, and a strict test there would copy such an
+// extension into the certificate.
 func responseAuthExtensions(exts map[string]string) map[string]string {
 	out := make(map[string]string, len(exts))
 	for k, v := range exts {
+		if k == authArcKey {
+			continue
+		}
 		if oid, ok := responseOIDKeys[k]; ok {
 			k = oid
 		}

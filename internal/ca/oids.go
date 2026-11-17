@@ -135,8 +135,8 @@ func OIDKey(oid asn1.ObjectIdentifier) string {
 // hex-encoded raw bytes when the value is not an ASN.1 string. Always returns
 // a non-nil map. This is the single producer of the CA's own keying, shared by
 // the status API and the certificate index projection. The status API re-keys
-// it on the way out, as OpenVox Server keys it (see
-// api.responseAuthExtensions), so stored rows need no rewrite.
+// it on the way out, as OpenVox Server keys it, and leaves out the arc's own
+// OID (see api.responseAuthExtensions), so stored rows need no rewrite.
 func AuthExtensionMap(exts []pkix.Extension) map[string]string {
 	result := make(map[string]string)
 	for _, ext := range exts {

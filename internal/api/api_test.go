@@ -942,6 +942,8 @@ var _ = Describe("API Workflow", func() {
 				ExtraExtensions: []pkix.Extension{
 					// pp_auth_auto_renew, which OpenVox Server keys by OID.
 					{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 2}, Value: val},
+					// The arc itself, which OpenVox Server does not list.
+					{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3}, Value: val},
 				},
 			}, key)
 			Expect(err).NotTo(HaveOccurred())

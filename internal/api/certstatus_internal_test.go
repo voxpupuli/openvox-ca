@@ -127,6 +127,24 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 		}))
 	})
 
+	It("leaves out an extension whose OID is the authorisation arc itself", func() {
+		rec := storage.CertRecord{
+			InventoryEntry: storage.InventoryEntry{
+				Subject: "node1", Serial: "01",
+				NotBefore: "2026-01-01T00:00:00UTC", NotAfter: "2036-01-01T00:00:00UTC",
+			},
+			CertProjection: storage.CertProjection{
+				Fingerprint: "SHA256:AA",
+				// Keyed as ca.AuthExtensionMap stores it; .3.99 is below the arc.
+				AuthExtensions: map[string]string{"1.3.6.1.4.1.34380.1.3": "arc", "1.3.6.1.4.1.34380.1.3.99": "custom"},
+			},
+			State: storage.CertStateSigned,
+		}
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
+		Expect(ok).To(BeTrue())
+		Expect(got.AuthorizationExtensions).To(Equal(map[string]string{"1.3.6.1.4.1.34380.1.3.99": "custom"}))
+	})
+
 	// responseOIDKeys is kept by hand against OpenVox Server's
 	// puppet-short-names, and the contract suite notices a gap only for an OID
 	// some fixture happens to record. This compares the two tables instead.
