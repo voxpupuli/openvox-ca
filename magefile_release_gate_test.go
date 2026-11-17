@@ -420,7 +420,7 @@ func latestOfEachName(runs []gateCheckRun) []gateCheckRun {
 var otherChecks = []gateCheckRun{
 	completedRun("Unit tests", "success"),
 	completedRun("Lint", "success"),
-	completedRun("Enable auto-merge", "skipped"),
+	completedRun("Publish alpine manifest", "skipped"),
 }
 
 var _ = Describe("the release tag gate's callers", func() {
