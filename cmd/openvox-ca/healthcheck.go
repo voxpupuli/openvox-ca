@@ -41,10 +41,10 @@ var healthProbePaths = map[string]string{
 	"startup": "/healthz/startup",
 }
 
-// defaultHealthcheckTimeout bounds the whole check. It is meant to sit below
-// the --timeout a container HEALTHCHECK gives the runtime, so a hung server is
-// reported by this command, with a reason, rather than by the runtime killing
-// it.
+// defaultHealthcheckTimeout bounds the whole check. It sits below the 5s
+// --timeout the images' HEALTHCHECK gives the container runtime, so a hung
+// server is reported by this command, with a reason, rather than by the
+// runtime killing it.
 const defaultHealthcheckTimeout = 3 * time.Second
 
 // newHealthcheckCmd builds the "healthcheck" subcommand, for a container

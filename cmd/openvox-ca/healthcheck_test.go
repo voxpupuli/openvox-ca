@@ -24,6 +24,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -289,6 +291,36 @@ var _ = Describe("healthcheck subcommand", func() {
 		Expect(err).To(MatchError(And(ContainSubstring("unhealthy:"), ContainSubstring("deadline exceeded"))))
 		// Below the default, so a --timeout that is ignored fails here.
 		Expect(time.Since(start)).To(BeNumerically("<", defaultHealthcheckTimeout))
+	})
+
+	It("gives up before the images' HEALTHCHECK --timeout does", func() {
+		// So that a hung server is reported by the check, with a reason,
+		// rather than by the runtime killing it with none.
+		// Every image at the top of the tree that declares one, so an image
+		// added later is held to it without anyone extending a list.
+		declares := regexp.MustCompile(`(?m)^HEALTHCHECK\b`)
+		timeout := regexp.MustCompile(`(?m)^HEALTHCHECK [^\n]*--timeout=(\d+)s`)
+		paths, err := filepath.Glob(filepath.Join("..", "..", "Dockerfile*"))
+		Expect(err).NotTo(HaveOccurred())
+		checked := 0
+		for _, path := range paths {
+			src, err := os.ReadFile(path)
+			Expect(err).NotTo(HaveOccurred())
+			if !declares.Match(src) {
+				continue
+			}
+			m := timeout.FindSubmatch(src)
+			Expect(m).NotTo(BeNil(), "%s declares a HEALTHCHECK with no --timeout", path)
+			secs, err := strconv.Atoi(string(m[1]))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(defaultHealthcheckTimeout).To(BeNumerically("<", time.Duration(secs)*time.Second), path)
+			checked++
+		}
+		// Both images declare one, so a glob that matched nothing cannot pass.
+		Expect(checked).To(BeNumerically(">=", 2))
+		// The image runs the check with no --timeout, so the flag's default is
+		// the value in force, not the constant on its own.
+		Expect(newHealthcheckCmd().Flags().Lookup("timeout").DefValue).To(Equal(defaultHealthcheckTimeout.String()))
 	})
 
 	DescribeTable("requests the endpoint --probe names",

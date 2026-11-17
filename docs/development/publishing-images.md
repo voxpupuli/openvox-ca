@@ -57,9 +57,10 @@ The per-architecture images are the ones worth cataloguing: each has its own
 binary and its own base package set, so the SBOM records whichever CentOS
 Stream, Alpine or Debian packages that variant carries, as well as the Go
 modules. The packages are deliberately not enumerated here: each image's
-`dnf install` or `apk add` line is the authority, or for distroless the base
-image itself, and naming a subset in prose guarantees this sentence is wrong
-the next time one of them changes.
+runtime-stage `dnf install` or `apk add` line, where it has one, is the
+authority (the CentOS image's runtime stage currently installs nothing beyond
+its base), or for distroless the base image itself, and naming a subset in
+prose guarantees this sentence is wrong the next time one of them changes.
 Syft reads the image back out of the registry by digest rather than scanning a
 local rebuild, so the document describes what was actually pushed. The merged
 index carries provenance only; an SBOM of an index would just be the union of
