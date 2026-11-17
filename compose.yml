@@ -36,7 +36,12 @@ services:
     # newest release, but a floating tag carries no supply-chain integrity
     # guarantee: two pulls at different times can yield different images.
     # Pin a release tag (e.g. :1.2.3) or a digest for production
-    # deployments; a `-alpine` variant of every tag is also published.
+    # deployments. `-alpine` and `-distroless` variants of every tag are also
+    # published, but the healthcheck below needs curl or wget in the image,
+    # which the distroless variant does not have: with that variant, replace
+    # the healthcheck block with `healthcheck: { disable: true }`. It also runs
+    # as uid 65532 rather than 1000, so re-own an existing ca-data volume to
+    # 65532:65532 before switching (docs/container-images.md, "Runtime user").
     image: ghcr.io/voxpupuli/openvox-ca:latest
     command:
       - --cadir=/data

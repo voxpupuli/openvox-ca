@@ -248,6 +248,19 @@ image:
   tag: "0.9.0"
 ```
 
+and the distroless variant is `tag: "0.9.0-distroless"`. That image has no
+shell, which the chart does not need: its probes are `httpGet`, made by the
+kubelet from outside the container. It does change two things. `kubectl exec
+<pod> -- kill -HUP 1` has no `kill` to run; see [the distroless
+variant](container-images.md#the-distroless-variant) for other ways to signal
+it. And the image's own user is `65532:65532` rather than `1000:1000`.
+
+`podSecurityContext` runs the pod as `1000:1000` whichever image you choose, so
+selecting the distroless tag alone leaves the uid as it was. To run it as its
+own user, set `runAsUser`, `runAsGroup` and `fsGroup` to `65532` as well, and
+re-own an existing volume first: the CA's private keys are readable by their
+owner alone, and `fsGroup` changes a file's group, not its owner.
+
 To pin by digest (which is what you want if you are reconciling with Flux or
 Argo CD and letting an image automation update it):
 
@@ -318,7 +331,12 @@ once.
 Three ways to act, cheapest first:
 
 - `kubectl exec <pod> -- kill -HUP 1` — PID 1 is the supervisor, which forwards
-  the signal to the frontend. No restart, no dropped connections.
+  the signal to the frontend. No restart, no dropped connections. The
+  distroless image has no `kill`; `kubectl debug -it <pod> --profile=restricted
+  --image=docker.io/library/busybox:1.37@sha256:<digest> --target=openvox-ca --
+  kill -HUP 1` does the same from an ephemeral container. That container can
+  read the CA's private keys, so pin its image by digest; see [the distroless
+  variant](container-images.md#the-distroless-variant).
 - `kubectl rollout restart deployment/<release>-openvox-ca`.
 - Let a controller restart it: `ci/postgres-ha-values.yaml` sets
   `reloader.stakater.com/auto: "true"` under `podAnnotations`, which has

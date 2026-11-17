@@ -90,8 +90,10 @@ every release:
 $ docker pull ghcr.io/voxpupuli/openvox-ca:latest
 ```
 
-See [container images](docs/container-images.md) for the available tags and a
-`docker run` example, or use the [compose.yml](https://github.com/voxpupuli/openvox-ca/blob/main/compose.yml) at the repository
+Every tag comes in three variants: CentOS Stream (the unsuffixed tags), Alpine
+(`-alpine`) and distroless (`-distroless`). See [container
+images](docs/container-images.md) for how they differ, the available tags and
+a `docker run` example, or use the [compose.yml](https://github.com/voxpupuli/openvox-ca/blob/main/compose.yml) at the repository
 root for a Docker/Podman Compose deployment.
 
 ### Release tarballs

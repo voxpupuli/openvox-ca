@@ -62,7 +62,8 @@ app.kubernetes.io/part-of: openvox
 Container image reference.
 
 A digest wins over a tag. An explicit tag is used verbatim — that is how you
-select the CentOS Stream variant, whose tags carry no suffix. With neither set,
+select the CentOS Stream variant, whose tags carry no suffix, or the
+-distroless one. With neither set,
 the default is the Alpine variant of the chart's appVersion; a -dev appVersion
 means the chart was built from an unreleased tree, whose published image is the
 rolling "edge" tag rather than a version that exists in the registry.
