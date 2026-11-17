@@ -70,6 +70,28 @@ the lines above.
 built from a git checkout) and exits. Unlike the global flags above,
 `--version` is accepted only on the root command, not after a subcommand.
 
+## Exit status
+
+| Status | Meaning |
+| --- | --- |
+| `0` | The command did what it was asked. |
+| `1` | It failed, or the command line was wrong. |
+| `24` | There was nothing for it to act on: `sign --all` found no request waiting, or `revoke --certname` named a subject that holds only an unsigned request. |
+
+These follow `puppetserver ca`, so a script ported from it keeps telling "did
+nothing" apart from both "did it" and "failed", with one exception: `clean` of a
+subject that holds only a request exits `0`, because the request is deleted.
+`puppetserver ca clean` exits `24` for it.
+
+Two cases that might look like `24` are `1`. `sign --all` exits `1` whenever
+the server left a request it found waiting unsigned, refused by policy or gone
+by the time it was signed, even if it signed none at all, and still lists on
+stdout any it did sign. `revoke` refused for any other reason exits `1`, including the
+`409 Conflict` the server returns when its stored CRL was not signed by its CA
+certificate (see [docs/api.md](api.md#certificate-status)), because then nothing
+can be revoked at all. A `409` from `revoke --certname` is `24` only when the
+subject's status, read back from the server, is `requested`.
+
 ## Configuration
 
 All global flags can be set via a YAML config file or environment variables. Precedence
@@ -122,7 +144,8 @@ openvox-ca-ctl list --all
 # reason, rather than reaching the server as a different request.
 openvox-ca-ctl sign --certname agent.example.com
 
-# Sign all pending CSRs
+# Sign all pending CSRs. Exits 24 when none is waiting, and 1 when the server
+# could not sign one of them (see "Exit status" above).
 openvox-ca-ctl sign --all
 
 # Revoke a certificate (the most recent one issued for that name). The revoked

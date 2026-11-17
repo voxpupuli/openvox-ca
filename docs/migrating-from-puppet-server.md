@@ -611,12 +611,14 @@ each with the `subject` and the reason in `error`.
 | `puppet cert list` | `openvox-ca-ctl list` | Pending CSRs |
 | `puppet cert list --all` | `openvox-ca-ctl list --all` | All certs |
 | `puppet cert sign <name>` | `openvox-ca-ctl sign --certname <name>` | |
-| `puppet cert sign --all` | `openvox-ca-ctl sign --all` | |
-| `puppet cert revoke <name>` | `openvox-ca-ctl revoke --certname <name>` | |
-| `puppet cert clean <name>` | `openvox-ca-ctl clean --certname <name>` | Revoke + delete |
+| `puppet cert sign --all` | `openvox-ca-ctl sign --all` | Exits `24` when nothing is waiting, as `puppetserver ca` does |
+| `puppet cert revoke <name>` | `openvox-ca-ctl revoke --certname <name>` | Exits `24` for a subject holding only an unsigned request, as `puppetserver ca` does |
+| `puppet cert clean <name>` | `openvox-ca-ctl clean --certname <name>` | Revoke + delete. Exits `0` for a subject holding only a request, where `puppetserver ca` exits `24` |
 | `puppetserver ca setup` | `openvox-ca-ctl setup --cadir <path>` | |
 | `puppetserver ca import` | `openvox-ca-ctl import --cadir <path> ...` | |
 | `puppetserver ca generate` | `openvox-ca-ctl generate --certname <name>` | Needs a running server. Use `openvox-ca generate --certname <name> --ttl <duration>` to mint offline, which is also the only way to mint a *new* `pp_cli_auth` certificate |
+
+The exit statuses are listed in [the operator CLI reference](operator-cli.md#exit-status).
 
 ## Differences to be aware of
 

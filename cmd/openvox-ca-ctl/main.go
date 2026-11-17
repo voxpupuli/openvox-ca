@@ -244,6 +244,37 @@ func (c *Client) post(path string, body []byte) (int, []byte, error) {
 
 // ---------- helpers ----------
 
+// Exit statuses. They follow puppetserver ca (openvoxserver-ca), where 1 means
+// the command failed and 24 means there was nothing for it to act on, so that a
+// script ported from it keeps telling "did nothing" apart from both "did it"
+// and "failed". docs/operator-cli.md publishes the table.
+const (
+	exitFailure     = 1
+	exitNothingToDo = 24
+)
+
+// exitError carries an exit status other than exitFailure out of Execute,
+// alongside the error cobra prints.
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+func (e *exitError) Unwrap() error { return e.err }
+
+// exitStatus maps the error Execute returned to the process exit status.
+func exitStatus(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exitError
+	if errors.As(err, &ee) {
+		return ee.code
+	}
+	return exitFailure
+}
+
 // checkHTTP turns a non-2xx response into an error naming the request.
 //
 // %q on the body, for the same reason as the import summary below: it is
@@ -281,6 +312,47 @@ func certnamePath(route, certname string) (string, error) {
 		return "", fmt.Errorf("--certname: %w", err)
 	}
 	return route + url.PathEscape(certname), nil
+}
+
+// quoteNames renders a list of names the server returned, each quoted, for the
+// same reason as the import summary: the list is decoded from the response
+// body, so the server chooses its contents rather than the operator. Quoting
+// per element rather than the joined string keeps the separator meaningful --
+// "a", "b" rather than "a, b", which would read as a single name containing a
+// comma. Printing is all that happens to them: none reaches a request path or
+// a file name, so none needs certnamePath.
+func quoteNames(names []string) string {
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = strconv.Quote(name)
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// onlyRequested reports whether the server holds nothing for certname but a
+// request waiting to be signed, which is what makes a refused revocation
+// "nothing to do" rather than a failure.
+//
+// It asks rather than reading it off the 409 that prompted the question. Puppet
+// Server answers a revocation 409 for this case alone, so puppetserver ca maps
+// every 409 to 24; openvox-ca answers 409 as well when the stored CRL was not
+// signed by its CA certificate, and there no revocation can be recorded at all.
+// Telling the two apart by the body would bind the CLI to the server's wording.
+// Anything short of a clean "requested" -- a failed request, another state, a
+// body that does not parse -- leaves the revocation a failure.
+func onlyRequested(c *Client, certname string) bool {
+	path, err := certnamePath("/puppet-ca/v1/certificate_status/", certname)
+	if err != nil {
+		return false
+	}
+	code, body, err := c.get(path)
+	if err != nil || code != http.StatusOK {
+		return false
+	}
+	var status struct {
+		State string `json:"state"`
+	}
+	return json.Unmarshal(body, &status) == nil && status.State == "requested"
 }
 
 func printTable(rows [][2]string) {
@@ -374,28 +446,35 @@ func newSignCmd() *cobra.Command {
 					return err
 				}
 				var result struct {
-					Signed []string `json:"signed"`
+					Signed        []string `json:"signed"`
+					NoCSR         []string `json:"no-csr"`
+					SigningErrors []string `json:"signing-errors"`
 				}
 				if err := json.Unmarshal(body, &result); err != nil {
 					return fmt.Errorf("parse error: %w", err)
 				}
-				if len(result.Signed) == 0 {
-					fmt.Println("Signed: (none)")
-				} else {
-					// Each name quoted, for the same reason as the import
-					// summary: this list is decoded from the server's response
-					// body, so it is the one confirmation line here whose
-					// contents the server chooses rather than the operator.
-					// Quoting per element rather than the joined string keeps
-					// the separator meaningful -- "a", "b" rather than "a, b",
-					// which would read as a single name containing a comma.
-					// Printing is all that happens to them: none reaches a
-					// request path or a file name, so none needs certnamePath.
-					quoted := make([]string, len(result.Signed))
-					for i, name := range result.Signed {
-						quoted[i] = strconv.Quote(name)
-					}
-					fmt.Printf("Signed: %s\n", strings.Join(quoted, ", "))
+				if len(result.Signed) > 0 {
+					fmt.Printf("Signed: %s\n", quoteNames(result.Signed))
+				}
+				// As puppetserver ca decides it: any request left unsigned is a
+				// failure, even beside some that were signed, and only a run
+				// that found nothing at all to sign is "nothing to do". Both
+				// lists used to be ignored, so a run in which policy refused
+				// every request printed "Signed: (none)" and exited 0.
+				var problems []string
+				if len(result.SigningErrors) > 0 {
+					problems = append(problems, "could not sign "+quoteNames(result.SigningErrors)+
+						" (the server log has the reason)")
+				}
+				if len(result.NoCSR) > 0 {
+					problems = append(problems, "no certificate request found for "+quoteNames(result.NoCSR))
+				}
+				switch {
+				case len(problems) > 0:
+					return errors.New(strings.Join(problems, "; "))
+				case len(result.Signed) == 0:
+					return &exitError{code: exitNothingToDo,
+						err: errors.New("no certificate requests are waiting to be signed")}
 				}
 				return nil
 			}
@@ -489,6 +568,11 @@ what you meant.`,
 				return err
 			}
 			if err := checkHTTP(code, respBody, "PUT", path); err != nil {
+				// On the by-serial path certname is empty, and onlyRequested
+				// refuses it before sending anything, so a 409 there stays 1.
+				if code == http.StatusConflict && onlyRequested(c, certname) {
+					return &exitError{code: exitNothingToDo, err: err}
+				}
 				return err
 			}
 			fmt.Printf("Revoked %s\n", subject)
@@ -963,9 +1047,7 @@ func newImportCmd() *cobra.Command {
 // ---------- main ----------
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
-		os.Exit(1)
-	}
+	os.Exit(exitStatus(newRootCmd().Execute()))
 }
 
 // newRootCmd builds and returns the fully-configured root command, including
