@@ -75,7 +75,7 @@ built from a git checkout) and exits. Unlike the global flags above,
 | Status | Meaning |
 | --- | --- |
 | `0` | The command did what it was asked. |
-| `1` | It failed, or the command line was wrong. |
+| `1` | It failed, or the command line was wrong (see [Subcommands](#subcommands)). |
 | `24` | There was nothing for it to act on: `sign --all` found no request waiting, or `revoke --certname` named a subject that holds only an unsigned request. |
 
 These follow `puppetserver ca`, so a script ported from it keeps telling "did
@@ -131,6 +131,15 @@ key and its line, and so is a boolean variable set to anything other than `1`,
 
 ## Subcommands
 
+No subcommand takes positional arguments: every value goes in a flag, and a
+stray word is refused rather than ignored. `sign node1.example.com` is refused
+with a pointer to `--certname node1.example.com`. A mistake on the command line
+(a stray argument, an unknown flag, a required flag left out, other than
+`import --private-key`, which is checked once the command runs so that it can
+point at `openvox-ca import-ca-cert`) prints the
+subcommand's usage on stderr after the error, as `puppetserver ca` does. A
+failure once the subcommand is running prints the error alone.
+
 ```bash
 # List pending CSRs
 openvox-ca-ctl list
@@ -145,7 +154,8 @@ openvox-ca-ctl list --all
 openvox-ca-ctl sign --certname agent.example.com
 
 # Sign all pending CSRs. Exits 24 when none is waiting, and 1 when the server
-# could not sign one of them (see "Exit status" above).
+# could not sign one of them (see "Exit status" above). --all and --certname
+# cannot be combined.
 openvox-ca-ctl sign --all
 
 # Revoke a certificate (the most recent one issued for that name). The revoked

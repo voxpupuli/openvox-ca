@@ -126,7 +126,7 @@ The server must not be running against either backend during migration.
 
 Per-subject generated private keys are NOT migrated: they always live on the
 local filesystem under cadir, never in a storage backend.`,
-		SilenceUsage: true,
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			srcCfg, err := loadMigrateConfig(sourceConfig)
 			if err != nil {

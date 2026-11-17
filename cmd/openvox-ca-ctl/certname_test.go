@@ -125,9 +125,10 @@ var _ = Describe("certname in request and file paths", func() {
 	}
 
 	// The empty name is here because it used to address the collection
-	// route, /certificate_status/ with nothing after it. sign is absent from
-	// those entries because it refuses an empty --certname with its own
-	// message before reaching certnamePath.
+	// route, /certificate_status/ with nothing after it. sign is among them:
+	// its --certname/--all requirement is a cobra flag group, which is met by
+	// a flag being given rather than by its value, so an empty --certname
+	// reaches certnamePath like any other.
 	DescribeTable("refuses an invalid certname before sending any request",
 		func(subcommand, certname string) {
 			err := run(subcommand, certname)
@@ -147,11 +148,20 @@ var _ = Describe("certname in request and file paths", func() {
 		Entry("clean", "clean", hostile),
 		Entry("generate", "generate", hostile),
 		Entry("import-cert", "import-cert", hostile),
+		Entry("sign, empty", "sign", ""),
 		Entry("revoke, empty", "revoke", ""),
 		Entry("clean, empty", "clean", ""),
 		Entry("generate, empty", "generate", ""),
 		Entry("import-cert, empty", "import-cert", ""),
 	)
+
+	// --all=false meets the same flag group with no name at all, so it too
+	// must stop at certnamePath rather than at the collection route.
+	It("refuses sign --all=false without a name, before sending any request", func() {
+		_, err := captureStdout([]string{"sign", "--config", cfg, "--server-url", srv.URL, "--all=false"})
+		Expect(err).To(MatchError(ContainSubstring("--certname")))
+		Expect(hits).To(BeZero(), "sign sent a request with no name, to %s %s", gotMethod, gotRawPath)
+	})
 
 	// The control for the table above: validation must not refuse a valid
 	// name, and the escape must not alter one. The name carries every

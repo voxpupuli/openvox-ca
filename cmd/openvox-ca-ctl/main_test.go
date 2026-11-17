@@ -33,14 +33,21 @@ import (
 // them) and executing a command mutate these, so specs must not leak their
 // resolved values into later ones.
 func saveCtlGlobals() {
+	DeferCleanup(snapshotCtlGlobals())
+}
+
+// snapshotCtlGlobals records the package-level flag globals and returns a
+// function that puts them back, for code that runs outside a spec and so
+// cannot register a DeferCleanup.
+func snapshotCtlGlobals() func() {
 	serverURL, caCert := globalServerURL, globalCACert
 	clientCert, clientKey := globalClientCert, globalClientKey
 	verbose, insecure, configFile := globalVerbose, globalInsecure, globalConfigFile
-	DeferCleanup(func() {
+	return func() {
 		globalServerURL, globalCACert = serverURL, caCert
 		globalClientCert, globalClientKey = clientCert, clientKey
 		globalVerbose, globalInsecure, globalConfigFile = verbose, insecure, configFile
-	})
+	}
 }
 
 var _ = Describe("Root command", func() {

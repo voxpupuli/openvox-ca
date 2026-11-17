@@ -279,7 +279,7 @@ func exitStatus(err error) int {
 //
 // %q on the body, for the same reason as the import summary below: it is
 // chosen entirely by the server, and cobra prints a returned error straight to
-// stderr (the subcommands set SilenceUsage but not SilenceErrors), so it
+// stderr (nothing here sets SilenceErrors), so it
 // reaches an operator's terminal unescaped. TrimSpace removes only leading and
 // trailing whitespace, so an embedded CR or LF would survive it and could
 // fabricate a reassuring second line after a failed operation -- against a
@@ -372,9 +372,9 @@ func printTable(rows [][2]string) {
 func newListCmd() *cobra.Command {
 	var all bool
 	cmd := &cobra.Command{
-		Use:          "list",
-		Short:        "List pending (or all) certificate requests",
-		SilenceUsage: true,
+		Use:   "list",
+		Short: "List pending (or all) certificate requests",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -428,9 +428,9 @@ func newSignCmd() *cobra.Command {
 	var certname string
 	var all bool
 	cmd := &cobra.Command{
-		Use:          "sign",
-		Short:        "Sign a pending CSR (or --all)",
-		SilenceUsage: true,
+		Use:   "sign",
+		Short: "Sign a pending CSR (or --all)",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -479,10 +479,6 @@ func newSignCmd() *cobra.Command {
 				return nil
 			}
 
-			if certname == "" {
-				return fmt.Errorf("--certname or --all is required")
-			}
-
 			path, err := certnamePath("/puppet-ca/v1/certificate_status/", certname)
 			if err != nil {
 				return err
@@ -501,6 +497,10 @@ func newSignCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&certname, "certname", "", "Subject name to sign")
 	cmd.Flags().BoolVar(&all, "all", false, "Sign all pending CSRs")
+	// Exclusive as well as one-required: with both, --all used to win and
+	// --certname was dropped without a word. puppetserver ca refuses the pair.
+	cmd.MarkFlagsOneRequired("certname", "all")
+	cmd.MarkFlagsMutuallyExclusive("certname", "all")
 	return cmd
 }
 
@@ -525,7 +525,7 @@ A serial that is still the certificate stored for its subject is refused, since
 --certname already covers that case and a mistyped digit should not take a
 working node offline. Pass --force when retiring a live certificate by serial is
 what you meant.`,
-		SilenceUsage: true,
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -592,9 +592,9 @@ what you meant.`,
 
 func newReissueCRLCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:          "reissue-crl",
-		Short:        "Re-sign the CRL with a fresh validity window (preserves all revocations)",
-		SilenceUsage: true,
+		Use:   "reissue-crl",
+		Short: "Re-sign the CRL with a fresh validity window (preserves all revocations)",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -619,9 +619,9 @@ func newReissueCRLCmd() *cobra.Command {
 func newCleanCmd() *cobra.Command {
 	var certname string
 	cmd := &cobra.Command{
-		Use:          "clean",
-		Short:        "Revoke and delete a certificate/CSR",
-		SilenceUsage: true,
+		Use:   "clean",
+		Short: "Revoke and delete a certificate/CSR",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -652,9 +652,9 @@ func newGenerateCmd() *cobra.Command {
 	var certname, outDir string
 	var dnsNames []string
 	cmd := &cobra.Command{
-		Use:          "generate",
-		Short:        "Generate a server-side key+cert pair",
-		SilenceUsage: true,
+		Use:   "generate",
+		Short: "Generate a server-side key+cert pair",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -822,9 +822,9 @@ func writeKeyFile(path, keyPEM string) error {
 func newImportCertCmd() *cobra.Command {
 	var certname, certFile string
 	cmd := &cobra.Command{
-		Use:          "import-cert",
-		Short:        "Import an externally-issued certificate into the inventory",
-		SilenceUsage: true,
+		Use:   "import-cert",
+		Short: "Import an externally-issued certificate into the inventory",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			certPEM, err := os.ReadFile(certFile)
 			if err != nil {
@@ -890,9 +890,9 @@ func newSetupCmd() *cobra.Command {
 	var encryptKey bool
 	var passphraseFile string
 	cmd := &cobra.Command{
-		Use:          "setup",
-		Short:        "Initialise a new CA (offline)",
-		SilenceUsage: true,
+		Use:   "setup",
+		Short: "Initialise a new CA (offline)",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			absDir, err := filepath.Abs(caDir)
 			if err != nil {
@@ -970,9 +970,9 @@ func newImportCmd() *cobra.Command {
 	var caDir, certBundle, privateKey, crlChain, passphraseFile string
 	var encryptKey, allowPlaintext bool
 	cmd := &cobra.Command{
-		Use:          "import",
-		Short:        "Import an external CA cert/key (offline)",
-		SilenceUsage: true,
+		Use:   "import",
+		Short: "Import an external CA cert/key (offline)",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			absDir, err := filepath.Abs(caDir)
 			if err != nil {
@@ -1061,11 +1061,13 @@ func newRootCmd() *cobra.Command {
 		Long: `openvox-ca-ctl manages certificates on a running openvox-ca server.
 
 Global flags may be placed before or after the subcommand name.`,
-		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			resolved := resolveConfigFile(globalConfigFile, "OPENVOX_CA_CTL_CONFIG", defaultCtlConfigFile)
 			cfg, err := loadCtlConfig(resolved)
 			if err != nil {
+				// A configuration fault, not a command-line one: see
+				// silenceUsageOnceRunning.
+				cmd.SilenceUsage = true
 				return err
 			}
 
@@ -1131,6 +1133,52 @@ Global flags may be placed before or after the subcommand name.`,
 		newImportCmd(),
 		newMigrateCmd(),
 	)
+	silenceUsageOnceRunning(rootCmd)
 
 	return rootCmd
+}
+
+// silenceUsageOnceRunning makes every command under root print its usage only
+// for the errors cobra raises before the command runs: an unknown flag, a
+// stray argument, a required flag missing. Those are mistakes on the command
+// line, and the usage shows what the command takes, as puppetserver ca prints
+// it. Once a command is running, a failure is about the server or the store,
+// and a screenful of usage would bury it.
+//
+// SilenceUsage cannot be set up front for that, because cobra checks required
+// flags after PersistentPreRunE, so it is set as each RunE starts instead.
+// The root's PersistentPreRunE sets it for itself when loading the
+// configuration fails.
+func silenceUsageOnceRunning(cmd *cobra.Command) {
+	for _, sub := range cmd.Commands() {
+		silenceUsageOnceRunning(sub)
+	}
+	if run := cmd.RunE; run != nil {
+		cmd.RunE = func(c *cobra.Command, args []string) error {
+			c.SilenceUsage = true
+			return run(c, args)
+		}
+	}
+}
+
+// noArgs refuses positional arguments, which no subcommand takes. cobra would
+// otherwise accept and discard them, so a typo after a well-formed command
+// went unreported; puppetserver ca refuses them too ("Unknown input").
+//
+// `sign node1.example.com` is what a `puppet cert sign` user types first, so a
+// lone argument that would be a valid --certname, on a command that has that
+// flag and was not given it, gets the flag suggested. Only a valid name is
+// echoed into the suggestion, since anything else would not work if pasted.
+func noArgs(cmd *cobra.Command, args []string) error {
+	switch {
+	case len(args) == 0:
+		return nil
+	case len(args) == 1:
+		if f := cmd.Flags().Lookup("certname"); f != nil && !f.Changed && ca.ValidateSubject(args[0]) == nil {
+			return fmt.Errorf("unexpected argument %q; did you mean --certname %s?", args[0], args[0])
+		}
+		return fmt.Errorf("unexpected argument %q", args[0])
+	default:
+		return fmt.Errorf("unexpected arguments %q", args)
+	}
 }
