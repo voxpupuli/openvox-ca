@@ -898,7 +898,7 @@ tests:
         exp_alerts: []
       - eval_time: 40m
         alertname: OpenVoxCASupersedeFailing
-        exp_alerts:
+        exp_alerts: &supersedeFiring
           - exp_labels:
               severity: warning
               job: openvox-ca
@@ -909,6 +909,27 @@ tests:
       - eval_time: 40m
         alertname: OpenVoxCACRLUpdateFailing
         exp_alerts: []
+
+  # One supersede failure and nothing after it. Unlike the three storage-retry
+  # rules this one has no count threshold: a certificate a renewal replaced is
+  # still a valid credential, so one failure is worth the warning, and the
+  # docs set this out as the contrast with OpenVoxCACRLUpdateFailing. The case
+  # above rises every minute, so a threshold added here would still pass it;
+  # this one would not. Quiet at 20m, inside the 30m dwell, and firing at 40m.
+  - interval: 1m
+    name: one supersede failure warns once debounced
+    input_series:
+      - series: 'openvoxca_supersede_failures_total{job="openvox-ca",instance="ca-1:9140"}'
+        values: "0 1+0x60"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x61"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: OpenVoxCASupersedeFailing
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: OpenVoxCASupersedeFailing
+        exp_alerts: *supersedeFiring
 
   # OpenVoxCACRLUpdateFailing on a CA that revokes nothing and whose CRL
   # storage stays broken. Amendments have no cycle of their own, but the CRL
