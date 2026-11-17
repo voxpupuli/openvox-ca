@@ -52,6 +52,20 @@ both are, and nothing at all when only `--ca-cert` is. These are expected output
 not failures. `setup`, `import` and `migrate` build no client, so they write no
 advisory line and never check `--ca-cert`.
 
+With a plain `http://` `--server-url` none of these lines is written. There is
+no TLS on that connection, so `--ca-cert`, `--insecure` and the client
+certificate change nothing about it, and nothing in it is encrypted or
+authenticated. The files they name are still checked, though: an unreadable
+`--ca-cert`, or a client pair that does not load or is half-supplied, is still
+refused.
+
+`openvox-ca-ctl` follows no redirects. A server that answers with one is
+reported as an error naming where it pointed, so `--server-url` has to name the
+server itself rather than a proxy that redirects to it. Following a redirect
+would carry the request, the TLS settings and the client certificate to
+whatever host it named, and would put a plain-HTTP URL onto TLS without any of
+the lines above.
+
 `openvox-ca-ctl --version` prints the version (including commit metadata when
 built from a git checkout) and exits. Unlike the global flags above,
 `--version` is accepted only on the root command, not after a subcommand.

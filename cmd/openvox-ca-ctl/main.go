@@ -72,8 +72,20 @@ type Client struct {
 //
 // --ca-cert takes precedence over --insecure: an explicitly supplied trust
 // anchor is never downgraded to "verify nothing".
+//
+// Against a plain http:// server URL it writes no notice at all. No handshake
+// happens there -- newClient refuses redirects, so the server cannot move the
+// request onto TLS -- and neither --ca-cert nor --insecure changes anything. A
+// line advising one of them would be false on every invocation, which trains
+// an operator to skip the advisory lines that do matter. The configuration is
+// still built and its errors still returned, so a broken ctl.yaml fails the
+// same way whichever scheme it is used with.
 func newTLSConfig(notices io.Writer) (*tls.Config, error) {
 	tlsCfg := &tls.Config{}
+	plainHTTP := isPlainHTTP(globalServerURL)
+	if plainHTTP {
+		notices = io.Discard
+	}
 
 	if globalCACert != "" {
 		caCertPEM, err := os.ReadFile(globalCACert)
@@ -108,7 +120,9 @@ func newTLSConfig(notices io.Writer) (*tls.Config, error) {
 		// The notice is advisory; a failed write to stderr must not stop the
 		// command, and the slog line below carries the same warning.
 		_, _ = fmt.Fprintln(notices, "WARNING: --insecure specified; TLS server certificate will NOT be verified (vulnerable to MITM)")
-		slog.Warn("TLS server verification disabled", "server", globalServerURL)
+		if !plainHTTP {
+			slog.Warn("TLS server verification disabled", "server", globalServerURL)
+		}
 		tlsCfg.InsecureSkipVerify = true
 	} else {
 		// SECURITY: Neither --ca-cert nor --insecure provided. Use the system
@@ -153,6 +167,14 @@ func newTLSConfig(notices io.Writer) (*tls.Config, error) {
 	return tlsCfg, nil
 }
 
+// isPlainHTTP reports whether serverURL names a plain-HTTP server, to which no
+// TLS configuration applies. An unparseable URL counts as not plain, so its
+// notices are kept; the request then fails on the URL itself.
+func isPlainHTTP(serverURL string) bool {
+	u, err := url.Parse(serverURL)
+	return err == nil && u.Scheme == "http"
+}
+
 func newClient() (*Client, error) {
 	tlsCfg, err := newTLSConfig(os.Stderr)
 	if err != nil {
@@ -162,10 +184,24 @@ func newClient() (*Client, error) {
 	return &Client{
 		BaseURL: strings.TrimRight(globalServerURL, "/"),
 		HTTPClient: &http.Client{
-			Transport: &http.Transport{TLSClientConfig: tlsCfg},
-			Timeout:   30 * time.Second,
+			Transport:     &http.Transport{TLSClientConfig: tlsCfg},
+			Timeout:       30 * time.Second,
+			CheckRedirect: refuseRedirect,
 		},
 	}, nil
+}
+
+// refuseRedirect stops the client following any redirect. Nothing the CLI
+// asks for should answer with one, and following it would carry the request
+// -- its body, the TLS settings and the client certificate -- to whatever host
+// the server named, under the trust the operator chose for --server-url. That
+// includes an http:// URL upgraded to https, where --insecure would then skip
+// verification with no warning, since none is written for plain HTTP.
+//
+// The target is quoted, because the server chose it.
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("the server redirected to %q, and openvox-ca-ctl does not follow redirects; "+
+		"set --server-url to the server itself", req.URL.Redacted())
 }
 
 func (c *Client) do(method, path string, body []byte) (int, []byte, error) {

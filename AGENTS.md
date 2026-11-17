@@ -392,7 +392,8 @@ worked example, and `cmd/openvox-ca-ctl/importcert_test.go` pins them.
 
 **The rule of thumb: if the value came from outside this invocation — a server
 response, or a certificate found in the cadir — quote it.** `import-cert`'s
-summary, `checkHTTP`'s error body and `sign --all`'s list are all quoted
+summary, `checkHTTP`'s error body, a refused redirect's target and
+`sign --all`'s list are all quoted
 because the *server* chose theirs, and `setup`'s CN line because it reports a
 subject read back off whatever certificate is already in the cadir. Each has a
 spec that fails if the quoting is removed. The last needs two, because `setup`
