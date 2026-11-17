@@ -60,7 +60,7 @@ var _ = Describe("chartVersions", func() {
 })
 
 var _ = Describe("chartValuesFiles", func() {
-	It("finds the fixtures, including the one held to the kubeVersion floor", func() {
+	It("finds the fixtures, including the defaults fixture chart:validate requires", func() {
 		files, err := chartValuesFiles()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(files).NotTo(BeEmpty())
@@ -69,10 +69,21 @@ var _ = Describe("chartValuesFiles", func() {
 		for _, f := range files {
 			names = append(names, chartFixtureName(f))
 		}
-		// Chart.Validate keys the floor check on this name and errors if it
-		// finds no such fixture; assert the pair agree so a rename fails here
-		// with an obvious message too.
+		// Chart.Validate refuses to run without this fixture; assert the pair
+		// agree so a rename fails here with an obvious message too.
 		Expect(names).To(ContainElement(chartFloorFixture))
+	})
+
+	It("holds every fixture to the kubeVersion floor as well as the newest schemas", func() {
+		// The chart README says every value works at the floor; this is
+		// what keeps that checked rather than asserted.
+		files, err := chartValuesFiles()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(files).NotTo(BeEmpty())
+		for _, f := range files {
+			name := chartFixtureName(f)
+			Expect(kubeconformTargets(name)).To(ConsistOf(kubeconformVersion, kubeconformFloorVersion), name)
+		}
 	})
 
 	// The repository's own fixtures are all .yaml, so without these two the

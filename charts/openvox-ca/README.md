@@ -61,10 +61,12 @@ A single `helm template` will show you exactly what the merge produced.
 
 ## Requirements
 
-Kubernetes **1.26 or newer** (the `kubeVersion` floor in `Chart.yaml`, checked
-against the 1.26 schemas in CI). Two optional values need more:
-`podDisruptionBudget.unhealthyPodEvictionPolicy` needs 1.27, and
-`service.trafficDistribution` needs 1.31.
+Kubernetes **1.34 or newer** (the `kubeVersion` floor in `Chart.yaml`, checked
+against the 1.34 schemas in CI). Every value the chart offers works at that
+floor. Rendering without a cluster (`helm template`, `helm lint`) checks the
+floor against the Kubernetes version Helm was built with rather than your
+cluster's, so with a Helm built against an older one pass
+`--kube-version 1.34` (or your cluster's version).
 
 Helm 3 or 4. CI validates the chart against one pinned version of each major —
 see the chart matrix in
@@ -228,7 +230,7 @@ and [the CA's own serving certificate](https://github.com/voxpupuli/openvox-ca/b
 | `service.ipFamilies` | `[]` | e.g. `[IPv6, IPv4]` to make IPv6 primary |
 | `service.clusterIP` / `.externalIPs` | `""` / `[]` | |
 | `service.externalTrafficPolicy` / `.internalTrafficPolicy` | `""` | |
-| `service.trafficDistribution` | `""` | e.g. `PreferClose` (Kubernetes 1.31+) |
+| `service.trafficDistribution` | `""` | e.g. `PreferClose` |
 | `service.sessionAffinity` / `.sessionAffinityConfig` | `""` / `{}` | |
 | `service.publishNotReadyAddresses` | `false` | |
 | `service.loadBalancerIP` / `.loadBalancerClass` / `.loadBalancerSourceRanges` | `""` / `""` / `[]` | LoadBalancer only |
@@ -282,7 +284,7 @@ certificate, so the controller **must** pass TLS through untouched.
 | `podDisruptionBudget.enabled` | `false` | |
 | `podDisruptionBudget.minAvailable` | `1` | Ignored when `maxUnavailable` is set |
 | `podDisruptionBudget.maxUnavailable` | `""` | `0` is honoured (block every voluntary eviction), not treated as unset |
-| `podDisruptionBudget.unhealthyPodEvictionPolicy` | `""` | Kubernetes 1.27+ |
+| `podDisruptionBudget.unhealthyPodEvictionPolicy` | `""` | `IfHealthyBudget` or `AlwaysAllow` |
 | `autoscaling.enabled` | `false` | Requires an external storage backend (the chart refuses a `maxReplicas` above 1 on filesystem or sqlite), and at least one of `targetCPUUtilizationPercentage`, `targetMemoryUtilizationPercentage` or `metrics` — the chart refuses an install with none set |
 | `autoscaling.minReplicas` / `.maxReplicas` | `2` / `6` | The chart refuses a `minReplicas` above `maxReplicas` |
 | `autoscaling.targetCPUUtilizationPercentage` | `80` | |

@@ -4545,16 +4545,15 @@ const chartDir = "charts/openvox-ca"
 
 // kubeconformVersion is the Kubernetes API version the rendered manifests are
 // validated against. Bumping it is how the chart picks up newly-GA fields.
-const kubeconformVersion = "1.31.0"
+const kubeconformVersion = "1.37.0"
 
 // kubeconformFloorVersion is the chart's declared kubeVersion floor
-// (charts/openvox-ca/Chart.yaml). The minimal fixture — the chart's defaults —
-// is validated against it as well, so the floor is a checked promise rather
-// than a claim. Fixtures that opt into newer fields
-// (unhealthyPodEvictionPolicy is 1.27+, trafficDistribution 1.31+) are only
-// checked at kubeconformVersion; both values carry that note, as does the
-// chart README's requirements section.
-const kubeconformFloorVersion = "1.26.0"
+// (charts/openvox-ca/Chart.yaml). Every fixture is validated against it as
+// well as against kubeconformVersion, so the chart README's claim that every
+// value works at the floor is checked rather than asserted. A value that needs
+// more than the floor fails here until it is either dropped from the fixtures
+// or the floor is raised.
+const kubeconformFloorVersion = "1.34.0"
 
 // kubeconformCacheDir is where chart:validate keeps kubeconform's downloaded
 // schemas, and what dev:clean removes. Named once because sh.Rm treats a
@@ -4563,9 +4562,20 @@ const kubeconformFloorVersion = "1.26.0"
 // for a stale local copy passing what CI fails.
 var kubeconformCacheDir = filepath.Join(".test-output", "kubeconform-cache")
 
-// chartFloorFixture is the fixture that stands in for the chart's defaults and
-// is therefore the one held to the floor. Named here rather than inline so
-// that renaming it fails loudly instead of quietly skipping the check.
+// kubeconformTargets is the Kubernetes versions chart:validate checks the
+// named fixture against: the newest schemas and the kubeVersion floor
+// Chart.yaml advertises, for every fixture, because the chart README says
+// every value works at the floor. The name is taken so that a fixture that
+// genuinely needs more than the floor has one place to be exempted, with its
+// reason, where a spec will notice.
+func kubeconformTargets(string) []string {
+	return []string{kubeconformVersion, kubeconformFloorVersion}
+}
+
+// chartFloorFixture is the fixture that stands in for the chart's defaults,
+// which chart:validate refuses to run without: the defaults are the one render
+// every install shares. Named here rather than inline so that renaming it
+// fails loudly instead of quietly dropping it.
 const chartFloorFixture = "minimal-values"
 
 // crdSchemaLocation points kubeconform at community-maintained JSON schemas
@@ -4719,7 +4729,7 @@ func verifyChartPins() error {
 	return verifyCIHelmAnnotationsIn(ciSrc, renovateSrc)
 }
 
-// kubeVersion: ">=1.26.0-0" — capture the bare version. Chart.yaml is parsed
+// kubeVersion: ">=1.34.0-0" — capture the bare version. Chart.yaml is parsed
 // textually rather than as YAML, matching chartVersions: the file's exact
 // line shapes are load-bearing for four other parsers, so reading it the same
 // way keeps this guard sensitive to the same reformatting they are.
@@ -5169,12 +5179,8 @@ func (Chart) Validate() error {
 		}
 		rendered = append(rendered, path)
 
-		// The minimal fixture is the chart's defaults, so it must also hold at
-		// the kubeVersion floor Chart.yaml advertises. The others opt into
-		// fields newer than that on purpose.
-		targets := []string{kubeconformVersion}
+		targets := kubeconformTargets(name)
 		if name == chartFloorFixture {
-			targets = append(targets, kubeconformFloorVersion)
 			floorChecked = true
 		}
 		for _, kubeVersion := range targets {
@@ -5183,7 +5189,7 @@ func (Chart) Validate() error {
 				"-strict",
 				"-summary",
 				// Both schema locations are remote, and this runs once per
-				// fixture — seven times per invocation. Without a cache each
+				// fixture per schema version. Without a cache each
 				// one re-downloads the same documents from
 				// raw.githubusercontent.com, so a rate limit there blocks every
 				// merge. (Each CI matrix leg still fetches once: the cache is
@@ -5204,9 +5210,9 @@ func (Chart) Validate() error {
 		}
 	}
 	if !floorChecked {
-		return fmt.Errorf("no %s.yaml fixture found, so nothing was validated against the "+
-			"kubeVersion floor (%s) that %s/Chart.yaml advertises; renaming that fixture "+
-			"silently drops the check",
+		return fmt.Errorf("no %s.yaml fixture found, so the chart's defaults were not validated "+
+			"against the kubeVersion floor (%s) that %s/Chart.yaml advertises; renaming that "+
+			"fixture silently drops the check",
 			chartFloorFixture, kubeconformFloorVersion, chartDir)
 	}
 	// Its own program, so that this file does not import internal/config and

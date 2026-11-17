@@ -693,7 +693,7 @@ service:
   externalIPs: []
   externalTrafficPolicy: ""
   internalTrafficPolicy: ""
-  # Kubernetes 1.31+: "PreferClose" keeps traffic in-zone.
+  # "PreferClose" keeps traffic in-zone.
   trafficDistribution: ""
   sessionAffinity: ""
   sessionAffinityConfig: {}
@@ -857,7 +857,6 @@ podDisruptionBudget:
   enabled: false
   minAvailable: 1
   maxUnavailable: ""
-  # Kubernetes 1.27+.
   unhealthyPodEvictionPolicy: ""
 
 # At least one metric source is required when enabled: an HPA with nothing to
