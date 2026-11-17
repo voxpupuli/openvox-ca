@@ -21,17 +21,20 @@ import (
 	"context"
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -53,6 +56,8 @@ var _ = Describe("renew subcommand", func() {
 		requests atomic.Int32
 		cfg      string
 		outDir   string
+		caKeyPEM []byte
+		caCrtPEM []byte
 	)
 
 	parseCert := func(certPEM []byte) *x509.Certificate {
@@ -104,6 +109,7 @@ var _ = Describe("renew subcommand", func() {
 
 		keyPEM, crtPEM, crlPEM, err := testutil.GenerateTestCA()
 		Expect(err).NotTo(HaveOccurred())
+		caKeyPEM, caCrtPEM = keyPEM, crtPEM
 		store = storage.New(GinkgoT().TempDir())
 		Expect(store.EnsureDirs(ctx)).To(Succeed())
 		Expect(store.SaveCAKey(ctx, keyPEM)).To(Succeed())
@@ -201,6 +207,34 @@ var _ = Describe("renew subcommand", func() {
 			Expect(filepath.Join(outDir, "revoked.example.com_key.pem")).NotTo(BeAnExistingFile())
 		})
 
+		It("refuses a current key it cannot follow, pointing at --csr, and renews nothing", func() {
+			// An Ed25519 leaf, which this CA would never issue but can find in
+			// its store (imported, say): NewKeyLike refuses to mirror it.
+			pub, _, err := ed25519.GenerateKey(rand.Reader)
+			Expect(err).NotTo(HaveOccurred())
+			caBlock, _ := pem.Decode(caCrtPEM)
+			caCert, err := x509.ParseCertificate(caBlock.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			keyBlock, _ := pem.Decode(caKeyPEM)
+			caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+			Expect(err).NotTo(HaveOccurred())
+			der, err := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+				SerialNumber: big.NewInt(4242),
+				Subject:      pkix.Name{CommonName: "edwards.example.com"},
+				NotBefore:    time.Now().Add(-time.Hour),
+				NotAfter:     time.Now().Add(time.Hour),
+			}, caCert, pub, caKey)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(store.SaveCert(ctx, "edwards.example.com",
+				pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))).To(Succeed())
+
+			_, err = run("--certname", "edwards.example.com", "--out-dir", outDir)
+			Expect(err).To(MatchError(ContainSubstring("renew with --csr")))
+			Expect(err).To(MatchError(ContainSubstring("nothing was renewed")))
+			Expect(filepath.Join(outDir, "edwards.example.com_key.pem")).NotTo(BeAnExistingFile())
+			Expect(stored("edwards.example.com").SerialNumber).To(Equal(big.NewInt(4242)))
+		})
+
 		It("refuses a name with no certificate before generating anything", func() {
 			_, err := run("--certname", "nobody.example.com", "--out-dir", outDir)
 			Expect(err).To(MatchError(ContainSubstring("HTTP 404")))
@@ -263,7 +297,9 @@ var _ = Describe("renew subcommand", func() {
 			Expect(err).To(MatchError(ContainSubstring(want)))
 			Expect(requests.Load()).To(BeZero())
 		},
-		Entry("--keep-key with --csr", "none of the others can be", "--keep-key", "--csr", "req.pem"),
+		// Cobra's own refusal: matched on the two flag names it must name, not
+		// on its sentence, which is the library's to reword.
+		Entry("--keep-key with --csr", "csr keep-key", "--keep-key", "--csr", "req.pem"),
 		Entry("--out-dir with --keep-key", "--out-dir applies only", "--keep-key", "--out-dir", "."),
 		Entry("--out-dir with --csr", "--out-dir applies only", "--csr", "req.pem", "--out-dir", "."),
 	)
