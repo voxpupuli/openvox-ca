@@ -81,6 +81,34 @@ var _ = DescribeTable("NewKeyLike follows the key it is given",
 	}, "RSA PRIVATE KEY", func(key any) {
 		Expect(key.(*rsa.PrivateKey).N.BitLen()).To(Equal(2048))
 	}),
+	Entry("RSA at exactly 2048 stays 2048", func() any {
+		k, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		return &k.PublicKey
+	}, "RSA PRIVATE KEY", func(key any) {
+		Expect(key.(*rsa.PrivateKey).N.BitLen()).To(Equal(2048))
+	}),
+	Entry("RSA at exactly 3072 stays 3072", func() any {
+		k, err := rsa.GenerateKey(rand.Reader, 3072)
+		Expect(err).NotTo(HaveOccurred())
+		return &k.PublicKey
+	}, "RSA PRIVATE KEY", func(key any) {
+		Expect(key.(*rsa.PrivateKey).N.BitLen()).To(Equal(3072))
+	}),
+	Entry("RSA just above 3072 rounds up to 4096", func() any {
+		k, err := rsa.GenerateKey(rand.Reader, 3080)
+		Expect(err).NotTo(HaveOccurred())
+		return &k.PublicKey
+	}, "RSA PRIVATE KEY", func(key any) {
+		Expect(key.(*rsa.PrivateKey).N.BitLen()).To(Equal(4096))
+	}),
+	Entry("RSA above 4096 comes back at 4096", func() any {
+		k, err := rsa.GenerateKey(rand.Reader, 4160)
+		Expect(err).NotTo(HaveOccurred())
+		return &k.PublicKey
+	}, "RSA PRIVATE KEY", func(key any) {
+		Expect(key.(*rsa.PrivateKey).N.BitLen()).To(Equal(4096))
+	}),
 	Entry("RSA between sizes rounds up", func() any {
 		k, err := rsa.GenerateKey(rand.Reader, 2304)
 		Expect(err).NotTo(HaveOccurred())
