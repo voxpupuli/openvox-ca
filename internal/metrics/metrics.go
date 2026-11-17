@@ -27,6 +27,11 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/httpserver"
 )
 
+// RoleLabel is the attribute every log record carries naming the process that
+// wrote it: launcher, signer, frontend or single-process. It is defined here so
+// that per-process metrics can share the name.
+const RoleLabel = "role"
+
 // Exporter bundles a dedicated Prometheus registry with the HTTP request
 // instrumentation that shares it. Keeping a private registry (rather than the
 // global default) means the exporter's metrics are self-contained and tests can

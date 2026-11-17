@@ -44,7 +44,7 @@ var _ = Describe("installing a role's logger", func() {
 		// Go's built-in handler and its warnings bypassed logfile entirely.
 		restoreLogger()
 		path := filepath.Join(GinkgoT().TempDir(), "ca.log")
-		closeLog, err := openRoleLog(&serverConfig{LogFile: path})
+		closeLog, err := openRoleLog(&serverConfig{LogFile: path}, roleLauncher)
 		Expect(err).NotTo(HaveOccurred())
 
 		slog.Warn("Ignoring a memory-budget setting", "detail", "memory_reserve_signer is bad")
@@ -62,7 +62,7 @@ var _ = Describe("installing a role's logger", func() {
 		// divided could never be emitted.
 		restoreLogger()
 		path := filepath.Join(GinkgoT().TempDir(), "ca.log")
-		closeLog, err := openRoleLog(&serverConfig{LogFile: path, Verbosity: 1})
+		closeLog, err := openRoleLog(&serverConfig{LogFile: path, Verbosity: 1}, roleLauncher)
 		Expect(err).NotTo(HaveOccurred())
 
 		slog.Debug("No memory budget to divide across the process tree", "reason", "no ceiling")
@@ -77,7 +77,7 @@ var _ = Describe("installing a role's logger", func() {
 		// The closer is always non-nil so callers can defer it unconditionally;
 		// returning nil here would panic the launcher on every default install.
 		restoreLogger()
-		closeLog, err := openRoleLog(&serverConfig{})
+		closeLog, err := openRoleLog(&serverConfig{}, roleLauncher)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(closeLog).NotTo(BeNil())
 		Expect(closeLog).NotTo(Panic())
@@ -89,7 +89,7 @@ var _ = Describe("installing a role's logger", func() {
 		// returns ErrClosed.
 		restoreLogger()
 		path := filepath.Join(GinkgoT().TempDir(), "ca.log")
-		closeLog, err := openRoleLog(&serverConfig{LogFile: path})
+		closeLog, err := openRoleLog(&serverConfig{LogFile: path}, roleLauncher)
 		Expect(err).NotTo(HaveOccurred())
 
 		var out syncBuffer
@@ -107,7 +107,7 @@ var _ = Describe("installing a role's logger", func() {
 		restoreLogger()
 		// A directory where a file is wanted.
 		dir := GinkgoT().TempDir()
-		_, err := openRoleLog(&serverConfig{LogFile: dir})
+		_, err := openRoleLog(&serverConfig{LogFile: dir}, roleLauncher)
 		Expect(err).To(HaveOccurred())
 	})
 })

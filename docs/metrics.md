@@ -357,7 +357,7 @@ so it stays current by itself".
 > if this does happen. A re-sign that *can* see a difference says so, at `WARN`:
 >
 > ```text
-> level=WARN msg="Stored CRL chain length changed while re-signing" blocks_read=2 blocks_written=1
+> level=WARN msg="Stored CRL chain length changed while re-signing" role=frontend blocks_read=2 blocks_written=1
 > ```
 >
 > On a healthy CA that line never appears: every block that is not ours is carried

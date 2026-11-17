@@ -511,6 +511,9 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 			Expect(reAsserted).To(HaveKeyWithValue("replicas_stopped_asserted", false))
 			Expect(reAsserted).To(HaveKeyWithValue("entries", float64(2)))
 			Expect(reAsserted).To(HaveKeyWithValue("key_state", "usable"))
+			// The logfile is the running server's, so the record names the
+			// command that wrote it.
+			Expect(reAsserted).To(HaveKeyWithValue("role", "rebuild-inventory-hmac"))
 
 			Expect(verified).To(HaveKeyWithValue("previous", hex.EncodeToString(headBefore)))
 			Expect(verified).To(HaveKeyWithValue("new", hex.EncodeToString(headAfter)),

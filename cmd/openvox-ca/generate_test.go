@@ -825,6 +825,9 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(entry).To(HaveKeyWithValue("grant", "pp_cli_auth=true"))
 			Expect(entry).To(HaveKeyWithValue("subject", "admin"))
 			Expect(entry).To(HaveKeyWithValue("level", "WARN"))
+			// The server's logfile is shared, so the record has to say it came
+			// from an offline mint rather than from the running server.
+			Expect(entry).To(HaveKeyWithValue("role", "generate"))
 		})
 
 		It("does not create a missing logfile, and mints anyway", func() {
@@ -876,11 +879,31 @@ var _ = Describe("openvox-ca generate", func() {
 				"ca_key_algo: ecdsa\nca_key_size: 256\nlogfile: "+logPath+"\n"), 0o644)).To(Succeed())
 			setEnv(configEnvVar, cfgPath)
 
-			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "web01",
-				"--ttl", "8760h", "--key-out", keyPath("web01"))
+			// The fallback logger binds the process's own stderr, which
+			// runGenerate does not capture, so it is captured here.
+			var stderr string
+			var err error
+			logged := captureStderr(func() {
+				_, stderr, err = runGenerate("--cadir", caDir, "--certname", "web01",
+					"--ttl", "8760h", "--key-out", keyPath("web01"))
+			}, func() {})
 			Expect(err).NotTo(HaveOccurred(), "a logging problem must not stop an operator issuing")
 			Expect(stderr).To(ContainSubstring("could not open"))
 			Expect(stderr).To(ContainSubstring("logging to stderr instead"))
+
+			// The fallback records are labelled like the logfile's would be:
+			// role names the offline command, not the server.
+			var records int
+			for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+				if !strings.Contains(line, "level=") {
+					continue
+				}
+				records++
+				m := textRole.FindStringSubmatch(line)
+				Expect(m).NotTo(BeNil(), "no role attribute in %q", line)
+				Expect(m[1]).To(Equal("generate"))
+			}
+			Expect(records).To(BeNumerically(">", 0), "the mint logged nothing to the fallback:\n%s", logged)
 			Expect(storage.New(caDir).HasCert(context.Background(), "web01")).To(BeTrue())
 		})
 	})

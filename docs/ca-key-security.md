@@ -449,7 +449,7 @@ deletion) per authenticated client. When a single client exceeds **5 destructive
 operations per minute**, a warning is emitted to the structured log:
 
 ```text
-level=WARN msg="High rate of destructive operations detected" client.cn=admin.example.com client.domain="this CA" operation=revoke
+level=WARN msg="High rate of destructive operations detected" role=frontend client.cn=admin.example.com client.domain="this CA" operation=revoke
 ```
 
 A client is identified by its common name *and* the trust domain that vouched for
