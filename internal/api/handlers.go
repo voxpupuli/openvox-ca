@@ -1693,26 +1693,82 @@ func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
 
 // --- Bulk sign ---
 
-type SignRequestBody struct {
-	Certnames []string `json:"certnames"`
+// postSignBody is POST /sign's body. certnames is kept raw so that a value
+// that is not a list of strings can be handed back as submitted.
+type postSignBody struct {
+	Certnames json.RawMessage `json:"certnames"`
+}
+
+// SchemaViolation is the 422 body OpenVox Server answers POST /sign with when
+// certnames is not a list of strings. Submitted is the certnames value as
+// given, not the whole body.
+type SchemaViolation struct {
+	Kind      string          `json:"kind"`
+	Submitted json.RawMessage `json:"submitted"`
+	Error     string          `json:"error"`
+}
+
+// signCertnames reads certnames from a POST /sign body as OpenVox Server's
+// schema does: absent or null is no names at all, and anything other than a
+// list of strings is refused. An element that is null is refused rather than
+// read as "", which is what decoding into []string would make of it.
+func signCertnames(raw json.RawMessage) ([]string, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, true
+	}
+	var items []any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, false
+	}
+	names := make([]string, len(items))
+	for i, item := range items {
+		name, ok := item.(string)
+		if !ok {
+			return nil, false
+		}
+		names[i] = name
+	}
+	return names, true
 }
 
 func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 	client := clientOf(r)
 	slog.Debug("POST sign", "client", client)
 
-	var body SignRequestBody
+	// A body that is not a JSON object still answers 400. OpenVox Server
+	// swallows the parse failure and answers 200 with nothing signed, which
+	// would hide a client's bug behind a success. Decoded through a pointer,
+	// because a top-level null decodes into a struct as a no-op and would
+	// otherwise read as a body with no certnames.
+	var body *postSignBody
 	if !decodeJSONBody(w, r, &body) {
 		return
 	}
-	if len(body.Certnames) == 0 {
-		http.Error(w, "certnames must not be empty", http.StatusBadRequest)
+	if body == nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	// An empty or absent certnames answers 200 with three empty lists, and a
+	// certnames that is not a list of strings answers 422 with the value as
+	// submitted, both as OpenVox Server does (#412).
+	certnames, ok := signCertnames(body.Certnames)
+	if !ok {
+		slog.Debug("POST sign refused: certnames is not a list of strings", "client", client)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		if err := json.NewEncoder(w).Encode(SchemaViolation{
+			Kind:      "schema-violation",
+			Submitted: body.Certnames,
+			Error:     "certnames must be a list of strings",
+		}); err != nil {
+			slog.Warn("encode response failed", "error", err)
+		}
 		return
 	}
 
-	slog.Debug("Signing certificates", "count", len(body.Certnames),
-		"subjects", sanitiseAllForLog(body.Certnames), "client", client)
-	result := s.signInBatches(r.Context(), body.Certnames)
+	slog.Debug("Signing certificates", "count", len(certnames),
+		"subjects", sanitiseAllForLog(certnames), "client", client)
+	result := s.signInBatches(r.Context(), certnames)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		slog.Warn("encode response failed", "error", err)
@@ -1985,6 +2041,12 @@ func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Bulk clean ---
+
+// SignRequestBody is PUT /clean's body. It was POST /sign's too until that
+// route took postSignBody, which keeps certnames raw.
+type SignRequestBody struct {
+	Certnames []string `json:"certnames"`
+}
 
 func (s *Server) handlePutClean(w http.ResponseWriter, r *http.Request) {
 	client := clientOf(r)
