@@ -98,6 +98,26 @@ var _ = Describe("the serve command with a self-provisioned serving certificate"
 		Expect(body).To(ContainSubstring("client certificate required"))
 	})
 
+	// The serving certificate reaches CA.ManagedCerts only through the serve
+	// command's own wiring, so this is the one place its refusal can be shown
+	// end to end: a spec that set ManagedCerts itself would pass whatever the
+	// wiring did (#247).
+	It("refuses an operator renewal of its own serving certificate", func() {
+		admin := mintClientCert(caDir, "admin.example.com")
+		mintClientCert(caDir, "node.example.com")
+		addr := startServe(serveConfig(caDir, servingDir, "127.0.0.1", freeLoopbackPort(), true))
+		roots := caRoots(caDir)
+
+		// The twin: the route renews an ordinary certificate for this admin, so
+		// the refusal below is about the subject being managed.
+		status, body := requestOverTLS(addr, roots, &admin, "POST", "/puppet-ca/v1/renew/node.example.com")
+		Expect(status).To(Equal(http.StatusOK), "precondition: an ordinary renewal must succeed; body: %s", body)
+
+		status, body = requestOverTLS(addr, roots, &admin, "POST", "/puppet-ca/v1/renew/localhost")
+		Expect(status).To(Equal(http.StatusConflict), "body: %s", body)
+		Expect(body).To(ContainSubstring("managed by this CA"))
+	})
+
 	// The twin of "does not announce a drain when it fails to start" below,
 	// so that one cannot pass because the command never announces one at all.
 	It("announces a drain when it is stopped deliberately", func() {
@@ -603,6 +623,12 @@ func caRoots(caDir string) *x509.CertPool {
 // listener is part of what the spec claims.
 func getOverTLS(addr string, roots *x509.CertPool, client *tls.Certificate, path string) (int, string) {
 	GinkgoHelper()
+	return requestOverTLS(addr, roots, client, "GET", path)
+}
+
+// requestOverTLS is getOverTLS for any method, with no request body.
+func requestOverTLS(addr string, roots *x509.CertPool, client *tls.Certificate, method, path string) (int, string) {
+	GinkgoHelper()
 	cfg := &tls.Config{
 		RootCAs:    roots,
 		ServerName: "localhost",
@@ -617,7 +643,9 @@ func getOverTLS(addr string, roots *x509.CertPool, client *tls.Certificate, path
 	}
 	defer hc.CloseIdleConnections()
 
-	resp, err := hc.Get("https://" + addr + path)
+	req, err := http.NewRequest(method, "https://"+addr+path, nil)
+	Expect(err).NotTo(HaveOccurred())
+	resp, err := hc.Do(req)
 	Expect(err).NotTo(HaveOccurred())
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
