@@ -1891,6 +1891,9 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newGenerateCmd())
 	cmd.AddCommand(newRebuildInventoryHMACCmd())
 
+	// Not an offline one: it checks a running server.
+	cmd.AddCommand(newHealthcheckCmd())
+
 	cliusage.MarkRequired(cmd)
 	return cmd
 }
