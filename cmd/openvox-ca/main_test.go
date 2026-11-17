@@ -54,6 +54,23 @@ var _ = Describe("Root command", func() {
 		Expect(out.String()).To(ContainSubstring("openvox-ca version " + version.Version))
 	})
 
+	// #362: cobra enforces these but rendered them like optional flags.
+	DescribeTable("says in --help which flags are required",
+		func(sub string, flags ...string) {
+			var out bytes.Buffer
+			cmd := newRootCmd()
+			cmd.SetArgs([]string{sub, "--help"})
+			cmd.SetOut(&out)
+			cmd.SetErr(io.Discard)
+			Expect(cmd.Execute()).To(Succeed())
+			for _, f := range flags {
+				Expect(out.String()).To(MatchRegexp(`--`+f+` \S+\s+[^\n]*\(required\)\n`), "--%s", f)
+			}
+		},
+		Entry("generate", "generate", "certname", "ttl"),
+		Entry("import-ca-cert", "import-ca-cert", "cert-bundle"),
+	)
+
 	// -v must stay the shorthand for --verbosity: cobra would otherwise claim
 	// it for the synthesised --version flag, silently changing what -v does.
 	It("keeps -v as the shorthand for --verbosity", func() {

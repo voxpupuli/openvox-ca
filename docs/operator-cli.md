@@ -138,7 +138,10 @@ with a pointer to `--certname node1.example.com`. A mistake on the command line
 `import --private-key`, which is checked once the command runs so that it can
 point at `openvox-ca import-ca-cert`) prints the
 subcommand's usage on stderr after the error, as `puppetserver ca` does. A
-failure once the subcommand is running prints the error alone.
+failure once the subcommand is running prints the error alone. In `--help`, on
+this binary and on `openvox-ca`, the flags a subcommand cannot run without are
+marked `(required)`, or `(required unless --other is given)` when either of two
+will do.
 
 ```bash
 # List pending CSRs

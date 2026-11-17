@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/voxpupuli/openvox-ca/internal/version"
 )
@@ -90,6 +91,36 @@ var _ = Describe("Root command", func() {
 		flag := cmd.PersistentFlags().Lookup("verbose")
 		Expect(flag).NotTo(BeNil())
 		Expect(flag.Changed).To(BeTrue())
+	})
+
+	// #362: cobra enforces these but rendered them like optional flags. Walked
+	// from the tree, so a flag marked required later is covered too.
+	It("says in --help which flags are required", func() {
+		var marked []string
+		var walk func(*cobra.Command)
+		walk = func(c *cobra.Command) {
+			c.LocalFlags().VisitAll(func(f *pflag.Flag) {
+				if len(f.Annotations[cobra.BashCompOneRequiredFlag]) > 0 {
+					marked = append(marked, c.Name()+" --"+f.Name)
+					Expect(f.Usage).To(HaveSuffix("(required)"), "%s --%s", c.Name(), f.Name)
+				}
+			})
+			for _, sub := range c.Commands() {
+				walk(sub)
+			}
+		}
+		walk(newRootCmd())
+		// A floor, so a walk that found nothing could not pass.
+		Expect(marked).To(ContainElements("clean --certname", "setup --cadir", "migrate --dest-config"))
+
+		var out bytes.Buffer
+		cmd := newRootCmd()
+		cmd.SetArgs([]string{"revoke", "--help"})
+		cmd.SetOut(&out)
+		cmd.SetErr(io.Discard)
+		Expect(cmd.Execute()).To(Succeed())
+		Expect(out.String()).To(ContainSubstring("(required unless --serial is given)"))
+		Expect(out.String()).To(ContainSubstring("(required unless --certname is given)"))
 	})
 
 	// -v must stay the shorthand for --verbose, mirroring the server binary

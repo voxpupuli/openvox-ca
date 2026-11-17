@@ -43,6 +43,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/cliusage"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 	"github.com/voxpupuli/openvox-ca/internal/version"
 )
@@ -1134,6 +1135,7 @@ Global flags may be placed before or after the subcommand name.`,
 		newMigrateCmd(),
 	)
 	silenceUsageOnceRunning(rootCmd)
+	cliusage.MarkRequired(rootCmd)
 
 	return rootCmd
 }
