@@ -280,8 +280,8 @@ type CertStatusResponse struct {
 	DNSAltNames     []string          `json:"dns_alt_names"`
 	SubjectAltNames []string          `json:"subject_alt_names"`
 	// AuthorizationExtensions contains Puppet auth-arc OID values keyed by short
-	// name (e.g. "pp_auth_role") or raw OID string when no short name is known.
-	// Always present, empty map when none exist.
+	// name (e.g. "pp_auth_role") or raw OID string when OpenVox Server knows no
+	// short name. Always present, empty map when none exist.
 	AuthorizationExtensions map[string]string `json:"authorization_extensions"`
 	// Populated when signed or revoked.
 	// SerialNumber is the full serial, a JSON number as OpenVox Server sends
@@ -1187,11 +1187,36 @@ func parseCSR(pemData []byte) (*x509.CertificateRequest, error) {
 }
 
 // authExtensions extracts Puppet authorization extensions (OID arc 1.3.6.1.4.1.34380.1.3)
-// from a certificate or CSR extension list and returns them as a name→value map.
-// See ca.AuthExtensionMap, which is shared with the certificate index
-// projection so the two can never disagree on the display form.
+// from a certificate or CSR extension list and returns them as a name→value map,
+// keyed as the response keys them. See ca.AuthExtensionMap, which is shared with
+// the certificate index projection so the two can never disagree on the
+// display form, and responseAuthExtensions.
 func authExtensions(exts []pkix.Extension) map[string]string {
-	return ca.AuthExtensionMap(exts)
+	return responseAuthExtensions(ca.AuthExtensionMap(exts))
+}
+
+// responseOIDKeys are the short names ca.PuppetShortNames knows that OpenVox
+// Server's puppet-short-names does not, mapped to the dotted OID it keys the
+// extension by instead. pp_auth_auto_renew is in Puppet's oids.rb, which is
+// why the CA logs it by name, but OpenVox Server has it only as a CSR
+// attribute constant (#408).
+var responseOIDKeys = map[string]string{
+	"pp_auth_auto_renew": "1.3.6.1.4.1.34380.1.3.2",
+}
+
+// responseAuthExtensions keys an authorisation-extension map as OpenVox
+// Server's authorization_extensions does. Like responseFingerprint, it is
+// applied when a response is built, so index rows that store the CA's own
+// keys need no rewrite. Always returns a non-nil map.
+func responseAuthExtensions(exts map[string]string) map[string]string {
+	out := make(map[string]string, len(exts))
+	for k, v := range exts {
+		if oid, ok := responseOIDKeys[k]; ok {
+			k = oid
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // fingerprint renders the SHA-256 fingerprint of a PEM-encoded certificate or
@@ -1324,10 +1349,6 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt Seri
 
 	nbs := nb.UTC().Format(timeFmt)
 	nas := na.UTC().Format(timeFmt)
-	authExts := rec.AuthExtensions
-	if authExts == nil {
-		authExts = map[string]string{}
-	}
 	fp := responseFingerprint(rec.Fingerprint)
 	return CertStatusResponse{
 		Name:                    rec.Subject,
@@ -1336,7 +1357,7 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt Seri
 		Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
 		DNSAltNames:             dnsAltNames(rec.DNSAltNames),
 		SubjectAltNames:         subjectAltNames(rec.IPAltNames, rec.DNSAltNames),
-		AuthorizationExtensions: authExts,
+		AuthorizationExtensions: responseAuthExtensions(rec.AuthExtensions),
 		SerialNumber:            newCertSerial(serialInt, serialFmt),
 		NotBefore:               &nbs,
 		NotAfter:                &nas,

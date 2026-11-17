@@ -218,10 +218,7 @@ func compressedIPv6(at string) contractException {
 // cornerExtExtensions are the differences in corner-ext's authorisation
 // extensions.
 func cornerExtExtensions(at string) []contractException {
-	const autoRenew = "#408: pp_auth_auto_renew is keyed by name, where upstream keys it by OID"
 	return []contractException{
-		{at + `.authorization_extensions["1.3.6.1.4.1.34380.1.3.2"]: missing`, autoRenew},
-		{at + ".authorization_extensions.pp_auth_auto_renew: not in upstream", autoRenew},
 		{at + `.authorization_extensions["1.3.6.1.4.1.34380.1.3"]: not in upstream`,
 			"#409: an extension with the authorisation arc's own OID is listed"},
 		{at + `.authorization_extensions["1.3.6.1.4.1.34380.1.3.98"]: value 6c6567616379, upstream legacy`,

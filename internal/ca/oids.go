@@ -133,8 +133,10 @@ func OIDKey(oid asn1.ObjectIdentifier) string {
 // map. Keys are Puppet short names when known (e.g. "pp_auth_role"), raw
 // dotted OID strings otherwise; values are the decoded UTF-8 strings, or the
 // hex-encoded raw bytes when the value is not an ASN.1 string. Always returns
-// a non-nil map. This is the single producer of the auth-extension display
-// form, shared by the status API and the certificate index projection.
+// a non-nil map. This is the single producer of the CA's own keying, shared by
+// the status API and the certificate index projection. The status API re-keys
+// it on the way out, as OpenVox Server keys it (see
+// api.responseAuthExtensions), so stored rows need no rewrite.
 func AuthExtensionMap(exts []pkix.Extension) map[string]string {
 	result := make(map[string]string)
 	for _, ext := range exts {

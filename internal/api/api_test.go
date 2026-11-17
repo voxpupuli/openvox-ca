@@ -928,6 +928,37 @@ var _ = Describe("API Workflow", func() {
 			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
 			Expect(resp.AuthorizationExtensions).To(HaveKeyWithValue("pp_auth_role", "my-role"))
 		})
+
+		// The contract suite pins the certificate path and certstatus_internal_test
+		// the index path; no recorded CSR carries these extensions.
+		It("keys a pending CSR's extensions as OpenVox Server does", func() {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			Expect(err).NotTo(HaveOccurred())
+			val, err := asn1.Marshal("true")
+			Expect(err).NotTo(HaveOccurred())
+
+			csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+				Subject: pkix.Name{CommonName: "auth-keying-node"},
+				ExtraExtensions: []pkix.Extension{
+					// pp_auth_auto_renew, which OpenVox Server keys by OID.
+					{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 2}, Value: val},
+				},
+			}, key)
+			Expect(err).NotTo(HaveOccurred())
+
+			csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_request/auth-keying-node", bytes.NewReader(csrPEM)))
+
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("GET", "/certificate_status/auth-keying-node", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			var resp api.CertStatusResponse
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+			Expect(resp.State).To(Equal("requested"))
+			Expect(resp.AuthorizationExtensions).To(Equal(map[string]string{"1.3.6.1.4.1.34380.1.3.2": "true"}))
+		})
 	})
 
 	Context("DELETE /certificate_status/{subject}", func() {

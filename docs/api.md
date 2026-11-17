@@ -95,7 +95,7 @@ Nor is either status code a statement about [`openvoxca_crl_update_failures_tota
 }
 ```
 
-Fingerprints are uppercase hex pairs and each SAN carries its `DNS:` or `IP:` prefix, as OpenVox Server renders them. `subject_alt_names` lists the IP SANs first and then the DNS SANs; `dns_alt_names` lists the DNS SANs alone. The response is checked against OpenVox Server's own: see [Differences from OpenVox Server](#differences-from-openvox-server).
+Fingerprints are uppercase hex pairs and each SAN carries its `DNS:` or `IP:` prefix, as OpenVox Server renders them. `authorization_extensions` keys each extension by the short name OpenVox Server gives it, or by its dotted OID where OpenVox Server has none: `1.3.6.1.4.1.34380.1.3.2`, which Puppet calls `pp_auth_auto_renew`, is keyed by OID. `subject_alt_names` lists the IP SANs first and then the DNS SANs; `dns_alt_names` lists the DNS SANs alone. The response is checked against OpenVox Server's own: see [Differences from OpenVox Server](#differences-from-openvox-server).
 
 > **Note:** `serial_number` is the certificate's full serial, a random 128-bit value, as a bare JSON number. That is how OpenVox Server sends it. It is omitted for certificates in the `requested` state. The number is exact in the response, but a parser that reads every JSON number as a double — JavaScript's `JSON.parse`, or `jq` before 1.7 — rounds a value this large. Where you need the exact serial, use a parser that keeps the digits (`jq` 1.7 or later does), or read it from the certificate itself.
 >
@@ -717,7 +717,7 @@ Where openvox-ca still differs, the spec carries an exception for each differenc
 Tracked as defects, each with an issue:
 
 - `fingerprints` lacks `SHA1` and `SHA512` ([#406](https://github.com/voxpupuli/openvox-ca/issues/406)).
-- The authorisation extension `1.3.6.1.4.1.34380.1.3.2` is keyed `pp_auth_auto_renew` rather than by OID ([#408](https://github.com/voxpupuli/openvox-ca/issues/408)), and an extension whose OID is exactly the authorisation arc is listed ([#409](https://github.com/voxpupuli/openvox-ca/issues/409)).
+- An extension whose OID is exactly the authorisation arc is listed in `authorization_extensions` ([#409](https://github.com/voxpupuli/openvox-ca/issues/409)).
 - `POST /sign` answers `400` for an empty or missing `certnames` (OpenVox Server: `200`) and for a non-list one (OpenVox Server: `422` with a JSON body) ([#412](https://github.com/voxpupuli/openvox-ca/issues/412)).
 - `PUT /certificate_revocation_list` (CRL upload) is not implemented ([#413](https://github.com/voxpupuli/openvox-ca/issues/413)).
 - `GET /certificate/{subject}` ignores `If-Modified-Since` ([#414](https://github.com/voxpupuli/openvox-ca/issues/414)).
