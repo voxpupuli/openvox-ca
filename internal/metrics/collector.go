@@ -100,6 +100,11 @@ type Collector struct {
 	crlSyncFailures   *prometheus.Desc
 	crlCachedNumber   *prometheus.Desc
 
+	// ocspResponder is false when the server does not serve /ocsp, and then
+	// the ocsp_index series are omitted: nothing answers from the index and no
+	// sync refreshes it from peers, so they would describe nothing an operator
+	// acts on.
+	ocspResponder         bool
 	ocspIndexSyncFailures *prometheus.Desc
 	ocspIndexSerials      *prometheus.Desc
 	supersedeFailures     *prometheus.Desc
@@ -108,6 +113,8 @@ type Collector struct {
 	signingInFlight *prometheus.Desc
 	signingLimit    *prometheus.Desc
 	signingShed     *prometheus.Desc
+
+	inventoryVerifyFailures *prometheus.Desc
 
 	caInfo      *prometheus.Desc
 	caNotBefore *prometheus.Desc
@@ -132,14 +139,27 @@ type Collector struct {
 	leafStateCount        *prometheus.Desc
 }
 
+// Option adjusts what a Collector reports.
+type Option func(*Collector)
+
+// WithoutOCSPResponder omits the openvoxca_ocsp_index_* series, for a server
+// that does not serve /ocsp (enable_ocsp unset). There nothing answers from the
+// serial index and the sync job that refreshes it from peers does not run, so
+// its size would track only this replica's own issuance and its sync failures
+// would stay at zero: neither describes anything an operator acts on.
+func WithoutOCSPResponder() Option {
+	return func(c *Collector) { c.ocspResponder = false }
+}
+
 // NewCollector returns a Collector for the given CA. The CA need not be fully
 // initialised yet: until it is, the exporter reports openvoxca_ca_ready 0 and
 // omits the CA/CRL/leaf series rather than failing the scrape.
-func NewCollector(c *ca.CA) *Collector {
-	return &Collector{
-		ca:      c,
-		timeout: defaultGatherTimeout,
-		now:     time.Now,
+func NewCollector(c *ca.CA, opts ...Option) *Collector {
+	col := &Collector{
+		ca:            c,
+		timeout:       defaultGatherTimeout,
+		now:           time.Now,
+		ocspResponder: true,
 		scrapeSuccess: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "collector", "scrape_success"),
 			"1 if the most recent CA metrics scrape succeeded, 0 otherwise.",
@@ -187,6 +207,14 @@ func NewCollector(c *ca.CA) *Collector {
 				"longer verifies. While it is rising, this replica answers 'unknown' for "+
 				"certificates signed elsewhere since the last successful pass.",
 			nil, nil),
+		inventoryVerifyFailures: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "inventory_verify", "failures_total"),
+			"Total failed periodic inventory verifications, by reason. reason=\"tampered\" is a "+
+				"pass whose integrity value no longer matched the inventory: an edit made behind "+
+				"the CA's back, and the one to alert on. reason=\"read_error\" is a pass that "+
+				"could not read the inventory at all. Every replica verifies on every backend, "+
+				"once per inventory_verify_interval_sec.",
+			[]string{"reason"}, nil),
 		signingInFlight: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "ca_signing", "in_flight"),
 			"CA-key signatures in flight right now, across certificate issuance, CRL re-signing and "+
@@ -363,6 +391,10 @@ func NewCollector(c *ca.CA) *Collector {
 				"has never issued is a value rather than an absence.",
 			[]string{"subject"}, nil),
 	}
+	for _, opt := range opts {
+		opt(col)
+	}
+	return col
 }
 
 // Describe implements prometheus.Collector. The exporter uses an unchecked
@@ -379,8 +411,11 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.supersedeFailures
 	ch <- c.supersedePending
 	ch <- c.crlCachedNumber
-	ch <- c.ocspIndexSyncFailures
-	ch <- c.ocspIndexSerials
+	if c.ocspResponder {
+		ch <- c.ocspIndexSyncFailures
+		ch <- c.ocspIndexSerials
+	}
+	ch <- c.inventoryVerifyFailures
 	ch <- c.signingInFlight
 	ch <- c.signingLimit
 	ch <- c.signingShed
@@ -430,10 +465,17 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		float64(c.ca.CRLUpdateFailures()))
 	ch <- prometheus.MustNewConstMetric(c.crlSyncFailures, prometheus.CounterValue,
 		float64(c.ca.CRLSyncFailures()))
-	ch <- prometheus.MustNewConstMetric(c.ocspIndexSyncFailures, prometheus.CounterValue,
-		float64(c.ca.SerialIndexSyncFailures()))
-	ch <- prometheus.MustNewConstMetric(c.ocspIndexSerials, prometheus.GaugeValue,
-		float64(c.ca.SerialIndexSize()))
+	if c.ocspResponder {
+		ch <- prometheus.MustNewConstMetric(c.ocspIndexSyncFailures, prometheus.CounterValue,
+			float64(c.ca.SerialIndexSyncFailures()))
+		ch <- prometheus.MustNewConstMetric(c.ocspIndexSerials, prometheus.GaugeValue,
+			float64(c.ca.SerialIndexSize()))
+	}
+	tampered, readErrors := c.ca.InventoryVerifyFailures()
+	ch <- prometheus.MustNewConstMetric(c.inventoryVerifyFailures, prometheus.CounterValue,
+		float64(tampered), "tampered")
+	ch <- prometheus.MustNewConstMetric(c.inventoryVerifyFailures, prometheus.CounterValue,
+		float64(readErrors), "read_error")
 	ch <- prometheus.MustNewConstMetric(c.supersedeFailures, prometheus.CounterValue,
 		float64(c.ca.SupersedeFailures()))
 	// Emitted alongside the failure counters, and for the same reason: these

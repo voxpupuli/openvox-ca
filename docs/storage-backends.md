@@ -45,9 +45,10 @@ on one replica stops working against the others within `crl_sync_interval_sec`
 (60s by default) rather than at once. See
 [Revocation across replicas](configuration.md#revocation-across-replicas).
 
-The responder keeps a second such copy: the set of serials this CA has issued,
-which decides whether it will speak about a certificate at all. On the shared
-backends it is reloaded on its own timer, so a certificate signed on one replica
+While [`enable_ocsp`](configuration.md#serving-ocsp) serves it, the responder
+keeps a second such copy: the set of serials this CA has issued, which decides
+whether it will speak about a certificate at all. On the shared backends it is
+reloaded on its own timer, so a certificate signed on one replica
 stops being reported `unknown` by the others within `ocsp_index_sync_interval_sec`
 (5m by default). `filesystem` and `sqlite` do not run that job — they
 support a single running instance, so nothing else should be writing
@@ -180,7 +181,11 @@ another process per lock *name*, and the inventory append takes no cluster lock
 of its own — it is serialised by a process-local mutex. Two processes issuing
 for **different** subjects therefore hold different `subject:<name>` locks, and
 can still interleave an append with its integrity update, leaving an integrity
-value covering an inventory that never existed — which the *next* start rejects.
+value covering an inventory that never existed — which the *next* start rejects,
+and which a running server's [inventory verification](configuration.md#inventory-verification)
+reports within `inventory_verify_interval_sec` as `reason="tampered"`, paging
+`OpenVoxCAInventoryTampered`. On these two backends that page may mean this
+rather than an edit made from outside.
 
 That is not a tracked defect, because it describes a configuration that is not
 supported rather than a bug in one that is. Note *why* it is not one, because

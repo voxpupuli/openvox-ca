@@ -50,8 +50,8 @@ type Exporter struct {
 //     is wrapped with InstrumentHandler.
 //
 // Together these cover both the "usual" Go web-application metrics and the
-// CA-specific certificate/CRL series.
-func NewExporter(c *ca.CA) *Exporter {
+// CA-specific certificate/CRL series. opts are handed to the CA collector.
+func NewExporter(c *ca.CA, opts ...Option) *Exporter {
 	reg := prometheus.NewRegistry()
 
 	// Standard Go web-application metrics.
@@ -61,7 +61,7 @@ func NewExporter(c *ca.CA) *Exporter {
 	)
 
 	// CA-specific metrics.
-	reg.MustRegister(NewCollector(c))
+	reg.MustRegister(NewCollector(c, opts...))
 
 	e := &Exporter{
 		registry: reg,

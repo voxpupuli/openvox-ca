@@ -49,6 +49,10 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 		Port:         8140,
 		CAPathLength: -1, // unconstrained; 0 = leaf-only, N = N levels of intermediates
 		CSRRateLimit: -1, // unset sentinel; 0 disables, -1 falls back to defaultCSRRateLimit
+		// Same sentinel convention; see resolveOCSPRateLimit.
+		OCSPRateLimit: -1,
+		// Each IPv6 address its own client, as before the setting existed.
+		RateLimitIPv6PrefixLength: 128,
 		// Same sentinel convention; see resolveSigningConcurrency.
 		CASigningConcurrency: -1,
 		PromoteCNToSAN:       true, // RFC 2818: add CN as SAN when CSR has no SANs
@@ -101,6 +105,11 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 			"it is a clock-skew tolerance, and a certificate valid that far before it was "+
 			"issued is not one", maxLeafBackdateSec, cfg.LeafBackdateSec)
 	}
+	// Ungated in applyServerEnv so the environment reaches this check as the
+	// file does; the flag is checked where the serve command applies it.
+	if err := checkRateLimitIPv6PrefixLength(cfg.RateLimitIPv6PrefixLength); err != nil {
+		return nil, err
+	}
 	// Refused rather than ignored, for the reason the backdate's own check
 	// gives: a negative value is a typo, and falling back to the default
 	// silently is how the operator never hears about it. The asymmetry with
@@ -123,6 +132,14 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 		return nil, fmt.Errorf("managed_cert_interval_sec must not exceed %d seconds "+
 			"(30 days, got %d): a reconcile loop that wakes less often than that is not "+
 			"keeping anything alive", maxManagedCertIntervalSec, cfg.ManagedCertIntervalSec)
+	}
+	// The same ceiling, for the same two reasons, and one more: this job runs
+	// on every configuration, so a mistyped value would otherwise either panic
+	// the server or quietly turn off the tamper check.
+	if cfg.InventoryVerifyIntervalSec > maxInventoryVerifyIntervalSec {
+		return nil, fmt.Errorf("inventory_verify_interval_sec must not exceed %d seconds "+
+			"(30 days, got %d): a tamper check that runs less often than that is not "+
+			"checking", maxInventoryVerifyIntervalSec, cfg.InventoryVerifyIntervalSec)
 	}
 
 	return cfg, nil
@@ -260,6 +277,32 @@ func (c *serverConfig) ocspIndexSyncInterval() time.Duration {
 	return defaultOCSPIndexSyncInterval
 }
 
+// checkRateLimitIPv6PrefixLength refuses a rate_limit_ipv6_prefix_length
+// outside 1-128, rather than clamping it: 0 would put every IPv6 client
+// anywhere in one budget, and a value over 128 is not a prefix at all.
+func checkRateLimitIPv6PrefixLength(n int) error {
+	if n < 1 || n > 128 {
+		return fmt.Errorf("rate_limit_ipv6_prefix_length must be between 1 and 128 (got %d): "+
+			"it is how many leading bits of an IPv6 client address count as one client", n)
+	}
+	return nil
+}
+
+// defaultInventoryVerifyInterval is how often each replica re-checks the
+// inventory's integrity value when the operator has not said. The same five
+// minutes as the OCSP index sync, for the same cost reason: the pass reads the
+// whole inventory, so it grows with every certificate ever issued.
+const defaultInventoryVerifyInterval = 5 * time.Minute
+
+// inventoryVerifyInterval resolves how often the inventory-verify job runs,
+// falling back to defaultInventoryVerifyInterval when unset.
+func (c *serverConfig) inventoryVerifyInterval() time.Duration {
+	if c.InventoryVerifyIntervalSec > 0 {
+		return time.Duration(c.InventoryVerifyIntervalSec) * time.Second
+	}
+	return defaultInventoryVerifyInterval
+}
+
 // defaultCRLChainRefreshInterval is how often crl_chain_file is re-read when
 // the operator has not configured an interval.
 //
@@ -374,6 +417,10 @@ func (c *serverConfig) tlsEnabled() bool {
 // seconds-to-nanoseconds multiply into a non-positive duration reaches
 // time.NewTicker, which panics rather than erroring.
 const maxManagedCertIntervalSec = 30 * 24 * 60 * 60
+
+// maxInventoryVerifyIntervalSec is the ceiling on
+// inventory_verify_interval_sec, for maxManagedCertIntervalSec's reasons.
+const maxInventoryVerifyIntervalSec = 30 * 24 * 60 * 60
 
 // leafBackdate resolves how far leaf certificates are backdated, falling back
 // to the CA's own ca.DefaultLeafBackdate when unset.
@@ -518,6 +565,10 @@ func applyServerEnv(cfg *serverConfig) error {
 	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_REFRESH_BEFORE_SEC", &cfg.CRLRefreshBeforeSec, config.Positive))
 	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_SYNC_INTERVAL_SEC", &cfg.CRLSyncIntervalSec, config.Positive))
 	errs = append(errs, config.EnvInt("OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC", &cfg.OCSPIndexSyncIntervalSec, config.Positive))
+	errs = append(errs, config.EnvBool("OPENVOX_CA_ENABLE_OCSP", &cfg.EnableOCSP))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_INVENTORY_VERIFY_INTERVAL_SEC", &cfg.InventoryVerifyIntervalSec, config.Positive))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_OCSP_RATE_LIMIT", &cfg.OCSPRateLimit, nil))
+	errs = append(errs, config.EnvInt("OPENVOX_CA_RATE_LIMIT_IPV6_PREFIX_LENGTH", &cfg.RateLimitIPv6PrefixLength, nil))
 	errs = append(errs, config.EnvBool("OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP", &cfg.EnableExpiredCertCleanup))
 	errs = append(errs, config.EnvInt("OPENVOX_CA_EXPIRED_CERT_RETENTION_SEC", &cfg.ExpiredCertRetentionSec, config.Positive))
 	errs = append(errs, config.EnvInt("OPENVOX_CA_EXPIRED_CERT_CLEANUP_INTERVAL_SEC", &cfg.ExpiredCertCleanupIntervalSec, config.Positive))

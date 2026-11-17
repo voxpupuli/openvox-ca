@@ -913,6 +913,9 @@ func (atomicCapBackend) AppendEntry(context.Context, storage.CertRecord, func([]
 	return nil
 }
 func (atomicCapBackend) Entries(context.Context) ([]storage.InventoryEntry, error) { return nil, nil }
+func (atomicCapBackend) EntriesWithHead(context.Context) ([]storage.InventoryEntry, []byte, bool, error) {
+	return nil, nil, false, nil
+}
 func (atomicCapBackend) LatestSerialForSubject(context.Context, string) (string, error) {
 	return "", nil
 }

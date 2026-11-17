@@ -76,6 +76,10 @@ commonAnnotations: {}
 #     insecure_allow_world_readable_keys: false  # true starts anyway on world-readable keys
 #     insecure_allow_unsafe_autosign_path: false  # true runs an autosign plugin others could replace
 #     insecure_allow_plain_http_generate: false  # true lets POST /generate return keys without TLS
+#     enable_ocsp: false  # true serves the unauthenticated OCSP responder at /ocsp; ocsp_url does not
+#     ocsp_rate_limit: 300  # OCSP requests per client IP per minute; behind a proxy every client shares one budget
+#     rate_limit_ipv6_prefix_length: 128  # IPv6 bits both rate limits count as one client; 64 stops one /64 host filling the limiter (no effect behind a passthrough ingress)
+#     inventory_verify_interval_sec: 0  # periodic inventory integrity check on every replica; 0 = default (5m)
 #     # Certificates openvox-ca issues and renews for OpenVox components. Each
 #     # entry needs a store: a Kubernetes Secret or a local file pair, never
 #     # inferred. The Secret holding OpenVox Server's key is a CA admin
@@ -767,7 +771,9 @@ gateway:
 
   # HTTPRoute terminates TLS at the Gateway, so the CA sees no client
   # certificate. Only useful for the anonymous endpoints (CRL distribution,
-  # health, OCSP) or alongside config.no_tls_required.
+  # health, OCSP) or alongside config.no_tls_required. OCSP is served only with
+  # config.enable_ocsp, and through the route every client shares one
+  # ocsp_rate_limit budget; see docs/helm-chart.md.
   httpRoute:
     enabled: false
     apiVersion: gateway.networking.k8s.io/v1

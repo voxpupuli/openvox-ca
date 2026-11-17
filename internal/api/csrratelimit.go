@@ -33,15 +33,19 @@ const csrRateLimitedWarnInterval = time.Minute
 // refuseCSRRateLimited answers a CSR submission that csr_rate_limit refused,
 // and makes the refusal visible: to OnCSRRateLimited on every call, and in the
 // log at Warn at most once per csrRateLimitedWarnInterval, at Debug otherwise.
-// Nothing from the request body is logged, since it has not been read.
+// Nothing from the request body is logged, since it has not been read. The
+// Warn names the key the limiter counted as well as the address: under
+// rate_limit_ipv6_prefix_length an IPv6 client shares its budget with its
+// whole prefix, and the key is what an operator needs to find the others.
 func (s *Server) refuseCSRRateLimited(w http.ResponseWriter, r *http.Request) {
 	if s.OnCSRRateLimited != nil {
 		s.OnCSRRateLimited()
 	}
 	if s.csrLimitedWarn.due(csrRateLimitedWarnInterval) {
-		slog.Warn("CSR submission refused: client over csr_rate_limit "+
+		slog.Warn("CSR submission refused: client over csr_rate_limit, or new while the limiter is full "+
 			"(further refusals in the next minute log at Debug)",
-			"client_ip", clientIP(r), "csr_rate_limit_per_minute", s.CSRRateLimit)
+			"client_ip", clientIP(r), "rate_limit_key", rateLimitKey(r, s.RateLimitIPv6PrefixLength),
+			"csr_rate_limit_per_minute", s.CSRRateLimit)
 	} else {
 		slog.Debug("CSR submission refused: rate limit exceeded", "client_ip", clientIP(r))
 	}

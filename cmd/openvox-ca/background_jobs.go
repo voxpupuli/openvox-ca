@@ -53,6 +53,7 @@ const (
 	jobCRLRefresh      = "crl-refresh"
 	jobCRLSync         = "crl-sync"
 	jobOCSPIndexSync   = "ocsp-index-sync"
+	jobInventoryVerify = "inventory-verify"
 	jobCertCleanup     = "expired-cert-cleanup"
 	jobSupersededSweep = "superseded-cert-revocation"
 	jobCRLChainRefresh = "crl-chain-refresh"
@@ -110,6 +111,17 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 		runCRLSync(ctx, myCA, syncInterval)
 	}})
 
+	// Re-checks the inventory's integrity value on a timer, on every backend
+	// and whatever enable_ocsp says. The OCSP index sync below used to be the
+	// only periodic re-check, and only on the shared backends; with the
+	// responder off by default it no longer runs, and a tamper signal that
+	// depends on serving OCSP is one most deployments would not have. Read-only
+	// and takes no cluster lock, like the two sync jobs.
+	verifyInterval := cfg.inventoryVerifyInterval()
+	jobs = append(jobs, backgroundJob{jobInventoryVerify, func(ctx context.Context) {
+		runInventoryVerify(ctx, myCA, verifyInterval)
+	}})
+
 	// Reloads the inventory into the serial index this process's OCSP responder
 	// answers from, so a certificate signed on another replica stops being
 	// reported as `unknown` within an interval rather than never. Read-only and
@@ -117,8 +129,10 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 	//
 	// Not gated on ocsp_url: the /ocsp endpoint answers whatever that setting
 	// says, so gating on it would leave the responder wrong for anyone
-	// distributing the URL another way. It *is* gated on the backend, which is a
-	// different question with a different answer.
+	// distributing the URL another way. It *is* gated on enable_ocsp, since with
+	// the responder off nothing reads the index and each pass would re-read the
+	// whole inventory for nobody, and on the backend, which is a different
+	// question with a different answer.
 	//
 	// The staleness needs a second process *issuing* certificates this one will
 	// never hear about, and on these two backends there is not supposed to be
@@ -151,7 +165,9 @@ func backgroundJobs(cfg *serverConfig, myCA *ca.CA) []backgroundJob {
 	// An unrecognised backend name runs the job. Being wrong in that direction
 	// costs a periodic read; being wrong in the other costs correct OCSP
 	// answers, silently, until a restart.
-	if shared, kind := sharedStorageBackend(cfg.StorageBackend); shared {
+	if !cfg.EnableOCSP {
+		slog.Info("OCSP serial index sync not started: the OCSP responder is disabled (enable_ocsp)")
+	} else if shared, kind := sharedStorageBackend(cfg.StorageBackend); shared {
 		ocspIndexInterval := cfg.ocspIndexSyncInterval()
 		jobs = append(jobs, backgroundJob{jobOCSPIndexSync, func(ctx context.Context) {
 			runOCSPIndexSync(ctx, myCA, ocspIndexInterval)

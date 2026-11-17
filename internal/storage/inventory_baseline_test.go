@@ -178,10 +178,19 @@ var _ = Describe("Establishing an inventory baseline when none is stored", func(
 		Entry("the inventory blob read (whole-blob scheme)", freshFilesystem,
 			func(b Backend, err error) Backend { return failGetBackend{Backend: b, key: KeyInventory, err: err} },
 			"computing inventory HMAC"),
+		// The snapshot finds no stored value, so the baseline is decided,
+		// and it is the baseline's own read of the rows that then fails.
+		Entry("the inventory rows read for the baseline (hash-chain scheme)", freshFilesystem,
+			func(b Backend, err error) Backend {
+				return snapshotWithoutHeadBackend{failEntriesBackend{Backend: b, err: err}}
+			},
+			"computing inventory HMAC"),
 		Entry("the inventory rows read (hash-chain scheme)", freshFilesystem,
 			// Outer type, so asInventoryStore sees a structured backend whose
-			// row read fails (see inventory_report_test.go).
+			// row read fails (see inventory_report_test.go). On this scheme
+			// the rows and the stored value are one snapshot read, so it is
+			// that read which fails, before the absent value is even known.
 			func(b Backend, err error) Backend { return failEntriesBackend{Backend: b, err: err} },
-			"computing inventory HMAC"),
+			"reading inventory and its HMAC"),
 	)
 })

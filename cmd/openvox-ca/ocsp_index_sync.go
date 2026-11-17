@@ -36,7 +36,8 @@ import (
 // five backends can carry — and see CA.SyncSerialIndex for why the alternative
 // of looking a serial up on an index miss is worse rather than better here.
 //
-// Every replica runs it, unconditionally. Nothing is written and no lock is
+// Every replica that serves the responder on a shared backend runs it (see
+// backgroundJobs for both conditions). Nothing is written and no lock is
 // taken, so there is no leader to elect and no contention to serialise. It is
 // deliberately not gated on ocsp_url: that setting decides whether issued
 // certificates *advertise* this responder, not whether the /ocsp endpoint

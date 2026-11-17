@@ -328,3 +328,22 @@ var _ = Describe("Postgres subject CSR and certificate lifecycle", func() {
 		subjectBlobLifecycle(newPostgresBackend())
 	})
 })
+
+// Rows and head in one REPEATABLE READ transaction: a replica verifying while
+// a peer appends must never read the append as tampering. At the default READ
+// COMMITTED each SELECT took its own snapshot (see inventory_snapshot_test.go).
+var _ = Describe("Postgres inventory verification beside a peer's appends", func() {
+	It("never reads a peer's append as tampering", func() {
+		ctx := context.Background()
+		reader := NewWithBackend(newPostgresBackend(), "")
+		Expect(reader.TouchInventory(ctx)).To(Succeed())
+		Expect(reader.InitHMAC(ctx)).To(Succeed())
+		peer, err := NewSQLBackend(SQLConfig{Dialect: SQLPostgres, DSN: postgresDSNFromEnv()})
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { _ = peer.Close() })
+		writer := NewWithBackend(peer, "")
+		Expect(writer.InitHMAC(ctx)).To(Succeed())
+
+		expectVerificationBesidePeerAppends(reader, writer)
+	})
+})
