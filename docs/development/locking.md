@@ -94,8 +94,8 @@ flight — see its row below.
 | Lock name | Serialises | Taken by |
 | --- | --- | --- |
 | `bootstrap` | First-run CA generation; seeding supporting state (CRL/inventory/serial) for a mounted cert+key; importing a CA certificate, with or without its key; whole-store migration | `CA.Init`, `CA.seedSupportingState`, `ImportCACertificate`, `ImportCAWithOptions` (and `ImportCA`, which calls it), `storage.MigrateService` (which reuses the name deliberately so a migration and a bootstrapping server exclude each other) |
-| `crl` | Every CRL read-modify-write (read entries → re-sign → write), **and** the pending-supersession list's read-modify-write, which has to be mutual with the revocations it schedules | `Revoke`, `RevokeSerial`, `ReissueCRL`, `RefreshCRLIfDue`, `CleanupExpiredCerts`, `RefreshCRLChainFile` (the `crl_chain_file` job, on every replica on a timer), `ImportCAWithOptions` (and `ImportCA`, which calls it), `ImportCACertificate`, `ReconcileSuperseded`, the revoke step inside `Clean` and `GenerateWithOptions`, and the retire step inside `Renew`, `AutoRenew`, `ReconcileManaged` — "retire" because only those three can defer it to the list; `Clean` and `GenerateWithOptions` always revoke inline. `ReconcileManaged` also revokes inline on one arm — a store write that fails *after* signing retires the certificate it just issued immediately, since nothing ever saw that key and no overlap is owed to anybody |
-| `subject:<name>` | The whole lifecycle of one subject: duplicate check or evict/save CSR/sign/delete CSR/renew/import/clean/revoke/generate/reconcile | `SaveRequest`, `Sign`, `SignWithTTL`, `DeleteRequest`, `Renew`, `AutoRenew`, `Clean`, `ImportCertificate`, `Revoke`, `Generate`/`GenerateWithOptions`, `ReconcileManaged` |
+| `crl` | Every CRL read-modify-write (read entries → re-sign → write), **and** the pending-supersession list's read-modify-write, which has to be mutual with the revocations it schedules | `Revoke`, `RevokeSerial`, `ReissueCRL`, `RefreshCRLIfDue`, `CleanupExpiredCerts`, `RefreshCRLChainFile` (the `crl_chain_file` job, on every replica on a timer), `ImportCAWithOptions` (and `ImportCA`, which calls it), `ImportCACertificate`, `ReconcileSuperseded`, the revoke step inside `Clean` and `GenerateWithOptions`, and the retire step inside `Renew`, `AutoRenew`, `RenewStored`, `ReconcileManaged` — "retire" because only those four can defer it to the list; `Clean` and `GenerateWithOptions` always revoke inline. `ReconcileManaged` also revokes inline on one arm — a store write that fails *after* signing retires the certificate it just issued immediately, since nothing ever saw that key and no overlap is owed to anybody |
+| `subject:<name>` | The whole lifecycle of one subject: duplicate check or evict/save CSR/sign/delete CSR/renew/import/clean/revoke/generate/reconcile | `SaveRequest`, `Sign`, `SignWithTTL`, `DeleteRequest`, `Renew`, `AutoRenew`, `RenewStored`, `Clean`, `ImportCertificate`, `Revoke`, `Generate`/`GenerateWithOptions`, `ReconcileManaged` |
 | `hmac-key` | Generating and persisting the inventory HMAC key when none is usable — a cold start, or a stored blob of the wrong length | `StorageService.EnsureHMACKey`, reached from `CA.Init` → `InitHMAC`, from `MigrateService` → `RebuildInventoryHMAC`, and from the offline `openvox-ca rebuild-inventory-hmac` → `RebuildInventoryHMAC` (only where it has to mint a key, i.e. a stored blob of the wrong length). Deliberately **not** `bootstrap`: the migration already holds that name across the rebuild, and `WithLock` is not reentrant |
 | `sql-schema-migrate` | One schema-migration run, so two replicas starting at once do not migrate concurrently (SQL backends only) | `SQLBackend.EnsureReady` |
 | `inventory-decompose` | One-time legacy inventory blob conversion (etcd and redis backends) on the first start after upgrading | `EtcdBackend.decomposeLegacyInventory` and `RedisBackend.decomposeLegacyInventory`, from `EnsureReady` |
@@ -316,7 +316,8 @@ merely within one. `c.mu` was never what stood between them.
 
 `c.mu` is held across the signing call itself **on the issuance paths**. Every
 one of them (`Sign`, `SignWithTTL`, `SaveRequest`'s autosign, `Renew`,
-`AutoRenew`, `Generate`, `ReconcileManaged`) calls `issueLeafLocked` with
+`AutoRenew`, `RenewStored`, `Generate`, `ReconcileManaged`) calls
+`issueLeafLocked` with
 `c.mu` held — `ImportCertificate` holds `c.mu` too but signs nothing, so it is
 not on that list — and
 `x509.CreateCertificate` runs inside it
@@ -331,12 +332,13 @@ is the one deliberate exception to rule 3 (keep expensive work outside the
 lock): the signature is inside the lock because the cache update it guards must
 be atomic with the issuance.
 
-Those seven are entry points, and most reach the seam through another. What is
+Those eight are entry points, and most reach the seam through another. What is
 *automated* is narrower: issuanceseam_test.go pins that `issueLeafLocked` has
 exactly four **direct** callers — `signWithDuration`, `GenerateWithOptions`,
 `reissueLeafLocked` and `issueManagedUnderSubjectLock` — and that
-`reissueLeafLocked`, through which both `Renew` and `AutoRenew` reach it, has
-exactly those two. The list above would stay true-looking if, say, `SignWithTTL`
+`reissueLeafLocked`, through which `Renew`, `AutoRenew` and `RenewStored` reach
+it, has exactly those three, each with the reason it may carry a certificate's
+authorisation extensions forward. The list above would stay true-looking if, say, `SignWithTTL`
 stopped routing through `signWithDuration`, and nothing would fail — which is the same shape as `ImportCertificate`, which sat
 in that list wrongly until a reviewer noticed by hand rather than a spec
 catching it.
@@ -409,9 +411,9 @@ written as two.
   depth (and therefore the SQL pool floor below) is unchanged, and the sweep
   needs one acquisition to cover both the list rewrite and the revocations it
   drives. See [supersede.go](../../internal/ca/supersede.go).
-- `Revoke`, `Clean`, `Renew`, `AutoRenew`, `ReconcileManaged` and
-  `GenerateWithOptions` (the last on its `ReplaceExisting` path only) are the
-  paths that take all three. For the five issuance paths it is the subject lock
+- `Revoke`, `Clean`, `Renew`, `AutoRenew`, `RenewStored`, `ReconcileManaged`
+  and `GenerateWithOptions` (the last on its `ReplaceExisting` path only) are
+  the paths that take all three. For the six issuance paths it is the subject lock
   around the whole operation, then the `crl` lock + `c.mu` for the revocation
   step; note they release and re-acquire `c.mu` between the signing and
   revocation steps — `c.mu` is not held across a `WithLock` acquisition.
@@ -633,8 +635,9 @@ path — still provides no cross-replica guarantee anyway.
    that check — `internal/storage` cannot import `internal/ca` — so for those
    this rule is the only thing standing.
 8. **SQL pool sizing:** on PostgreSQL/MySQL every *held* distributed lock pins
-   one pooled connection. A single in-flight `Revoke`/`Clean`/`Renew`/`AutoRenew`
-   needs at least three connections at once — one for the `subject:<name>` lock,
+   one pooled connection. A single in-flight
+   `Revoke`/`Clean`/`Renew`/`AutoRenew`/`RenewStored` needs at least three
+   connections at once — one for the `subject:<name>` lock,
    a second for the nested `crl` lock, and a third for the reads/writes inside
    the revocation step — so `sql_max_open_conns` must be at least 3 per
    concurrently mutating request. `Revoke` joined that list when it took the
@@ -1121,12 +1124,12 @@ there are two: dropping the re-validation before the cache write, and
 decoupling `MaxAge` from whether the response was actually cached. Each fails
 both guard specs on its own assertion and leaves the two scope specs green.
 
-That a given path takes its lock *at all* is automated for six of them, all in
-the same shape: park the operation on a held `subject:<name>` and require it to
-wait, since one that stopped taking the lock returns immediately instead.
+That a given path takes its lock *at all* is automated for seven of them, all
+in the same shape: park the operation on a held `subject:<name>` and require it
+to wait, since one that stopped taking the lock returns immediately instead.
 [renewrace_test.go](../../internal/ca/renewrace_test.go) does this for `Revoke`,
 `Clean`, `Renew` and `AutoRenew` alongside the ordering assertions described
-below,
+below, and for `RenewStored` in its revocation-while-waiting table,
 [deleterequest_test.go](../../internal/ca/deleterequest_test.go) for
 `DeleteRequest`, and
 [managedcert_reconcile_test.go](../../internal/ca/managedcert_reconcile_test.go)
@@ -1171,6 +1174,11 @@ the context deadline. These run under the race detector on every unit
 run: `mage test:unit` passes `-race` over every unit package, `internal/ca`
 included. Of the backend suites, `backendsEtcd`, `backendsPostgres`,
 `backendsMySQL` and `backendsRedisGo` run under it too.
+
+`RenewStored`'s nesting is pinned differently, by the table in
+[lockorder_test.go](../../internal/ca/lockorder_test.go) that records every
+lock acquisition and requires the `subject:<name>` → `crl` edge to be taken and
+no undocumented one, for both its same-key and re-key shapes.
 
 That is only the suites this document cares about. For the exhaustive list of
 every `go test` the repository invokes and whether each is raced — including the

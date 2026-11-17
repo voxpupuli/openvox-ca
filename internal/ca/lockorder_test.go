@@ -84,7 +84,7 @@ import (
 //     passive: it records what the operations a spec calls actually do, so a
 //     `WithLock` site no spec reaches contributes no edge and could be inverted
 //     without failing anything here. The driven set is Init, Generate,
-//     SaveRequest, Sign, Renew, AutoRenew, Revoke and Clean here, plus ImportCA
+//     SaveRequest, Sign, Renew, AutoRenew, RenewStored, Revoke and Clean here, plus ImportCA
 //     in caimportlock_test.go; it is a minority of
 //     the call sites, and the counting rule is `c.Storage.WithLock` in non-test
 //     `internal/ca` plus the sites in caImport.go that lock through a passed-in
@@ -228,10 +228,10 @@ var subjectClass = lockSubjectPrefix + "<name>"
 // regression, and the failure message will not know the difference.
 var allowedLockNesting = map[[2]string]string{
 	{subjectClass, lockNameCRL}: "locking.md, Lock ordering: `subject:<name>` → `crl` → `c.mu`. " +
-		"Taken by Revoke, Clean, Renew, AutoRenew, ReconcileManaged and GenerateWithOptions " +
+		"Taken by Revoke, Clean, Renew, AutoRenew, RenewStored, ReconcileManaged and GenerateWithOptions " +
 		"(the last on its ReplaceExisting path only, which no spec here drives); " +
-		"renewrace_test.go pins the first four per-caller, " +
-		"managedcert_reconcile_test.go the fifth, generate_test.go the sixth.",
+		"renewrace_test.go pins Revoke, Clean, Renew and AutoRenew per-caller, this file's table RenewStored, " +
+		"managedcert_reconcile_test.go ReconcileManaged, generate_test.go GenerateWithOptions.",
 	{lockNameBootstrap, lockNameCRL}: "locking.md, Lock ordering: `bootstrap` → `crl`. " +
 		"ImportCACertificate and ImportCAWithOptions hold bootstrap across importCAMaterial's " +
 		"CRL rewrite (caImport.go). One-way: nothing takes crl and then bootstrap. " +
@@ -502,7 +502,8 @@ var _ = Describe("The tier-1 lock ordering graph", func() {
 				"now bypass AcquireSameHostLock and this wrapper must be moved to match.")
 	})
 
-	// The four callers that nest two named locks, one Ginkgo entry each. Each
+	// The callers that nest two named locks, one Ginkgo entry each (two for
+	// RenewStored, whose two shapes retire the predecessor by different rules). Each
 	// entry gets a fresh observer and a fresh store from the BeforeEach, so the
 	// entries are independent and order-insensitive under Ginkgo randomisation;
 	// the c.mu probe is not armed here at all, only in its own spec below.
@@ -537,6 +538,14 @@ var _ = Describe("The tier-1 lock ordering graph", func() {
 		}),
 		Entry("AutoRenew", func() error {
 			_, err := myCA.AutoRenew(context.Background(), ownCrt)
+			return err
+		}),
+		Entry("RenewStored, re-keying", func() error {
+			_, err := myCA.RenewStored(context.Background(), "node1.test", csrPEM)
+			return err
+		}),
+		Entry("RenewStored, over the same key", func() error {
+			_, err := myCA.RenewStored(context.Background(), "node1.test", nil)
 			return err
 		}),
 	)

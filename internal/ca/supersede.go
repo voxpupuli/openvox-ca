@@ -155,7 +155,7 @@ func (c *CA) refuseIfSuperseded(ctx context.Context, presentedCert *x509.Certifi
 //
 //   - immediate — revokeSerialLocked and signCRLLocked count their own failures
 //     into crlUpdateFailures. A failure to acquire the CRL lock is counted
-//     nowhere, which is the pre-existing behaviour of both renewal paths.
+//     nowhere, which is the pre-existing behaviour of the renewal paths.
 //   - delayed — recordSuperseded counts every failure into supersedeFailures,
 //     the lock acquisition included, because an unrecorded supersession is lost
 //     outright rather than merely unwritten to the CRL.

@@ -613,10 +613,10 @@ func newGenerateCmd() *cobra.Command {
 	return cmd
 }
 
-// checkKeyPath refuses, before generate asks the server for anything, the key
-// paths it would otherwise discover only once a certificate had been issued: a
-// --out-dir that is not a directory, anything at the key path other than a
-// regular file, and a key path it cannot even look at.
+// checkKeyPath refuses, before generate or renew asks the server for anything,
+// the key paths it would otherwise discover only once a certificate had been
+// issued: a --out-dir that is not a directory, anything at the key path other
+// than a regular file, and a key path it cannot even look at.
 func checkKeyPath(outDir, keyPath string) error {
 	fi, err := os.Stat(outDir)
 	if err != nil {
@@ -632,7 +632,7 @@ func checkKeyPath(outDir, keyPath string) error {
 	case err != nil:
 		return fmt.Errorf("checking private key path: %w; nothing was sent to the server", err)
 	case fi.Mode()&fs.ModeSymlink != 0:
-		return fmt.Errorf("private key path %s is a symbolic link, and generate does not write through one; "+
+		return fmt.Errorf("private key path %s is a symbolic link, and this command does not write through one; "+
 			"nothing was sent to the server. Remove the link or choose another --out-dir", keyPath)
 	case !fi.Mode().IsRegular():
 		return fmt.Errorf("private key path %s exists and is not a regular file; "+
@@ -641,7 +641,8 @@ func checkKeyPath(outDir, keyPath string) error {
 	return nil
 }
 
-// writeKeyFile writes generate's private key to path at mode 0600.
+// writeKeyFile writes the private key generate or renew obtained to path, at
+// mode 0600.
 //
 // An existing regular file is overwritten, deliberately: the documented
 // serving-certificate procedure points --out-dir at <cadir>/private, where the
@@ -1006,6 +1007,7 @@ Global flags may be placed before or after the subcommand name.`,
 		newReissueCRLCmd(),
 		newCleanCmd(),
 		newGenerateCmd(),
+		newRenewCmd(),
 		newImportCertCmd(),
 		newSetupCmd(),
 		newImportCmd(),

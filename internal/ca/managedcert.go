@@ -1003,8 +1003,10 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 // The check is one-directional, and deliberately so. Renew and AutoRenew also
 // end in issueLeafLocked's unconditional SaveCert, so the holder of a displaced
 // certificate can renew and take cert/<subject> back -- leaving the *managed*
-// certificate reachable only by serial, with no warning, because neither
-// renewal path consults c.ManagedCerts.
+// certificate reachable only by serial, with no warning, because neither agent
+// renewal path consults c.ManagedCerts. The operator's RenewStored does, and
+// refuses a managed subject (#247): an operator asking is a deliberate act the
+// CA can answer, where an agent renewing itself is not.
 //
 // #243 considered closing this and decided not to. That is a decision rather
 // than an oversight, and it is recorded as one because this note previously
@@ -1014,7 +1016,7 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 // gets accepted with nobody deciding to accept it.
 //
 // The reasoning, so it can be argued with rather than rediscovered: closing it
-// means teaching both renewal paths about the managed set, which touches every
+// means teaching both agent renewal paths about the managed set, which touches every
 // issuance path, in service of a case an operator reaches only by giving a
 // managed certificate a certname something else already renews. The
 // displacement this function reports -- the managed direction -- already
@@ -1312,9 +1314,9 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 			// The wording is the documented one, deliberately: docs/metrics.md
 			// tells an operator responding to OpenVoxCASupersedeFailing to grep
 			// for "failed to retire replaced certificate" and retire what it
-			// names by serial. Renew and AutoRenew emit that string; a third
-			// caller phrasing it differently is a path the runbook silently
-			// misses.
+			// names by serial. Renew, AutoRenew and RenewStored emit that
+			// string; another caller phrasing it differently is a path the
+			// runbook silently misses.
 			slog.Warn("ReconcileManaged: failed to retire replaced certificate",
 				"subject", subject, "serial", oldSerial, "error", err)
 		}
@@ -1385,7 +1387,7 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 // Reissuing over the same key would hand back, with a fresh serial and a full
 // lifetime, exactly the material an operator revoking for key disclosure was
 // trying to retire -- and no CRL would list the replacement. That is the hazard
-// refuseIfSuperseded closes on the two renewal paths; this path reaches it by a
+// refuseIfSuperseded closes on the renewal paths; this path reaches it by a
 // different door and has to close it too. The pin loses, loudly: a revocation
 // is a deliberate act and the operator needs telling that it broke the pin.
 func (c *CA) issuanceKeyFor(m ManagedCert, issuer, current *x509.Certificate,

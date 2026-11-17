@@ -191,7 +191,7 @@ puppet_datetime_format: false   # use Puppet CA style "2006-01-02T15:04:05MST" i
 # serial_number in certificate status responses. See "Serial number format" below.
 serial_number_format: number    # "hex" = colon-separated hex string; departs from OpenVox Server's API
 # Certificate auto-renewal (empty-body POST /certificate_renewal).
-revoke_on_auto_renew: true      # false matches OpenVox Server's Clojure CA (no revocation on auto-renewal)
+revoke_on_auto_renew: true      # false matches OpenVox Server's Clojure CA (no revocation on auto-renewal); also covers an empty-body POST /renew
 # Delayed supersession. A renewal records the certificate it replaced and a sweep
 # revokes it once the overlap window elapses, so both verify in the meantime and
 # relying parties can pick up the replacement without a gap. The window is a
@@ -1062,6 +1062,11 @@ supplies one: an entry's `revoke_after` is this same window asked about a
 component certificate, and it defaults to this setting. See
 [managed certificates](#managed-certificates).
 
+An operator's renewal through
+[`POST /renew/{subject}`](api.md#renewal-by-an-operator) uses this window too.
+That is the case it was set for: a certificate held by something that is not
+renewing it itself, and has to be told about the replacement.
+
 > **Upgrading.** This changes behaviour without any config change. Before this
 > setting existed, every renewal revoked its predecessor before returning; now
 > the predecessor stays valid for 24 hours by default. If you need the old
@@ -1098,8 +1103,8 @@ Two settings, two questions:
 
 | Setting | Question |
 | --- | --- |
-| `revoke_on_auto_renew` | *Whether* an auto-renewal retires its predecessor at all. `false` keeps it valid until it naturally expires and records nothing. |
-| `superseded_cert_revoke_after_sec` | *When*, on every path that retires a predecessor: both renewal paths and the managed-certificate reconcile. `0` means inside the renewal call; unset means 24 hours later. A `managed_certs` entry can override it per certificate with `revoke_after`. |
+| `revoke_on_auto_renew` | *Whether* a same-key renewal retires its predecessor at all: an agent's auto-renewal, or an operator's `POST /renew` with an empty body. `false` keeps it valid until it naturally expires and records nothing. |
+| `superseded_cert_revoke_after_sec` | *When*, on every path that retires a predecessor: both agent renewal paths, an operator's `POST /renew`, and the managed-certificate reconcile. `0` means inside the renewal call; unset means 24 hours later. A `managed_certs` entry can override it per certificate with `revoke_after`. |
 
 They compose as you would expect: with `revoke_on_auto_renew: false` the
 auto-renewal path records nothing, whatever the delay says, and the CSR-body

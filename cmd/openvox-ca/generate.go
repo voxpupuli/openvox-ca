@@ -236,9 +236,11 @@ before a server exists.`,
 			if capabilityKnown {
 				lockOpts = append(lockOpts, storage.WithKnownDistributedLocking(distributed))
 			}
-			if _, err := holdInstanceLock(ctx, rt, lockOpts...); err != nil {
-				return err
+			enforced, err := holdInstanceLock(ctx, rt, lockOpts...)
+			if err != nil {
+				return annotateForceLockError(err, force, certname)
 			}
+			noteRenewOnline(out, force, enforced, certname)
 
 			if err := myCA.Init(ctx); err != nil {
 				return fmt.Errorf("loading the CA: %w", err)
@@ -575,6 +577,35 @@ func annotateGenerateError(err error, certname string) error {
 			"'openvox-ca-ctl clean --certname %s', or choose another --certname", err, certname)
 	}
 	return err
+}
+
+// annotateForceLockError points --force at openvox-ca-ctl renew when the
+// reason it cannot run is a server holding the store (#247). That is the
+// question renew answers online: replace a certificate while the server runs,
+// with the server's overlap window rather than an immediate revocation. Every
+// other error, and every refusal without --force, is returned unchanged.
+func annotateForceLockError(err error, force bool, certname string) error {
+	var locked *storage.StoreLockedError
+	if !force || !errors.As(err, &locked) {
+		return err
+	}
+	return fmt.Errorf("%w.\nTo renew a certificate while the server runs, keeping its names and "+
+		"extensions, use 'openvox-ca-ctl renew --certname %s' instead", err, certname)
+}
+
+// noteRenewOnline gives --force the same pointer on a store whose instance
+// lock is not enforced -- a backend with distributed locking, or one whose lock
+// is unavailable -- where nothing can tell whether a server is running. --force
+// is not refused there, because it may be the operator's only way in; the note
+// says what to use if a server is up. Where the lock is enforced, holding it
+// has already shown no server is running, and there is nothing to say.
+func noteRenewOnline(w io.Writer, force, enforced bool, certname string) {
+	if !force || enforced {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "Note: this command cannot tell whether a server is running against this store.\n"+
+		"  If one is, 'openvox-ca-ctl renew --certname %s' renews the certificate through it,\n"+
+		"  keeping its names and extensions, and leaves the old one valid for the overlap window.\n", certname)
 }
 
 // reportSuccess prints what was issued, and the consequences the operator now

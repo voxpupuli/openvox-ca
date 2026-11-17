@@ -208,13 +208,14 @@ type CA struct {
 	NoBootstrap bool
 
 	// RevokeOnAutoRenew, when true (the default), revokes the certificate
-	// being replaced by AutoRenew (the empty-body /certificate_renewal path)
+	// being replaced by a same-key renewal -- AutoRenew (the empty-body
+	// /certificate_renewal path), and RenewStored when it is given no CSR --
 	// once its successor is safely signed and stored, so only the newest
 	// serial for a subject is ever valid. OpenVox Server's own Clojure CA
 	// does not do this — both the old and new certs (same key) stay valid
 	// until the old one naturally expires. Set to false to match that
-	// behaviour exactly. This does not affect the CSR-based Renew path
-	// (a genuine re-key), which always retires the certificate it replaces.
+	// behaviour exactly. This does not affect a re-key (Renew, or RenewStored
+	// with a CSR), which always retires the certificate it replaces.
 	//
 	// It is a whether, not a when: SupersedeAfter decides how long the
 	// replaced certificate stays valid before the revocation lands.
@@ -243,9 +244,10 @@ type CA struct {
 	// what makes a renewal safe to perform on a certificate other parties are
 	// actively verifying. Set it no longer than that pickup takes.
 	//
-	// It applies to both renewal paths: the CSR-based Renew and, subject to
-	// RevokeOnAutoRenew, AutoRenew. RevokeOnAutoRenew still decides whether
-	// AutoRenew retires its predecessor at all; this decides when.
+	// It applies to every renewal path: the CSR-based Renew, AutoRenew subject
+	// to RevokeOnAutoRenew, and RenewStored, which follows whichever of those
+	// two its request matches. RevokeOnAutoRenew still decides whether a
+	// same-key renewal retires its predecessor at all; this decides when.
 	SupersedeAfter time.Duration
 
 	// ManagedCerts are the named leaves this CA keeps alive: it issues each

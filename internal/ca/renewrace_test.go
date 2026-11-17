@@ -269,6 +269,17 @@ var _ = Describe("A revocation racing a renewal", func() {
 		},
 		Entry("on the empty-body path", func() error { return autoRenew() }),
 		Entry("on the CSR path", func() error { return csrRenew() }),
+		// RenewStored has no pre-lock gate at all: it reads the stored
+		// certificate under the lock, so its only check is the one this table
+		// exists to keep there.
+		Entry("on an operator's same-key renewal", func() error {
+			_, err := myCA.RenewStored(ctx, "node1.test", nil)
+			return err
+		}),
+		Entry("on an operator's re-key", func() error {
+			_, err := myCA.RenewStored(ctx, "node1.test", csrPEM)
+			return err
+		}),
 	)
 
 	// The re-check is only worth its lock if nothing can revoke between it and

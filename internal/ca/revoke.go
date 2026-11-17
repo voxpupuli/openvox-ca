@@ -97,9 +97,9 @@ import (
 // Lock ordering: subject-lock (distributed) → CRL-lock (distributed) → c.mu,
 // matching Clean, and no path takes those two in the other order. Callers must
 // therefore not already hold the subject lock: those that do — Clean, the
-// post-issue revokes in Renew and AutoRenew, and GenerateWithOptions' revoke of
-// the certificate it replaces — reach revokeLocked or revokeSerialLocked
-// directly rather than coming through here.
+// post-issue revokes in Renew, AutoRenew and RenewStored, and
+// GenerateWithOptions' revoke of the certificate it replaces — reach
+// revokeLocked or revokeSerialLocked directly rather than coming through here.
 func (c *CA) Revoke(ctx context.Context, subject string) error {
 	if err := ValidateSubject(subject); err != nil {
 		return err
@@ -465,9 +465,9 @@ func (c *CA) storedCertSerial(ctx context.Context, subject string) (string, erro
 // revokeSerialLocked adds serialStr to the CRL, unless it is already present.
 // The cluster CRL lock and c.mu must both be held by the caller.
 //
-// This is split out from revokeLocked so Renew and AutoRenew can revoke the
-// exact serial of the certificate they are replacing. By the time either
-// wants to revoke, issueLeafLocked has already appended the new cert's row
+// This is split out from revokeLocked so Renew, AutoRenew and RenewStored can
+// revoke the exact serial of the certificate they are replacing. By the time
+// any wants to revoke, issueLeafLocked has already appended the new cert's row
 // to the inventory, so findSerialForSubject (latest-issued-for-subject) would
 // resolve to the new serial rather than the one being retired.
 func (c *CA) revokeSerialLocked(ctx context.Context, serialStr string) error {

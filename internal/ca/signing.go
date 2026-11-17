@@ -151,11 +151,12 @@ var ErrCertRevoked = errors.New("certificate is revoked")
 // returns ErrCertRevoked when it is listed. A nil presentedCert is a no-op:
 // there is no credential to check.
 //
-// SECURITY: this is the read-through revocation check both renewal paths rely
-// on; without it the propagation window does not bound a compromised agent's
+// SECURITY: this is the read-through revocation check every renewal path
+// relies on; without it the propagation window does not bound a compromised agent's
 // access, for the reason set out below.
 //
-// Both renewal paths call it, and renewal is the reason it exists. Every other
+// Every renewal path calls it -- Renew, AutoRenew and the operator's
+// RenewStored -- and renewal is the reason it exists. Every other
 // decision made from an out-of-date CRL is self-limiting: it admits a revoked
 // certificate for at most one sync interval, after which the same certificate
 // is rejected. Renewal mints a *new* certificate — fresh serial, full leaf
@@ -396,18 +397,19 @@ var ErrDisallowedSubjectAltNames = errors.New("CSR requests subject alternative 
 var ErrDisallowedExtensions = errors.New("found extensions that disallow signing")
 
 // assertOwnCertificate proves that cert was issued by this CA, and is the
-// issuer half of the gate on both renewal paths. The revocation half is
+// issuer half of the gate on every renewal path. The revocation half is
 // refuseIfRevoked, which runs immediately after it and re-reads the CRL from
 // storage first — fresher than anything this could ask, and the reason the two
 // are separate rather than one check.
 //
-// Neither half checks the validity window. Expiry is the middleware's:
-// newAuthMiddleware's Verify call enforces NotBefore/NotAfter against
-// time.Now() for every mTLS route, and the own-ca-expired client class in the
-// authorisation baseline pins that.
+// Neither half checks the validity window. On Renew and AutoRenew expiry is the
+// middleware's: newAuthMiddleware's Verify call enforces NotBefore/NotAfter
+// against time.Now() for every mTLS route, and the own-ca-expired client class
+// in the authorisation baseline pins that. RenewStored renews a stored
+// certificate, which no middleware has seen, so it checks expiry itself.
 //
 // Renewal reissues under this CA's authority using the presented certificate's
-// own subject and every one of its extensions, on both paths (see
+// own subject and every one of its extensions, on every path (see
 // reissueLeafLocked); a re-key CSR contributes only its public key. That is
 // safe only while this CA is the only thing that could have produced it: the
 // subject was drawn from a namespace we control, and the extensions — the
@@ -421,7 +423,7 @@ var ErrDisallowedExtensions = errors.New("found extensions that disallow signing
 // deliberately says nothing about validity or revocation, which is why
 // importcert.go can use it to archive expired certificates; a revoked
 // certificate this CA issued satisfies it, and is refused by refuseIfRevoked on
-// the next line of both callers.
+// the next line of each caller.
 //
 // The caller must NOT hold c.mu.
 func (c *CA) assertOwnCertificate(cert *x509.Certificate) error {
@@ -793,7 +795,7 @@ func (c *CA) issueNow() time.Time {
 //
 // This is the tail shared by signWithDuration (inputs come from a submitted
 // CSR, after CSR-specific validation), reissueLeafLocked (every input but the
-// public key comes from the certificate being renewed, for both renewal paths),
+// public key comes from the certificate being renewed, for every renewal path),
 // GenerateWithOptions (inputs come from a key this CA just generated, with no
 // client involved at all), and issueManagedUnderSubjectLock (inputs come from server
 // configuration, with no client involved at all).
@@ -1038,10 +1040,11 @@ var renewalRefreshedExtensions = []asn1.ObjectIdentifier{
 // serialNumber and the like) and loses any other, such as DC or emailAddress --
 // the same loss keyprovider.go records for the CA's own request.
 //
-// Carrying authorisation OIDs forward is safe only because both
-// callers have established, before reaching here, that this CA issued original
-// (assertOwnCertificate), that it is not revoked (refuseIfRevoked) and that it
-// is subject's. Without the first, any CA trusted for client authentication
+// Carrying authorisation OIDs forward is safe only because every caller --
+// Renew, AutoRenew and RenewStored -- has established, before reaching here,
+// that this CA issued original (assertOwnCertificate), that it is not revoked
+// (refuseIfRevoked) and that it is subject's. RenewStored also refuses an
+// expired original, which the other two leave to the mTLS middleware. Without the first, any CA trusted for client authentication
 // could have pp_cli_auth reissued under this CA's authority.
 // NIST 800-53: AC-6 (Least Privilege), CM-7 (Least Functionality)
 //

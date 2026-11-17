@@ -227,9 +227,10 @@ type ServerConfig struct {
 	// "hex" (an uppercase colon-separated string, as openssl prints it).
 	// "hex" changes the field's JSON type, so it departs from OpenVox Server.
 	SerialNumberFormat string `yaml:"serial_number_format"`
-	// RevokeOnAutoRenew revokes the certificate replaced by the empty-body
-	// (no-CSR) /certificate_renewal auto-renewal path once its successor is
-	// signed and stored, so only the newest serial per subject stays valid
+	// RevokeOnAutoRenew revokes the certificate replaced by a same-key renewal
+	// -- the empty-body (no-CSR) /certificate_renewal auto-renewal path, or an
+	// operator's empty-body POST /renew -- once its successor is signed and
+	// stored, so only the newest serial per subject stays valid
 	// (default: true). Set to false to match OpenVox Server's own Clojure CA,
 	// which leaves the replaced certificate valid until it naturally expires.
 	RevokeOnAutoRenew bool `yaml:"revoke_on_auto_renew"`
@@ -261,8 +262,9 @@ type ServerConfig struct {
 	// repository, so this deliberately does not name its setting: a comment
 	// pointing at a config key nobody can grep for is worse than no pointer.
 	//
-	// It governs both renewal paths. RevokeOnAutoRenew still decides whether
-	// the auto-renewal path retires its predecessor at all.
+	// It governs every renewal path, an operator's POST /renew included.
+	// RevokeOnAutoRenew still decides whether a same-key renewal retires its
+	// predecessor at all.
 	SupersededCertRevokeAfterSec int `yaml:"superseded_cert_revoke_after_sec"`
 	// SupersededCertSweepIntervalSec is how often the sweep that performs those
 	// delayed revocations runs; 0 = built-in default (15m). The interval is

@@ -115,7 +115,7 @@ var _ = Describe("The issuance seam", func() {
 		expected := map[string]string{
 			"signWithDuration":             "the gated path: calls checkSubjectAltNames before it issues anything",
 			"GenerateWithOptions":          "offline and admin-only minting; names come from an operator's flags or an admin-tier query parameter, never from an agent's CSR",
-			"reissueLeafLocked":            "both renewal paths; takes the subject and every SAN from the certificate being renewed and only the public key from a CSR, so there is nothing for the gate to judge",
+			"reissueLeafLocked":            "every renewal path (Renew, AutoRenew, RenewStored); takes the subject and every SAN from the certificate being renewed and only the public key from a CSR, so there is nothing for the gate to judge",
 			"issueManagedUnderSubjectLock": "managed certificates take their names from server configuration, fixed before the process serves anything; no request reaches this path, so there is nothing for the gate to judge",
 		}
 
@@ -138,6 +138,8 @@ var _ = Describe("The issuance seam", func() {
 		expected := map[string]string{
 			"Renew":     "re-key; assertOwnCertificate, refuseIfRevoked (before and under the subject lock) and the subject match all run before it",
 			"AutoRenew": "same-key renewal; assertOwnCertificate and refuseIfRevoked (before and under the subject lock) run before it, and the subject is the certificate's own",
+			"RenewStored": "operator renewal of the stored certificate; it is read under the subject lock, and assertOwnCertificate and refuseIfRevoked run on it there, " +
+				"and a re-key of one carrying authorisation-arc extensions is refused before it",
 		}
 
 		got := keysOf(callersOf("reissueLeafLocked"))
