@@ -2005,8 +2005,9 @@ func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string,
 // process holding the CA key, so it is the process that has to write a new CA
 // out on first run. On every subsequent start the work is a load — the serial
 // index, the CRL cache and the certificate index are built and then never read
-// again, because the only RPC this process answers is Sign(digest), which needs
-// a crypto.Signer and nothing else. Left to the deferred Close in the caller,
+// again, because the only RPCs this process answers are Sign(digest), which
+// needs a crypto.Signer and nothing else, and Metrics, which reads only the Go
+// runtime's own statistics. Left to the deferred Close in the caller,
 // the backend handle and its connection pool stayed open for the process
 // lifetime for no reader.
 //

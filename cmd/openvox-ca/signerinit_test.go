@@ -34,10 +34,10 @@ import (
 
 // What the isolated signer keeps once it is running, which is the whole of
 // #306. It opens a storage backend because bootstrapping the CA is its job --
-// it is the process holding the key -- and then answers one RPC,
-// Sign(digest), for the rest of the process lifetime. Between those two facts
-// sits a backend handle, a connection pool and the indexes ca.Init builds, and
-// nothing reads any of them again.
+// it is the process holding the key -- and then answers Sign(digest), and
+// Metrics from its own runtime, for the rest of the process lifetime. Between
+// those two facts sits a backend handle, a connection pool and the indexes
+// ca.Init builds, and nothing reads any of them again.
 var _ = Describe("initSignerKeyWith", func() {
 	var ctx context.Context
 

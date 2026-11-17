@@ -24,6 +24,7 @@
 package signer
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/hmac"
 	"crypto/rand"
@@ -37,8 +38,14 @@ import (
 	"net/rpc"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
 )
 
 // InheritedFD is the file descriptor number used to pass the socketpair
@@ -63,11 +70,41 @@ type SignResponse struct {
 	Signature []byte
 }
 
+// MetricsRequest asks the signer for its Go runtime metrics. It carries
+// nothing: the signer decides what it reports.
+type MetricsRequest struct{}
+
+// MetricsResponse carries the signer's Go runtime metric families, encoded as
+// length-delimited protobuf (the Prometheus exposition format the decoder on
+// the frontend side reads back).
+type MetricsResponse struct {
+	Families []byte
+}
+
 // ---------- Server (signer process) ----------
 
 // Service holds the CA private key and serves signing requests over RPC.
+//
+// It also answers Metrics, which reports the signer's own Go runtime
+// statistics so the frontend can expose them on /metrics: the signer has no
+// listener of its own, by design. Metrics takes no input and never touches the
+// key. What it returns -- heap and GC figures, goroutine counts, the runtime's
+// memory limit -- is aggregate telemetry with nothing in it that depends on the
+// key, and it goes to the same audience as the frontend's own go_* series:
+// whoever can reach the metrics listener.
 type Service struct {
-	key crypto.Signer
+	key     crypto.Signer
+	runtime prometheus.Gatherer
+}
+
+// newRuntimeGatherer returns the registry the signer's Metrics answers from:
+// the standard Go collector and nothing else. Its process_* series are read
+// from /proc by the frontend instead, which keeps working when this RPC does
+// not -- a wedged signer is exactly when its resident memory matters.
+func newRuntimeGatherer() prometheus.Gatherer {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(collectors.NewGoCollector())
+	return reg
 }
 
 // errSignRequestRefused is returned when a request asks for a signature the CA
@@ -134,6 +171,23 @@ func (s *Service) Sign(req *SignRequest, resp *SignResponse) error {
 	return nil
 }
 
+// Metrics reports the signer's Go runtime metrics. See Service.
+func (s *Service) Metrics(_ *MetricsRequest, resp *MetricsResponse) error {
+	mfs, err := s.runtime.Gather()
+	if err != nil {
+		return fmt.Errorf("gathering runtime metrics: %w", err)
+	}
+	var buf bytes.Buffer
+	enc := expfmt.NewEncoder(&buf, expfmt.NewFormat(expfmt.TypeProtoDelim))
+	for _, mf := range mfs {
+		if err := enc.Encode(mf); err != nil {
+			return fmt.Errorf("encoding runtime metrics: %w", err)
+		}
+	}
+	resp.Families = buf.Bytes()
+	return nil
+}
+
 // Serve runs the signer RPC server on the inherited socketpair fd.
 // It blocks until the connection is closed or a SIGTERM/SIGINT is received.
 //
@@ -159,7 +213,7 @@ func Serve(key crypto.Signer) error {
 	}
 	slog.Info("PSK handshake succeeded")
 
-	svc := &Service{key: key}
+	svc := &Service{key: key, runtime: newRuntimeGatherer()}
 	server := rpc.NewServer()
 	if err := server.RegisterName("Signer", svc); err != nil {
 		return fmt.Errorf("registering signer RPC service: %w", err)
@@ -237,7 +291,8 @@ func connFromFD(fd int) (net.Conn, error) {
 // ---------- Client (frontend process) ----------
 
 // RemoteSigner implements crypto.Signer by proxying Sign() calls to the
-// signer process over an RPC connection.
+// signer process over an RPC connection. It is also a prometheus.Gatherer for
+// the signer's Go runtime metrics.
 type RemoteSigner struct {
 	client *rpc.Client
 	pub    crypto.PublicKey
@@ -246,7 +301,35 @@ type RemoteSigner struct {
 	// defaultRemoteSignTimeout, which is what every production construction
 	// gets; it is set explicitly only by tests.
 	timeout time.Duration
+
+	// metricsTimeout bounds a single Metrics round trip, zero selecting
+	// defaultRemoteMetricsTimeout; set explicitly only by tests.
+	metricsTimeout time.Duration
+	// metricsMu guards metricsCall, the Metrics call outstanding, if any. See
+	// Gather.
+	metricsMu   sync.Mutex
+	metricsCall *metricsCall
 }
+
+// metricsCall is one Metrics round trip to the signer, shared by every scrape
+// that arrives while it is outstanding. done is closed once the reply is in,
+// after which data and err are fixed.
+type metricsCall struct {
+	started time.Time
+	done    chan struct{}
+	data    []byte
+	err     error
+}
+
+// defaultRemoteMetricsTimeout bounds how long a scrape waits for the signer's
+// runtime metrics. Gathering them is microseconds of work, so this only ever
+// fires on a signer that has stopped answering, and it sits well inside
+// Prometheus's default 10s scrape timeout so the rest of the scrape survives.
+const defaultRemoteMetricsTimeout = 5 * time.Second
+
+// ErrMetricsUnanswered is returned when an earlier Metrics call to the signer
+// has outlived its deadline unanswered, so Gather declines to add another.
+var ErrMetricsUnanswered = errors.New("an earlier request for the signer's metrics is still unanswered")
 
 // defaultRemoteSignTimeout bounds how long the frontend waits for the isolated
 // signer to answer one Sign call.
@@ -412,6 +495,102 @@ func (r *RemoteSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) 
 		// cost of a stuck goroutine per request and a signing bound whose
 		// slots never came back. See docs/ca-key-security.md.
 		return nil, fmt.Errorf("remote sign: %w", ErrSignTimeout)
+	}
+}
+
+// Gather fetches the signer's Go runtime metric families, waiting at most
+// defaultRemoteMetricsTimeout. It implements prometheus.Gatherer.
+//
+// At most one call is outstanding at a time. net/rpc cannot cancel a call, and
+// one abandoned at the deadline stays in the client's pending table until a
+// reply arrives; against a wedged signer none ever does (see Sign). Sign
+// bounds that growth through the signing concurrency limit, and nothing bounds
+// how often a scraper asks. So a scrape that arrives while a call is
+// outstanding joins it rather than making another: two scrapers that overlap
+// on a healthy signer share one round trip. Once that call has outlived its
+// deadline, the signer is not answering, and later scrapes return
+// ErrMetricsUnanswered at once instead of each waiting out a deadline of their
+// own. One entry in the pending table, however long the signer stays wedged;
+// the reply, if it ever comes, frees the slot for the next scrape.
+//
+// Each caller decodes the reply for itself, so no two get the same families:
+// the exporter relabels what it is given in place.
+func (r *RemoteSigner) Gather() ([]*dto.MetricFamily, error) {
+	timeout := r.metricsTimeout
+	if timeout <= 0 {
+		timeout = defaultRemoteMetricsTimeout
+	}
+
+	r.metricsMu.Lock()
+	c := r.metricsCall
+	switch {
+	case c == nil:
+		c = r.startMetricsCall()
+		r.metricsCall = c
+	case time.Since(c.started) >= timeout:
+		r.metricsMu.Unlock()
+		return nil, ErrMetricsUnanswered
+	}
+	r.metricsMu.Unlock()
+
+	timer := time.NewTimer(time.Until(c.started.Add(timeout)))
+	defer timer.Stop()
+
+	select {
+	case <-c.done:
+		if c.err != nil {
+			return nil, c.err
+		}
+		return decodeFamilies(c.data)
+	case <-timer.C:
+		return nil, fmt.Errorf("signer metrics: timed out after %s", timeout)
+	}
+}
+
+// startMetricsCall starts one Metrics call and returns it. The caller holds
+// metricsMu.
+//
+// The request is sent from a goroutine of its own, not here. net/rpc writes a
+// request synchronously, and the socketpair has no write deadline, so a signer
+// that has stopped reading its end would block the send -- here, with
+// metricsMu held, before any caller's deadline had started, and every later
+// scrape would queue on the mutex instead of reaching ErrMetricsUnanswered.
+// The same goroutine collects the reply, so the slot is freed whenever it
+// arrives, whether or not anyone is still waiting for it.
+func (r *RemoteSigner) startMetricsCall() *metricsCall {
+	c := &metricsCall{started: time.Now(), done: make(chan struct{})}
+	go func() {
+		resp := &MetricsResponse{}
+		// Buffered for the reason Sign's is: a reply must always be
+		// delivered, or the pending entry is never cleaned up.
+		call := r.client.Go("Signer.Metrics", &MetricsRequest{}, resp, make(chan *rpc.Call, 1))
+		reply := <-call.Done
+		if reply.Error != nil {
+			c.err = fmt.Errorf("signer metrics: %w", reply.Error)
+		} else {
+			c.data = resp.Families
+		}
+		r.metricsMu.Lock()
+		r.metricsCall = nil
+		r.metricsMu.Unlock()
+		close(c.done)
+	}()
+	return c
+}
+
+// decodeFamilies reads back what Service.Metrics encoded.
+func decodeFamilies(data []byte) ([]*dto.MetricFamily, error) {
+	dec := expfmt.NewDecoder(bytes.NewReader(data), expfmt.NewFormat(expfmt.TypeProtoDelim))
+	var mfs []*dto.MetricFamily
+	for {
+		mf := &dto.MetricFamily{}
+		if err := dec.Decode(mf); err != nil {
+			if errors.Is(err, io.EOF) {
+				return mfs, nil
+			}
+			return nil, fmt.Errorf("decoding signer metrics: %w", err)
+		}
+		mfs = append(mfs, mf)
 	}
 }
 

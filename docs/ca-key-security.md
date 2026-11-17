@@ -25,6 +25,15 @@ gives that up; it is a debugging aid. The container images and the Helm chart ru
 the default three processes, because the isolation matters in a container as much
 as anywhere.
 
+The signer answers one other request over the socketpair: `Metrics`, which
+returns its Go runtime statistics (heap, garbage collection, goroutines, its
+memory limit) for the frontend to fetch, since the signer has no listener of
+its own, by design. `Metrics` takes no input and never touches the key. What it
+returns is aggregate runtime telemetry with nothing in it that depends on the
+key. The frontend keeps at most one such request outstanding, shared by
+requests that overlap, and gives up on it after five seconds, so a wedged
+signer costs the caller that telemetry and nothing more.
+
 The two children inherit two file descriptors from the launcher:
 
 | Descriptor | Contents |
