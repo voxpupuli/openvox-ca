@@ -351,10 +351,13 @@ Three things worth knowing that belong here rather than there:
 
 ## Release notes
 
-`release.yml` calls `gh release create --generate-notes`, which asks GitHub to
-build the notes from the **merged pull requests** between the previous release
-tag and this one. It produces a flat "What's Changed" list plus a new
-contributors section and a full changelog link.
+`release.yml` creates the release as a draft with
+`gh release create --draft --generate-notes`, and publishes it with
+`gh release edit --draft=false` once the asset names are checked.
+`--generate-notes` asks GitHub to build the notes from the **merged pull
+requests** between the previous release tag and this one. It produces a flat
+"What's Changed" list plus a new contributors section and a full changelog
+link.
 
 Two consequences worth knowing:
 
