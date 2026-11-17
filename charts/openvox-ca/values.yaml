@@ -611,6 +611,12 @@ affinity: {}
 # A constraint with no labelSelector gets this release's own pod selector, so
 # the common case needs no boilerplate. Supply one explicitly to spread against
 # a different set of pods.
+#
+# Such a constraint also gets matchLabelKeys: [pod-template-hash], so only the
+# incoming pod's own ReplicaSet is counted. Without it a rollout counts the
+# outgoing pods too, and with one replica per node, DoNotSchedule and
+# maxUnavailable: 0 the surge pod has nowhere to go and the rollout stops
+# silently. Set matchLabelKeys on the constraint, even to [], to keep your own.
 topologySpreadConstraints:
   - maxSkew: 1
     topologyKey: kubernetes.io/hostname

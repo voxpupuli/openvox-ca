@@ -207,7 +207,7 @@ and [the CA's own serving certificate](https://github.com/voxpupuli/openvox-ca/b
 | `lifecycle` | `{}` | |
 | `terminationGracePeriodSeconds` | `30` | Must exceed `shutdown_timeout_sec` by ≥ 3s |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | |
-| `topologySpreadConstraints` | one soft constraint per hostname | A constraint with no `labelSelector` gets this release's own selector |
+| `topologySpreadConstraints` | one soft constraint per hostname | A constraint with no `labelSelector` gets this release's own selector, and `matchLabelKeys: [pod-template-hash]` so a rollout counts only the incoming ReplicaSet. Set `matchLabelKeys` on the constraint, even to `[]`, to keep your own |
 | `priorityClassName` / `runtimeClassName` / `schedulerName` | `""` | |
 | `dnsPolicy` / `dnsConfig` / `hostAliases` | `""` / `{}` / `[]` | |
 | `enableServiceLinks` | `false` | Keep false: a Service named `openvox-ca` would set `OPENVOX_CA_PORT=tcp://…`, which the server refuses as a port. Refused at install when it is this release's own Service |

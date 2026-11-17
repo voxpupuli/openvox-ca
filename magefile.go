@@ -5594,6 +5594,59 @@ func (Chart) Test() error {
 			notWants: []string{"type: Recreate"},
 		},
 		{
+			// #297: the chart's own HA shape. Two replicas spread one per node
+			// with DoNotSchedule, rolling with maxSurge 1 and maxUnavailable 0,
+			// wedges unless the spread counts only the incoming ReplicaSet.
+			name: "a defaulted spread selector counts only the incoming ReplicaSet",
+			sets: []string{tls, "persistence.enabled=false", "replicaCount=2", "config.storage_backend=postgres"},
+			valuesYAML: `topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+`,
+			wants: []string{
+				"maxUnavailable: 0", "maxSurge: 1", "whenUnsatisfiable: DoNotSchedule",
+				"app.kubernetes.io/name: openvox-ca\n          matchLabelKeys:\n          - pod-template-hash\n",
+			},
+		},
+		{
+			name: "the default constraint counts only the incoming ReplicaSet",
+			sets: []string{tls},
+			wants: []string{
+				"matchLabelKeys:\n          - pod-template-hash\n          maxSkew: 1\n          topologyKey: kubernetes.io/hostname\n          whenUnsatisfiable: ScheduleAnyway",
+			},
+		},
+		{
+			// Other workloads' pods carry a different pod-template-hash, so the
+			// key would silently stop counting every one of them.
+			name: "an operator's own spread selector gets no matchLabelKeys",
+			sets: []string{tls},
+			valuesYAML: `topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app: other
+`,
+			// Positive control first: a constraint that stopped rendering
+			// would satisfy the absence assertion on its own.
+			wants:    []string{"app: other"},
+			notWants: []string{"matchLabelKeys", "pod-template-hash"},
+		},
+		{
+			name: "a constraint's own matchLabelKeys is kept, even when empty",
+			sets: []string{tls},
+			valuesYAML: `topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    matchLabelKeys: []
+`,
+			wants:    []string{"matchLabelKeys: []"},
+			notWants: []string{"pod-template-hash"},
+		},
+		{
 			name:     "an explicit strategy is honoured either way",
 			sets:     []string{tls, "strategy.type=Recreate", "persistence.enabled=false"},
 			wants:    []string{"type: Recreate"},
@@ -7377,7 +7430,7 @@ networkPolicy:
 		{
 			name:  "topology constraints default to this release's own pods",
 			sets:  []string{tls},
-			wants: []string{"app.kubernetes.io/name: openvox-ca\n          maxSkew: 1"},
+			wants: []string{"app.kubernetes.io/name: openvox-ca\n          matchLabelKeys:"},
 		},
 		{
 			// The credential refusal keys on a password, not on sql_dsn being
