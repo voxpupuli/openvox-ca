@@ -49,7 +49,7 @@ var _ = Describe("newAPIServer", func() {
 	// hold the literals, and this one holds the API server to them.
 	It("uses the same timeouts as the metrics listener", func() {
 		exporter := metrics.NewExporter(
-			ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test"))
+			ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test"), roleFrontend)
 		Expect(timeouts(exporter.NewServer("127.0.0.1:0"))).
 			To(Equal(timeouts(newAPIServer("127.0.0.1:0", http.NotFoundHandler()))))
 	})

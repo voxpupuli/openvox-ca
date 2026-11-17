@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -105,8 +106,8 @@ var logCloseErrOut io.Writer = os.Stderr
 // number.
 const levelTrace = slog.Level(-8)
 
-// The roles a process reports itself as, on every log record, under
-// metrics.RoleLabel. The first three are the
+// The roles a process reports itself as, on every log record and on its
+// go_* and process_* series (metrics.RoleLabel). The first three are the
 // default process tree; roleSingleProcess is --single-process, where one process
 // both holds the key and serves the API, so neither child's name describes it.
 // The offline subcommands that log report their own command name instead.
@@ -140,8 +141,8 @@ func processRole(envRole string, singleProcess bool) string {
 // Every record carries role, naming the process that wrote it. The launcher and
 // both children share one stderr, and usually one logfile, so without it a
 // signer line and a frontend line are indistinguishable. The key is
-// metrics.RoleLabel, defined beside the exporter so that per-process metrics
-// can use the same name. It is
+// metrics.RoleLabel, the label the same process's go_* and process_* series
+// carry, so a log line and a series about one process are filtered alike. It is
 // "role" rather than "process" because the launcher already uses process= for
 // the child a message is about, which on the launcher's own lines is a
 // different process from the one writing them.
@@ -651,6 +652,40 @@ func ocspURLWithoutResponderNotice(cfg *serverConfig) string {
 	return "ocsp_url is set but enable_ocsp is not, so issued certificates advertise an OCSP responder " +
 		"this server does not serve; set enable_ocsp to serve /ocsp, or ignore this if ocsp_url names a " +
 		"responder elsewhere"
+}
+
+// addSiblingTelemetry has the frontend's exporter describe the launcher and the
+// signer too, so that go_* and process_* cover the whole process tree rather
+// than the one process that serves /metrics (#305). The siblings' process_*
+// series come from /proc, at the PIDs the launcher handed over; the signer's
+// go_* series come over its RPC, from rs.
+//
+// A PID the launcher did not set is the frontend started by hand, which has no
+// siblings' /proc entries to read and says so only at debug; it still reports
+// the signer's go_* series, which do not depend on the PIDs. One that is set
+// but unusable can only be a launcher bug or an operator's own environment, and
+// is reported.
+func addSiblingTelemetry(e *metrics.Exporter, getenv func(string) string, rs *signer.RemoteSigner) {
+	for _, sib := range []struct{ role, env string }{
+		{roleLauncher, launcherPIDEnv},
+		{roleSigner, signerPIDEnv},
+	} {
+		raw := getenv(sib.env)
+		if raw == "" {
+			slog.Debug("No PID for a sibling process; its process metrics are not exported", "sibling", sib.role)
+			continue
+		}
+		pid, err := strconv.Atoi(raw)
+		if err != nil || pid <= 0 {
+			slog.Warn("Ignoring a sibling process's PID that is not a positive integer; its process metrics are not exported",
+				"sibling", sib.role, "variable", sib.env, "value", raw)
+			continue
+		}
+		e.AddProcess(sib.role, pid)
+	}
+	if rs != nil {
+		e.AddRuntime(roleSigner, rs)
+	}
 }
 
 // metricsOptions maps cfg to the CA collector's options. It is a function of
@@ -1539,7 +1574,10 @@ func newRootCmd() *cobra.Command {
 			// served on a separate listener (see metricsServer below).
 			var exporter *metrics.Exporter
 			if cfg.MetricsListen != "" {
-				exporter = metrics.NewExporter(myCA, metricsOptions(cfg)...)
+				exporter = metrics.NewExporter(myCA, processRole(role, singleProcess), metricsOptions(cfg)...)
+				if role == roleFrontend {
+					addSiblingTelemetry(exporter, os.Getenv, remoteSigner)
+				}
 				srv.OnCSRRateLimited = newCSRRateLimitedCounter(exporter.Registry()).Inc
 				if cfg.EnableOCSP {
 					srv.OnOCSPRateLimited = newOCSPRateLimitedCounter(exporter.Registry()).Inc

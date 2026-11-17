@@ -211,7 +211,7 @@ var _ = DescribeTable("ocspURLWithoutResponderNotice",
 var _ = DescribeTable("metricsOptions: the OCSP index series",
 	func(enabled, exported bool) {
 		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "ca.example.com")
-		exporter := metrics.NewExporter(myCA, metricsOptions(&serverConfig{EnableOCSP: enabled})...)
+		exporter := metrics.NewExporter(myCA, roleSingleProcess, metricsOptions(&serverConfig{EnableOCSP: enabled})...)
 		names := gatheredNames(exporter.Registry())
 		for _, name := range []string{"openvoxca_ocsp_index_serials", "openvoxca_ocsp_index_sync_failures_total"} {
 			if exported {

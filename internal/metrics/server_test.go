@@ -40,7 +40,7 @@ var _ = Describe("Exporter.NewServer", func() {
 
 	BeforeEach(func() {
 		exporter = metrics.NewExporter(
-			ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test"))
+			ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test"), "frontend")
 	})
 
 	// Pinned as literals rather than read back from httpserver.Defaults, so a

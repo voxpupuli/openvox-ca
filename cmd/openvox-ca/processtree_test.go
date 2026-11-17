@@ -22,10 +22,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -34,7 +37,15 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
+
+	"github.com/voxpupuli/openvox-ca/internal/metrics"
 )
+
+// roleLabelName is the label the per-process series carry.
+const roleLabelName = metrics.RoleLabel
 
 // processTree is the real launcher, run as an operator would run it, with the
 // signer and frontend it re-executes. Only real children show what each
@@ -162,6 +173,97 @@ var recordPerRole = []struct{ msg, role string }{
 	{"CA processes started", roleLauncher},
 	{"Signer process ready", roleSigner},
 	{"Starting Puppet CA", roleFrontend},
+}
+
+// scrape fetches /metrics from addr and parses it. It asserts through g, so
+// that inside Eventually a listener not yet bound is retried rather than
+// failing the spec: the exporter binds in a goroutine of its own, unordered
+// against the API listener a spec waits for.
+func scrape(g Gomega, addr string) map[string]*dto.MetricFamily {
+	resp, err := plainClient().Get("http://" + addr + "/metrics")
+	g.Expect(err).NotTo(HaveOccurred())
+	defer resp.Body.Close()
+	g.Expect(resp.StatusCode).To(Equal(http.StatusOK))
+	parser := expfmt.NewTextParser(model.UTF8Validation)
+	mfs, err := parser.TextToMetricFamilies(resp.Body)
+	g.Expect(err).NotTo(HaveOccurred())
+	return mfs
+}
+
+var _ = Describe("the real process tree's metrics", func() {
+	// The whole of #305 in one place: the frontend serves the one /metrics,
+	// and what it serves describes all three processes, each under its role.
+	It("serves every process's go_* and process_* series on the frontend's /metrics", func() {
+		metricsAddr := "127.0.0.1:" + strconv.Itoa(freeLoopbackPort())
+		startProcessTree("OPENVOX_CA_METRICS_LISTEN=" + metricsAddr)
+
+		var mfs map[string]*dto.MetricFamily
+		Eventually(func(g Gomega) []string {
+			mfs = scrape(g, metricsAddr)
+			return familyRoles(mfs["go_goroutines"])
+		}, 30*time.Second, 250*time.Millisecond).Should(ConsistOf(roleFrontend, roleSigner),
+			"the signer's runtime arrives over its RPC; the launcher has no channel to report one")
+
+		Expect(familyRoles(mfs["go_gc_gomemlimit_bytes"])).To(ConsistOf(roleFrontend, roleSigner),
+			"each child's own memory limit, the figure the launcher divided")
+
+		processRoles := familyRoles(mfs["process_resident_memory_bytes"])
+		if runtime.GOOS == "linux" {
+			Expect(processRoles).To(ConsistOf(roleLauncher, roleSigner, roleFrontend))
+		} else {
+			// Elsewhere no sibling's resident memory can be read. Not even
+			// the frontend's own is certain: macOS reports it only in a
+			// cgo build. (It also reports a sibling's start time; nothing
+			// here depends on that.)
+			Expect(processRoles).NotTo(ContainElement(roleLauncher))
+			Expect(processRoles).NotTo(ContainElement(roleSigner))
+		}
+	})
+})
+
+// --single-process is the one server with no tree: one process holds the key
+// and serves the API, and it reports itself as such in both places #305 and
+// #617 name it. Its log and exporter call sites are shared with the launcher
+// and the frontend, so a role pinned only for those could be wrong here.
+var _ = Describe("the single-process server's role", func() {
+	It("names itself single-process on its log lines and its go_* and process_* series", func() {
+		clearServerEnv()
+		DeferCleanup(slog.SetDefault, slog.Default())
+		caDir := GinkgoT().TempDir()
+		bootstrapCAInDir(caDir, "ca.example.com")
+		logPath := filepath.Join(GinkgoT().TempDir(), "server.log")
+		metricsAddr := fmt.Sprintf("127.0.0.1:%d", freeLoopbackPort())
+		cfg := serveConfig(caDir, GinkgoT().TempDir(), "127.0.0.1", freeLoopbackPort(), false)
+		appendConfig(cfg, "logfile: "+logPath+"\nmetrics_listen: "+metricsAddr+"\n")
+
+		startServe(cfg) // always --single-process
+
+		var mfs map[string]*dto.MetricFamily
+		Eventually(func(g Gomega) []string {
+			mfs = scrape(g, metricsAddr)
+			return familyRoles(mfs["go_goroutines"])
+		}, 30*time.Second, 250*time.Millisecond).Should(ConsistOf(roleSingleProcess))
+		if runtime.GOOS == "linux" {
+			Expect(familyRoles(mfs["process_resident_memory_bytes"])).To(ConsistOf(roleSingleProcess))
+		}
+
+		data, err := os.ReadFile(logPath)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(jsonRecordRole(data, "Starting Puppet CA")).To(Equal(roleSingleProcess))
+	})
+})
+
+// familyRoles returns the role label of every metric in mf.
+func familyRoles(mf *dto.MetricFamily) []string {
+	var roles []string
+	for _, m := range mf.GetMetric() {
+		for _, lp := range m.GetLabel() {
+			if lp.GetName() == roleLabelName {
+				roles = append(roles, lp.GetValue())
+			}
+		}
+	}
+	return roles
 }
 
 var _ = Describe("the real process tree's logs", func() {

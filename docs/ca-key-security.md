@@ -27,12 +27,14 @@ as anywhere.
 
 The signer answers one other request over the socketpair: `Metrics`, which
 returns its Go runtime statistics (heap, garbage collection, goroutines, its
-memory limit) for the frontend to fetch, since the signer has no listener of
-its own, by design. `Metrics` takes no input and never touches the key. What it
-returns is aggregate runtime telemetry with nothing in it that depends on the
-key. The frontend keeps at most one such request outstanding, shared by
-requests that overlap, and gives up on it after five seconds, so a wedged
-signer costs the caller that telemetry and nothing more.
+memory limit) so the frontend can serve them on `/metrics` under
+`role="signer"`. The signer has no listener of its own, by design. `Metrics`
+takes no input and never touches the key. What it returns is aggregate runtime
+telemetry with nothing in it that depends on the key, and it reaches the same
+audience as the frontend's own `go_*` series: whoever can reach `metrics_listen`.
+The frontend keeps at most one such request outstanding, shared by scrapes that
+overlap, and gives up on it after five seconds, so a wedged signer costs a
+scrape its `go_*` series and nothing more.
 
 The two children inherit two file descriptors from the launcher:
 

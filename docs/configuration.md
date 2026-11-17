@@ -2781,7 +2781,12 @@ is the one an operator can outgrow: its startup peak is fleet-proportional at
 roughly 420 bytes per certificate, and **raising the container limit does not
 reach it**. The share also has to carry the Go runtime's own footprint, a few
 MiB before any inventory, so the usable headroom in the 24MiB default is nearer
-16MiB: raise `memory_reserve_signer` beyond roughly 40,000 certificates.
+16MiB: raise `memory_reserve_signer` beyond roughly 40,000 certificates. To
+see how close the signer runs to its share, compare
+`go_memstats_heap_inuse_bytes{role="signer"}` and
+`process_resident_memory_bytes{role="signer"}` with
+`go_gc_gomemlimit_bytes{role="signer"}`; see
+[one series per process](metrics.md#one-series-per-process).
 
 `memory_reserve_launcher` and `memory_reserve_signer` take an integer with an
 optional IEC suffix, with or without the trailing `B`. Leaving either empty, or
@@ -2853,7 +2858,10 @@ time=2026-11-17T10:00:00.000Z level=INFO msg="Signer process ready" role=signer 
 ```
 
 So `jq 'select(.role=="signer")'` over a `logfile`, or a Loki `| logfmt | role="signer"`
-over a container's stderr, picks out one process.
+over a container's stderr, picks out one process. The `go_*` and `process_*`
+series in the [metrics](metrics.md#standard-go--web-application-metrics) carry
+the same label with the same values, so a log line and a series about one
+process filter alike.
 
 `role` is a different attribute from the `process` some launcher messages carry.
 `process` names the child the message is *about*: the launcher's
