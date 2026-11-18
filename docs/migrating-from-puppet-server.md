@@ -366,13 +366,17 @@ Some limits worth knowing before you rely on re-import as a refresh mechanism.
 > [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is what
 > keeps them current without an operator acting before each lapse.
 >
-> `import` is the one place it is detectable, so read its output. It warns when a
+> `openvox-ca-ctl import` is the one place it is detectable, so read its output. It warns when a
 > supplied ancestor is already past its `nextUpdate`, and when the chain carries
 > more than one CRL for the same ancestor:
 >
 > ```text
 > level=WARN msg="Ancestor CRL has already expired; agents doing full-chain revocation checking will reject the published chain" issuer="CN=Root CA" next_update=2026-01-01T00:00:00Z
 > ```
+>
+> Like everything `openvox-ca-ctl` logs, the line carries no `role`: that
+> attribute names the server's own processes (see
+> [log output](configuration.md#log-output)).
 >
 > Running `import` with no `--crl-chain` writes nothing and still performs both
 > checks, so it is a safe way to ask whether the chain you are serving is sound.
