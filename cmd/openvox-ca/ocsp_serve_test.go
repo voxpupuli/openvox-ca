@@ -109,7 +109,8 @@ var _ = Describe("the serve command's /ocsp", func() {
 		Expect(resp.Header.Get("Content-Type")).To(Equal("application/ocsp-response"))
 		// The default limit, which also pins that the resolved value reaches
 		// the server rather than the -1 sentinel.
-		Expect(serverLog()).To(ContainSubstring(`"msg":"OCSP responder enabled at /ocsp","rate_limit_per_minute":300`))
+		Expect(logRecord([]byte(serverLog()), "OCSP responder enabled at /ocsp")).
+			To(HaveKeyWithValue("rate_limit_per_minute", float64(300)))
 		Expect(serverLog()).NotTo(ContainSubstring("ocsp_url is set but enable_ocsp is not"))
 	})
 
@@ -121,8 +122,10 @@ var _ = Describe("the serve command's /ocsp", func() {
 		Expect(postOCSP(addr).StatusCode).To(Equal(http.StatusBadRequest))
 		Expect(serverLog()).To(ContainSubstring("OCSP responder enabled at /ocsp without a rate limit"))
 		// Scoped to the responder's own record: other startup lines may
-		// carry keys with the same suffix.
-		Expect(serverLog()).NotTo(ContainSubstring(`"msg":"OCSP responder enabled at /ocsp","rate_limit_per_minute"`))
+		// carry keys with the same suffix. The closing quote keeps the
+		// unlimited line above from matching, so this says the rate-limited
+		// line was not logged at all -- whatever attributes precede its limit.
+		Expect(serverLog()).NotTo(ContainSubstring(`"msg":"OCSP responder enabled at /ocsp"`))
 	})
 
 	Context("with a metrics listener", func() {
@@ -208,7 +211,7 @@ var _ = DescribeTable("ocspURLWithoutResponderNotice",
 var _ = DescribeTable("metricsOptions: the OCSP index series",
 	func(enabled, exported bool) {
 		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "ca.example.com")
-		exporter := metrics.NewExporter(myCA, metricsOptions(&serverConfig{EnableOCSP: enabled})...)
+		exporter := metrics.NewExporter(myCA, roleSingleProcess, metricsOptions(&serverConfig{EnableOCSP: enabled})...)
 		names := gatheredNames(exporter.Registry())
 		for _, name := range []string{"openvoxca_ocsp_index_serials", "openvoxca_ocsp_index_sync_failures_total"} {
 			if exported {

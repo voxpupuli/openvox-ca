@@ -126,7 +126,7 @@ before a server exists.`,
 			// line in internal/ca reaches it. Non-fatal and non-creative, for
 			// reasons setupLogger's other callers do not share: see
 			// applySubcommandLogging.
-			closeLog := applySubcommandLogging(cfg, out, "this mint")
+			closeLog := applySubcommandLogging(cfg, out, "this mint", cmd.Name())
 			defer closeLog()
 
 			// The frontend role proxies signing to an isolated signer and never
@@ -688,7 +688,11 @@ func describeIssued(result *ca.GenerateResult) (string, time.Time, error) {
 // whichever subcommand called this, and a shared helper that says "mint" to the
 // operator of a repair command is the same defect as a capability report that
 // calls a refused backend safe.
-func applySubcommandLogging(cfg *serverConfig, w io.Writer, record string) func() {
+//
+// role is the subcommand's own name, and every record it logs carries it. These
+// records land in the running server's logfile, so the role is what tells an
+// offline mint or rebuild apart from the server's own lines.
+func applySubcommandLogging(cfg *serverConfig, w io.Writer, record, role string) func() {
 	effective := *cfg
 
 	if effective.LogFile != "" {
@@ -699,13 +703,13 @@ func applySubcommandLogging(cfg *serverConfig, w io.Writer, record string) func(
 		}
 	}
 
-	f, err := setupLogger(&effective)
+	f, err := setupLogger(&effective, role)
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "Audit log: could not open %s (%v); logging to stderr instead.\n",
 			effective.LogFile, err)
 		stderrOnly := effective
 		stderrOnly.LogFile = ""
-		if _, fallbackErr := setupLogger(&stderrOnly); fallbackErr != nil {
+		if _, fallbackErr := setupLogger(&stderrOnly, role); fallbackErr != nil {
 			_, _ = fmt.Fprintf(w, "Warning: could not configure logging: %v\n", fallbackErr)
 		}
 		return func() {}

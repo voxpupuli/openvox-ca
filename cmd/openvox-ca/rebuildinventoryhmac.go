@@ -111,7 +111,7 @@ is the safe way to inspect a CA that will not start.`,
 			// the record below lands where the CA's other integrity messages do
 			// rather than only in this terminal. Degrades to stderr rather than
 			// failing, and never creates the file.
-			closeLog := applySubcommandLogging(cfg, out, "this rebuild")
+			closeLog := applySubcommandLogging(cfg, out, "this rebuild", cmd.Name())
 			defer closeLog()
 
 			rt, err := resolve(ctx, cfg)

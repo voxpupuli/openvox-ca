@@ -714,7 +714,7 @@ var _ = Describe("the server's own startup, on key-material permissions", func()
 			Mode: os.FileMode(0o640),
 		}
 
-		closeLog, err := openRoleLogAndReport(cfg, []storage.KeyPermWarning{groupReadable})
+		closeLog, err := openRoleLogAndReport(cfg, roleLauncher, []storage.KeyPermWarning{groupReadable})
 		Expect(err).NotTo(HaveOccurred(), "openRoleLogAndReport")
 		DeferCleanup(func() { slog.SetDefault(slog.New(slog.NewTextHandler(GinkgoWriter, nil))) })
 		closeLog()

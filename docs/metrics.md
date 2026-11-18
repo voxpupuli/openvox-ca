@@ -56,8 +56,8 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 
 | Metric | Description |
 | --- | --- |
-| `go_*` | Go runtime metrics (goroutines, GC, memory) from the standard Go collector. |
-| `process_*` | Process metrics (CPU, resident memory, open FDs) where supported by the platform. |
+| `go_*{role}` | Go runtime metrics (goroutines, GC, memory, `go_gc_gomemlimit_bytes`) from the standard Go collector, for each process with a Go runtime to report: the `frontend` and the `signer`, or the `single-process` server. See [one series per process](#one-series-per-process). |
+| `process_*{role}` | Process metrics (CPU, resident memory, open FDs) for the process serving `/metrics` where the platform supports them, and for the `launcher` and the `signer` on Linux. See [one series per process](#one-series-per-process). |
 | `openvoxca_http_requests_total{method,code}` | Total CA API requests, by HTTP method and response code. `PUT` `400`s include [duplicate certificate requests](configuration.md#duplicate-certificate-requests), which an agent waiting to be signed or cleaned sends on every poll, so a `PUT` `400` rate is not on its own a sign of malformed CSRs; the `SaveRequest refused: duplicate certificate request` log line tells them apart. |
 | `openvoxca_http_request_duration_seconds{method,code}` | CA API request latency histogram. |
 | `openvoxca_http_requests_in_flight` | CA API requests currently being served. |
@@ -65,6 +65,47 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 > HTTP request metrics are intentionally **not** labelled by URL path: the CA's
 > API paths embed per-node subjects (e.g. `/certificate_status/<hostname>`),
 > which would otherwise explode metric cardinality.
+
+#### One series per process
+
+By default `openvox-ca` runs as three processes: a launcher, the isolated
+signer that holds the CA key, and the frontend that serves the API and
+`/metrics` (see [CA key security](ca-key-security.md#process-isolation)). Every
+`go_*` and `process_*` series carries a `role` label naming the process it
+describes, with the same values as the `role` attribute on
+[every log line](configuration.md#log-output):
+
+| `role` | `process_*` | `go_*` | How the frontend gets them |
+| --- | --- | --- | --- |
+| `frontend` | yes | yes | its own collectors |
+| `signer` | Linux only | yes | `process_*` from `/proc/<pid>`; `go_*` over the signer's socketpair |
+| `launcher` | Linux only | no | `process_*` from `/proc/<pid>`; it has no channel to report its runtime |
+| `single-process` | yes | yes | its own collectors, under `--single-process` |
+
+"Linux only" is for everything but the start time: on macOS a sibling reports
+`process_start_time_seconds` and nothing else.
+
+The launcher hands the frontend both PIDs when it starts it. All three processes
+run as the same user, so reading a sibling's `/proc` entry needs nothing the
+frontend does not already have. A frontend started by hand, outside the
+launcher, has no PIDs to read, so its `process_*` series cover only itself; it
+still reports the signer's `go_*` series, which arrive over the socketpair
+rather than from `/proc`.
+
+Aggregate by what the series measures:
+
+- **Memory against the container's limit:** `sum by (pod)
+  (process_resident_memory_bytes)` is the pod's resident memory, give or take
+  pages the processes share. Each process's own figure is what
+  `memory_reserve_launcher` and `memory_reserve_signer` are sized against; see
+  the [memory budget](configuration.md#memory-budget).
+- **`process_network_receive_bytes_total` and
+  `process_network_transmit_bytes_total`:** read from `/proc/<pid>/net/dev`,
+  which describes the network namespace, not the process. All three roles
+  report the same counters, so use `max by (pod)`, not `sum`, or the traffic is
+  counted three times.
+- **`go_*`:** filter on `role`. The launcher has none, and in the default
+  deployment an unfiltered query returns two series per pod.
 
 ### CSR submissions
 
@@ -357,7 +398,7 @@ so it stays current by itself".
 > if this does happen. A re-sign that *can* see a difference says so, at `WARN`:
 >
 > ```text
-> level=WARN msg="Stored CRL chain length changed while re-signing" blocks_read=2 blocks_written=1
+> level=WARN msg="Stored CRL chain length changed while re-signing" role=frontend blocks_read=2 blocks_written=1
 > ```
 >
 > On a healthy CA that line never appears: every block that is not ours is carried

@@ -25,6 +25,17 @@ gives that up; it is a debugging aid. The container images and the Helm chart ru
 the default three processes, because the isolation matters in a container as much
 as anywhere.
 
+The signer answers one other request over the socketpair: `Metrics`, which
+returns its Go runtime statistics (heap, garbage collection, goroutines, its
+memory limit) so the frontend can serve them on `/metrics` under
+`role="signer"`. The signer has no listener of its own, by design. `Metrics`
+takes no input and never touches the key. What it returns is aggregate runtime
+telemetry with nothing in it that depends on the key, and it reaches the same
+audience as the frontend's own `go_*` series: whoever can reach `metrics_listen`.
+The frontend keeps at most one such request outstanding, shared by scrapes that
+overlap, and gives up on it after five seconds, so a wedged signer costs a
+scrape its `go_*` series and nothing more.
+
 The two children inherit two file descriptors from the launcher:
 
 | Descriptor | Contents |
@@ -449,7 +460,7 @@ deletion) per authenticated client. When a single client exceeds **5 destructive
 operations per minute**, a warning is emitted to the structured log:
 
 ```text
-level=WARN msg="High rate of destructive operations detected" client.cn=admin.example.com client.domain="this CA" operation=revoke
+level=WARN msg="High rate of destructive operations detected" role=frontend client.cn=admin.example.com client.domain="this CA" operation=revoke
 ```
 
 A client is identified by its common name *and* the trust domain that vouched for

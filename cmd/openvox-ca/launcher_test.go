@@ -198,6 +198,17 @@ func dumpChildEnv(role string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	// Its PID too, so a spec can check what one sibling was told about the
+	// other against the process that is actually running.
+	pidPath := filepath.Join(dir, role+".pid")
+	if err := os.WriteFile(pidPath+".tmp", []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := os.Rename(pidPath+".tmp", pidPath); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 
 	select {
 	case <-stop:
@@ -969,6 +980,10 @@ var _ = Describe("the environment runLauncher hands each child", func() {
 			"BAO_TOKEN=bao-token",
 			"VAULT_ADDR=https://openbao.example.com:8200",
 			"OPENVOX_CA_CADIR=/var/lib/openvox-ca",
+			// Stale values the launcher must replace for the frontend and
+			// withhold from the signer.
+			launcherPIDEnv+"=1",
+			signerPIDEnv+"=1",
 		)
 		cmd.Stdout = &out
 		cmd.Stderr = &out
@@ -1007,6 +1022,26 @@ var _ = Describe("the environment runLauncher hands each child", func() {
 			"BAO_TOKEN=bao-token",
 			"VAULT_ADDR=https://openbao.example.com:8200",
 		))
+
+		// The frontend serves /metrics for the whole tree, so it is told where
+		// the other two are: this launcher, and the signer it really started.
+		// Read back from the signer's own report, so a PID that merely looked
+		// plausible would not pass.
+		var signerPID []byte
+		Eventually(func() error {
+			var err error
+			signerPID, err = os.ReadFile(filepath.Join(dir, "signer.pid"))
+			return err
+		}, 30*time.Second).Should(Succeed())
+		Expect(frontend).To(ContainElements(
+			launcherPIDEnv+"="+strconv.Itoa(cmd.Process.Pid),
+			signerPIDEnv+"="+string(signerPID),
+		))
+		Expect(frontend).NotTo(ContainElement(launcherPIDEnv + "=1"))
+		Expect(frontend).NotTo(ContainElement(signerPIDEnv + "=1"))
+		// The signer reads nobody's /proc, and needs neither.
+		Expect(readEnv("signer")).NotTo(ContainElement(HavePrefix(launcherPIDEnv + "=")))
+		Expect(readEnv("signer")).NotTo(ContainElement(HavePrefix(signerPIDEnv + "=")))
 	})
 })
 

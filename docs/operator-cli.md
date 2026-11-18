@@ -930,14 +930,14 @@ two sinks use different encodings. With no `logfile`, logging goes to stderr as
 logfmt —
 
 ```text
-level=WARN msg="Issued certificate carrying a Puppet authorisation extension" subject=openvox-admin grant="pp_cli_auth=true"
+level=WARN msg="Issued certificate carrying a Puppet authorisation extension" role=generate subject=openvox-admin grant="pp_cli_auth=true"
 ```
 
 — while a configured `logfile`, which is what reaches a log aggregator, gets
 JSON:
 
 ```json
-{"level":"WARN","msg":"Issued certificate carrying a Puppet authorisation extension","subject":"openvox-admin","grant":"pp_cli_auth=true"}
+{"level":"WARN","msg":"Issued certificate carrying a Puppet authorisation extension","role":"generate","subject":"openvox-admin","grant":"pp_cli_auth=true"}
 ```
 
 Both are worth a rule wherever these logs are aggregated; see

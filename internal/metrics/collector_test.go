@@ -1181,7 +1181,7 @@ var _ = Describe("Collector", func() {
 	})
 
 	It("exposes Go and process collectors plus HTTP request metrics via the exporter", func() {
-		exp := metrics.NewExporter(myCA)
+		exp := metrics.NewExporter(myCA, "frontend")
 		mfs, err := exp.Registry().Gather()
 		Expect(err).NotTo(HaveOccurred())
 

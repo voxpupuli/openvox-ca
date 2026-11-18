@@ -464,7 +464,8 @@ algorithm OCSP clients ask with (at most four, and usually one), pruned only on
 revocation or expired-certificate cleanup. Crossing the limit is an OOMKill, and
 with the Recreate strategy that persistence-enabled installs default to, that
 is CA downtime. Raise `resources.limits.memory` before a growing inventory
-reaches it.
+reaches it: `sum by (pod) (process_resident_memory_bytes)` shows how close the
+pod runs (see [one series per process](metrics.md#one-series-per-process)).
 
 You do not normally need to set `GOMEMLIMIT`. The server runs as three
 processes — a launcher supervising an isolated signer and the frontend, see
@@ -504,7 +505,9 @@ fleet-proportional at roughly 420 bytes per certificate, and **raising
 `resources.limits.memory` does not reach it**. The share also carries the Go
 runtime's own footprint, so the usable headroom in the 24MiB default is nearer
 16MiB: past roughly 40,000 certificates raise `config.memory_reserve_signer` as
-well:
+well. `go_memstats_heap_inuse_bytes{role="signer"}` against
+`go_gc_gomemlimit_bytes{role="signer"}` shows how close it runs (see
+[one series per process](metrics.md#one-series-per-process)):
 
 ```yaml
 resources:

@@ -144,8 +144,11 @@ func runLauncher(cfg *serverConfig, notify *sdnotify.Notifier, hupCh <-chan os.S
 		return err
 	}
 
-	frontendCmd, err := spawnChild(exe, frontendEnv(baseEnv, keyPassphraseConfig(cfg).EnvVar()),
-		"frontend", frontendSock, pskHex, budget)
+	// The frontend serves /metrics for the whole tree, so it is told where its
+	// siblings are; see siblingPIDEnv.
+	frontendBase := append(frontendEnv(baseEnv, keyPassphraseConfig(cfg).EnvVar()),
+		siblingPIDEnv(os.Getpid(), signerCmd.Process.Pid)...)
+	frontendCmd, err := spawnChild(exe, frontendBase, "frontend", frontendSock, pskHex, budget)
 	if err != nil {
 		// The signer is already running and nothing will ever connect to it, so
 		// it has to go -- and be reaped, not merely signalled: Kill on its own
@@ -416,7 +419,31 @@ func frontendEnv(baseEnv []string, passphraseVar string) []string {
 // before handing an environment to a child. One list, because the two call sites
 // spelled it out separately and a fourth variable added to one and missed at the
 // other would reach a child stale, with nothing to notice.
-var internalEnvKeys = []string{"OPENVOX_CA_ROLE", "OPENVOX_CA_DAEMON", "OPENVOX_CA_SIGNER_PSK"}
+var internalEnvKeys = []string{"OPENVOX_CA_ROLE", "OPENVOX_CA_DAEMON", "OPENVOX_CA_SIGNER_PSK",
+	launcherPIDEnv, signerPIDEnv}
+
+// launcherPIDEnv and signerPIDEnv carry the launcher's and the signer's PIDs to
+// the frontend, which reads their process_* series from /proc so that /metrics
+// describes the whole tree rather than the one process serving it (#305).
+const (
+	launcherPIDEnv = "OPENVOX_CA_LAUNCHER_PID"
+	signerPIDEnv   = "OPENVOX_CA_SIGNER_PID"
+)
+
+// siblingPIDEnv is what the frontend is told about the other two processes.
+//
+// Passed explicitly rather than found by the frontend: os.Getppid would name
+// the launcher only while it is alive and only under it, and a frontend started
+// by hand -- a topology the documentation describes -- would then report its
+// shell as the launcher. The signer is spawned first, so its PID is known here.
+// Both are stripped from every inherited environment with the other internal
+// keys, so a stale value cannot reach a child the launcher did not set it for.
+func siblingPIDEnv(launcherPID, signerPID int) []string {
+	return []string{
+		launcherPIDEnv + "=" + strconv.Itoa(launcherPID),
+		signerPIDEnv + "=" + strconv.Itoa(signerPID),
+	}
+}
 
 // pskPipeFn is the pipe constructor spawnChild uses. A variable so a spec can
 // capture the descriptor the helper creates and assert directly that it was

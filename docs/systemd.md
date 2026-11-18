@@ -97,6 +97,10 @@ Running with `--single-process` collapses this to one process and `NotifyAccess=
 
 Do not add `--daemon` to `ExecStart`. It forks and exits, which under `Type=notify` looks exactly like the service dying the moment it started. The CA logs a warning if you try. Running in the foreground is what a service manager wants; journald captures stderr.
 
+### Telling the processes apart in the journal
+
+Run in the foreground, the launcher, the signer and the frontend all write to the unit's journal, and each line's `role=` names the one that wrote it, so `journalctl -u openvox-ca | grep 'role=signer'` follows the signer alone. See [log output](configuration.md#log-output).
+
 ## What the status text shows
 
 During startup, each phase reports what it is waiting on — which is usually all you need to diagnose a start that hangs:

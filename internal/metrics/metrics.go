@@ -18,14 +18,25 @@
 package metrics
 
 import (
+	"log/slog"
 	"net/http"
+	"slices"
+	"strings"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/httpserver"
 )
+
+// RoleLabel is the label on every go_* and process_* series naming the process
+// it describes: launcher, signer, frontend or single-process. It is also the
+// attribute every log record carries, so a log line and a series about the
+// same process share one name.
+const RoleLabel = "role"
 
 // Exporter bundles a dedicated Prometheus registry with the HTTP request
 // instrumentation that shares it. Keeping a private registry (rather than the
@@ -36,13 +47,27 @@ type Exporter struct {
 	inFlight prometheus.Gauge
 	requests *prometheus.CounterVec
 	duration *prometheus.HistogramVec
+
+	// runtimes are other processes' go_* series, fetched at scrape time; see
+	// AddRuntime.
+	mu       sync.Mutex
+	runtimes []runtimeSource
 }
 
-// NewExporter builds an Exporter for the given CA. The registry is populated
-// with:
+// runtimeSource is one other process whose Go runtime metrics the exporter
+// serves, and the role they are labelled with.
+type runtimeSource struct {
+	role     string
+	gatherer prometheus.Gatherer
+}
+
+// NewExporter builds an Exporter for the given CA, served by the process
+// running as role. The registry is populated with:
 //
-//   - the standard Go runtime collector (go_*),
-//   - the process collector (process_*),
+//   - the standard Go runtime collector (go_*) and the process collector
+//     (process_*), both labelled RoleLabel=role, since in the default
+//     deployment they describe one process of three (see AddProcess and
+//     AddRuntime for the other two),
 //   - build-info (openvoxca_build_info via the version collector is omitted; the
 //     Go collector already exposes go_info),
 //   - the CA/CRL/leaf certificate collector (openvoxca_*), and
@@ -50,12 +75,13 @@ type Exporter struct {
 //     is wrapped with InstrumentHandler.
 //
 // Together these cover both the "usual" Go web-application metrics and the
-// CA-specific certificate/CRL series. opts are handed to the CA collector.
-func NewExporter(c *ca.CA, opts ...Option) *Exporter {
+// CA-specific certificate/CRL series. opts are handed to the CA collector. The
+// openvoxca_* series carry no role: they describe the CA, not a process.
+func NewExporter(c *ca.CA, role string, opts ...Option) *Exporter {
 	reg := prometheus.NewRegistry()
 
-	// Standard Go web-application metrics.
-	reg.MustRegister(
+	// Standard Go web-application metrics, for this process.
+	prometheus.WrapRegistererWith(prometheus.Labels{RoleLabel: role}, reg).MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -90,14 +116,110 @@ func NewExporter(c *ca.CA, opts ...Option) *Exporter {
 	return e
 }
 
-// Registry returns the exporter's Prometheus registry, e.g. for serving via a
-// custom promhttp handler or for test gathering.
+// AddProcess adds the process_* series of another process, read from
+// /proc/<pid> at each scrape and labelled RoleLabel=role. It is how the
+// frontend reports the launcher and the signer, which have no listener of
+// their own.
+//
+// Reading another process's /proc entry needs no privilege the frontend lacks:
+// all three run as the same user. Where /proc is not available the collector
+// reports little or nothing for the sibling: on macOS only its start time,
+// elsewhere nothing.
+func (e *Exporter) AddProcess(role string, pid int) {
+	prometheus.WrapRegistererWith(prometheus.Labels{RoleLabel: role}, e.registry).MustRegister(
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{
+			PidFn: func() (int, error) { return pid, nil },
+		}),
+	)
+}
+
+// AddRuntime adds another process's Go runtime series, fetched from g at each
+// scrape and labelled RoleLabel=role. It is how the frontend reports the
+// signer's go_* series, which the signer returns over its RPC.
+//
+// Only go_* families are taken, and any role label g supplies is replaced: the
+// role is the exporter's to assign, not the other process's to claim. A source
+// that fails is logged, as sibling=role, and left out of that scrape, so a
+// wedged signer costs its own series and nothing else.
+func (e *Exporter) AddRuntime(role string, g prometheus.Gatherer) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.runtimes = append(e.runtimes, runtimeSource{role: role, gatherer: g})
+}
+
+// Registry returns the exporter's Prometheus registry, for registering further
+// collectors. It does not hold what AddRuntime adds; Gatherer does.
 func (e *Exporter) Registry() *prometheus.Registry { return e.registry }
+
+// Gatherer returns everything the exporter serves: its registry and the
+// runtime sources AddRuntime added, merged into one set of families. The
+// sources are fetched concurrently with the registry, so a slow one adds its
+// own wait to a scrape rather than the registry's on top of it.
+func (e *Exporter) Gatherer() prometheus.Gatherer {
+	return prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) {
+		e.mu.Lock()
+		sources := slices.Clone(e.runtimes)
+		e.mu.Unlock()
+
+		fetched := make([][]*dto.MetricFamily, len(sources))
+		var wg sync.WaitGroup
+		for i, src := range sources {
+			wg.Go(func() {
+				mfs, err := src.gatherer.Gather()
+				if err != nil {
+					// "sibling", not RoleLabel: the record's role is the
+					// process writing it, already on the logger, and slog
+					// does not deduplicate keys.
+					slog.Warn("Could not read another process's Go runtime metrics; serving this scrape without them",
+						"sibling", src.role, "error", err)
+					return
+				}
+				fetched[i] = labelRuntimeFamilies(src.role, mfs)
+			})
+		}
+		mfs, err := e.registry.Gather()
+		wg.Wait()
+
+		gatherers := prometheus.Gatherers{prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) {
+			return mfs, err
+		})}
+		for _, f := range fetched {
+			gatherers = append(gatherers, prometheus.GathererFunc(func() ([]*dto.MetricFamily, error) {
+				return f, nil
+			}))
+		}
+		return gatherers.Gather()
+	})
+}
+
+// labelRuntimeFamilies keeps only the go_* families in mfs and sets
+// RoleLabel=role on every metric in them, replacing any role already there.
+// mfs is freshly decoded and owned by the caller, so it is modified in place.
+func labelRuntimeFamilies(role string, mfs []*dto.MetricFamily) []*dto.MetricFamily {
+	out := mfs[:0]
+	for _, mf := range mfs {
+		if !strings.HasPrefix(mf.GetName(), "go_") {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := slices.DeleteFunc(m.Label, func(lp *dto.LabelPair) bool {
+				return lp.GetName() == RoleLabel
+			})
+			labels = append(labels, &dto.LabelPair{Name: new(RoleLabel), Value: new(role)})
+			slices.SortFunc(labels, func(a, b *dto.LabelPair) int {
+				return strings.Compare(a.GetName(), b.GetName())
+			})
+			m.Label = labels
+		}
+		out = append(out, mf)
+	}
+	return out
+}
 
 // Handler returns an http.Handler that serves the exporter's metrics in the
 // Prometheus text/OpenMetrics exposition format. Mount it at /metrics.
 func (e *Exporter) Handler() http.Handler {
-	return promhttp.HandlerFor(e.registry, promhttp.HandlerOpts{
+	return promhttp.HandlerFor(e.Gatherer(), promhttp.HandlerOpts{
 		ErrorHandling:     promhttp.ContinueOnError,
 		EnableOpenMetrics: true,
 	})

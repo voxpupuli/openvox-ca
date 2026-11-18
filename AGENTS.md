@@ -383,6 +383,14 @@ Two guards back it up, and neither is complete on its own:
   forge a second entry") pins the escaping behaviour itself, so a stdlib
   regression fails CI.
 
+The server installs its default logger in one place, `setupLogger`, which
+wraps the handler with `.With(metrics.RoleLabel, role)`, so every record names
+the process that wrote it (`docs/configuration.md#log-output`, which operators
+filter on). The signer's stderr fallback in `openSignerLog` applies the same
+`.With` itself. A new place that installs a logger, or a new offline subcommand
+that logs into the server's logfile, passes a role too: add it to the role table
+in that docs section and to `everyRole` in `cmd/openvox-ca/logrole_test.go`.
+
 Output that is operator-facing but not `slog` — such as
 `internal/storage/migrate.go`'s `Logf`, which the CLI writes straight to stderr
 — gets no escaping from anything. Format values that have not passed

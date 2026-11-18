@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -66,11 +67,11 @@ import (
 // arrived with this change untested: it is the wiring that makes every
 // operator-facing line the memory budget emits reach the configured
 // destination, so a mis-wiring here would silently take the diagnostics with
-// it. runSignerMode keeps its own variant deliberately -- it degrades to stderr
+// it. openSignerLog is its variant, deliberately -- it degrades to stderr
 // where these two return the error, because a signer that cannot open its log
 // should still come up holding the CA key.
-func openRoleLog(cfg *serverConfig) (func(), error) {
-	logFile, err := setupLogger(cfg)
+func openRoleLog(cfg *serverConfig, role string) (func(), error) {
+	logFile, err := setupLogger(cfg, role)
 	if err != nil {
 		return func() {}, err
 	}
@@ -81,7 +82,7 @@ func openRoleLog(cfg *serverConfig) (func(), error) {
 }
 
 // closeRoleLog returns the deferred closer for a role's log file. Shared by
-// openRoleLog and runSignerMode: the setup differs between them deliberately
+// openRoleLog and openSignerLog: the setup differs between them deliberately
 // (the signer degrades to stderr where the other two return the error), but
 // this half is the same work in all three, and leaving it duplicated meant only
 // openRoleLog's copy was covered while the signer's could drift unguarded.
@@ -101,16 +102,53 @@ func closeRoleLog(logFile *os.File) func() {
 // spec can read that branch back; it is os.Stderr everywhere else.
 var logCloseErrOut io.Writer = os.Stderr
 
-// setupLogger creates and sets the default slog logger based on config.
-// Returns the log file (if any) so the caller can close it on shutdown,
-// ensuring final log entries are flushed. Returns nil when logging to stderr.
 // levelTrace is the level -v -v selects: below slog.LevelDebug, for the
 // call-by-call detail that would drown a Debug run. Named here so the flag
 // help, the switch below and the spec that pins the mapping all mean the same
 // number.
 const levelTrace = slog.Level(-8)
 
-func setupLogger(cfg *serverConfig) (*os.File, error) {
+// The roles a process reports itself as, on every log record and on its
+// go_* and process_* series (metrics.RoleLabel). The first three are the
+// default process tree; roleSingleProcess is --single-process, where one process
+// both holds the key and serves the API, so neither child's name describes it.
+// The offline subcommands that log report their own command name instead.
+const (
+	roleLauncher      = "launcher"
+	roleSigner        = "signer"
+	roleFrontend      = "frontend"
+	roleSingleProcess = "single-process"
+)
+
+// processRole names the role this server process is running as, from the
+// OPENVOX_CA_ROLE the launcher handed it and --single-process. envRole has
+// already been checked against the three values the dispatch accepts; an
+// unset one is the process the operator started, which is the launcher unless
+// it was told to do everything itself.
+func processRole(envRole string, singleProcess bool) string {
+	switch {
+	case envRole != "":
+		return envRole
+	case singleProcess:
+		return roleSingleProcess
+	default:
+		return roleLauncher
+	}
+}
+
+// setupLogger creates and sets the default slog logger based on config.
+// Returns the log file (if any) so the caller can close it on shutdown,
+// ensuring final log entries are flushed. Returns nil when logging to stderr.
+//
+// Every record carries role, naming the process that wrote it. The launcher and
+// both children share one stderr, and usually one logfile, so without it a
+// signer line and a frontend line are indistinguishable. The key is
+// metrics.RoleLabel, the label the same process's go_* and process_* series
+// carry, so a log line and a series about one process are filtered alike. It is
+// "role" rather than "process" because the launcher already uses process= for
+// the child a message is about, which on the launcher's own lines is a
+// different process from the one writing them.
+func setupLogger(cfg *serverConfig, role string) (*os.File, error) {
 	var logLevel slog.Level
 	switch cfg.Verbosity {
 	case 0:
@@ -128,11 +166,11 @@ func setupLogger(cfg *serverConfig) (*os.File, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to open log file %s: %w", cfg.LogFile, err)
 		}
-		slog.SetDefault(slog.New(slog.NewJSONHandler(f, opts)))
+		slog.SetDefault(slog.New(slog.NewJSONHandler(f, opts)).With(metrics.RoleLabel, role))
 		return f, nil
 	}
 
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, opts)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, opts)).With(metrics.RoleLabel, role))
 	return nil, nil
 }
 
@@ -162,8 +200,8 @@ var startDaemonChild = func(c *exec.Cmd) error { return c.Start() }
 // not use this: its logger setup degrades to stderr when the logfile cannot be
 // opened, which is a difference AGENTS.md records on purpose, so it keeps its
 // own sequence and its own copy of the call.
-func openRoleLogAndReport(cfg *serverConfig, warnings []storage.KeyPermWarning) (func(), error) {
-	closeLog, err := openRoleLog(cfg)
+func openRoleLogAndReport(cfg *serverConfig, role string, warnings []storage.KeyPermWarning) (func(), error) {
+	closeLog, err := openRoleLog(cfg, role)
 	if err != nil {
 		return nil, err
 	}
@@ -616,6 +654,40 @@ func ocspURLWithoutResponderNotice(cfg *serverConfig) string {
 	return "ocsp_url is set but enable_ocsp is not, so issued certificates advertise an OCSP responder " +
 		"this server does not serve; set enable_ocsp to serve /ocsp, or ignore this if ocsp_url names a " +
 		"responder elsewhere"
+}
+
+// addSiblingTelemetry has the frontend's exporter describe the launcher and the
+// signer too, so that go_* and process_* cover the whole process tree rather
+// than the one process that serves /metrics (#305). The siblings' process_*
+// series come from /proc, at the PIDs the launcher handed over; the signer's
+// go_* series come over its RPC, from rs.
+//
+// A PID the launcher did not set is the frontend started by hand, which has no
+// siblings' /proc entries to read and says so only at debug; it still reports
+// the signer's go_* series, which do not depend on the PIDs. One that is set
+// but unusable can only be a launcher bug or an operator's own environment, and
+// is reported.
+func addSiblingTelemetry(e *metrics.Exporter, getenv func(string) string, rs *signer.RemoteSigner) {
+	for _, sib := range []struct{ role, env string }{
+		{roleLauncher, launcherPIDEnv},
+		{roleSigner, signerPIDEnv},
+	} {
+		raw := getenv(sib.env)
+		if raw == "" {
+			slog.Debug("No PID for a sibling process; its process metrics are not exported", "sibling", sib.role)
+			continue
+		}
+		pid, err := strconv.Atoi(raw)
+		if err != nil || pid <= 0 {
+			slog.Warn("Ignoring a sibling process's PID that is not a positive integer; its process metrics are not exported",
+				"sibling", sib.role, "variable", sib.env, "value", raw)
+			continue
+		}
+		e.AddProcess(sib.role, pid)
+	}
+	if rs != nil {
+		e.AddRuntime(roleSigner, rs)
+	}
 }
 
 // metricsOptions maps cfg to the CA collector's options. It is a function of
@@ -1214,7 +1286,7 @@ func newRootCmd() *cobra.Command {
 			// budget was divided could never appear, and its warnings bypassed
 			// logfile entirely.
 			if role == "" {
-				closeLog, err := openRoleLogAndReport(cfg, keyPermWarnings)
+				closeLog, err := openRoleLogAndReport(cfg, processRole(role, singleProcess), keyPermWarnings)
 				if err != nil {
 					return err
 				}
@@ -1239,7 +1311,7 @@ func newRootCmd() *cobra.Command {
 			// --- Logging setup, and the report that has to follow it --- (the
 			// frontend's; single-process mode configured its own above)
 			if role == "frontend" {
-				closeLog, err := openRoleLogAndReport(cfg, keyPermWarnings)
+				closeLog, err := openRoleLogAndReport(cfg, roleFrontend, keyPermWarnings)
 				if err != nil {
 					return err
 				}
@@ -1509,7 +1581,10 @@ func newRootCmd() *cobra.Command {
 			// served on a separate listener (see metricsServer below).
 			var exporter *metrics.Exporter
 			if cfg.MetricsListen != "" {
-				exporter = metrics.NewExporter(myCA, metricsOptions(cfg)...)
+				exporter = metrics.NewExporter(myCA, processRole(role, singleProcess), metricsOptions(cfg)...)
+				if role == roleFrontend {
+					addSiblingTelemetry(exporter, os.Getenv, remoteSigner)
+				}
 				srv.OnCSRRateLimited = newCSRRateLimitedCounter(exporter.Registry()).Inc
 				if cfg.EnableOCSP {
 					srv.OnOCSPRateLimited = newOCSPRateLimitedCounter(exporter.Registry()).Inc
@@ -1927,6 +2002,25 @@ func ignoreReloadSignal() {
 	signal.Ignore(syscall.SIGHUP)
 }
 
+// openSignerLog installs the signer's logger and returns the function that
+// releases it, which is always non-nil. Unlike openRoleLog it never fails: a
+// signer that cannot open its logfile falls back to stderr, because it should
+// still come up holding the CA key. The fallback is labelled with the role too,
+// and is a function of its own so a spec can reach it.
+func openSignerLog(cfg *serverConfig) func() {
+	logFile, err := setupLogger(cfg, roleSigner)
+	if err != nil {
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr,
+			&slog.HandlerOptions{Level: slog.LevelInfo})).With(metrics.RoleLabel, roleSigner))
+		slog.Warn("Failed to open log file, using stderr", "error", err)
+		return func() {}
+	}
+	if logFile == nil {
+		return func() {}
+	}
+	return closeRoleLog(logFile)
+}
+
 // runSignerMode runs the isolated CA key signer process. It initializes the CA
 // (bootstrapping on first run), then serves signing requests over the inherited
 // socketpair fd. The signer has no network exposure; it only communicates with
@@ -1937,15 +2031,7 @@ func ignoreReloadSignal() {
 // can safely read the CA cert from disk once the handshake succeeds.
 func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string,
 	keyPermWarnings []storage.KeyPermWarning) error {
-	logFile, err := setupLogger(cfg)
-	if err != nil {
-		// Signer: fall back to stderr if log file fails.
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
-		slog.Warn("Failed to open log file, using stderr", "error", err)
-	}
-	if logFile != nil {
-		defer closeRoleLog(logFile)()
-	}
+	defer openSignerLog(cfg)()
 
 	// Say what the preflight found, now that a logger exists. The signer is the
 	// process that loads the CA private key, and it is startable on its own --
@@ -1978,8 +2064,9 @@ func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string,
 // process holding the CA key, so it is the process that has to write a new CA
 // out on first run. On every subsequent start the work is a load — the serial
 // index, the CRL cache and the certificate index are built and then never read
-// again, because the only RPC this process answers is Sign(digest), which needs
-// a crypto.Signer and nothing else. Left to the deferred Close in the caller,
+// again, because the only RPCs this process answers are Sign(digest), which
+// needs a crypto.Signer and nothing else, and Metrics, which reads only the Go
+// runtime's own statistics. Left to the deferred Close in the caller,
 // the backend handle and its connection pool stayed open for the process
 // lifetime for no reader.
 //

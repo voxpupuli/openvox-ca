@@ -49,7 +49,7 @@ re-asserting inventory integrity on a CA that will not start.
 | `--ca-key-file` | `""` | Keep the CA private key at this local path regardless of backend |
 | `--ca-key-provider` | `file` | CA private key custody: `file` (default) or `openbao` (OpenBao Transit key). See [OpenBao Transit-engine CA key](openbao-transit.md) for the full `--openbao-*` flag reference |
 | `--daemon` | `false` | Fork to background (not recommended in containers; incompatible with the `Type=notify` systemd unit — see [running under systemd](systemd.md)). The single-instance check runs *before* the fork, so starting a second instance against a `filesystem` or `sqlite` store fails here with a non-zero exit rather than in a child whose output is discarded |
-| `--logfile` | `""` | Write JSON logs to this file instead of stderr |
+| `--logfile` | `""` | Write JSON logs to this file instead of stderr. See [log output](#log-output) |
 | `--verbosity` / `-v` | `0` | Verbosity: `0`=Info, `1`=Debug, `2`=Trace |
 | `--version` | | Print the version and exit; includes commit metadata when built from a git checkout |
 
@@ -560,7 +560,7 @@ than refusing — a CA that will not start is worse than one agents distrust,
 since the CRL and the public endpoints keep working either way:
 
 ```text
-level=WARN msg="The TLS certificate just loaded cannot serve TLS to a client that verifies it; issue a serving certificate with `openvox-ca-ctl generate` and point tls_cert/tls_key at that" cert=/etc/puppetlabs/puppet/ssl/ca/ca_crt.pem subject="Puppet CA: puppet.example.com" problems="it has no subjectAltName, and clients match the hostname against SANs only; its keyUsage allows neither digitalSignature nor keyEncipherment"
+level=WARN msg="The TLS certificate just loaded cannot serve TLS to a client that verifies it; issue a serving certificate with `openvox-ca-ctl generate` and point tls_cert/tls_key at that" role=frontend cert=/etc/puppetlabs/puppet/ssl/ca/ca_crt.pem subject="Puppet CA: puppet.example.com" problems="it has no subjectAltName, and clients match the hostname against SANs only; its keyUsage allows neither digitalSignature nor keyEncipherment"
 ```
 
 A second, separate line covers a certificate that *can* serve TLS but should
@@ -568,7 +568,7 @@ not be the one doing it — a CA certificate has a signing key attached, and
 serving from it puts that key on the network-facing listener:
 
 ```text
-level=WARN msg="The TLS certificate just loaded is a CA certificate; serving from it puts a signing key on the network-facing listener. Issue an end-entity certificate with `openvox-ca-ctl generate` and point tls_cert/tls_key at that" cert=/etc/puppetlabs/puppet/ssl/ca/ca_crt.pem subject="Puppet CA: puppet.example.com"
+level=WARN msg="The TLS certificate just loaded is a CA certificate; serving from it puts a signing key on the network-facing listener. Issue an end-entity certificate with `openvox-ca-ctl generate` and point tls_cert/tls_key at that" role=frontend cert=/etc/puppetlabs/puppet/ssl/ca/ca_crt.pem subject="Puppet CA: puppet.example.com"
 ```
 
 Pointing `tls_cert` at `ca_crt.pem` produces both. Two ways of being rejected
@@ -2577,7 +2577,7 @@ are in the CA's log, at `WARN`:
 
 ```text
 level=WARN msg="Refusing CSR: requested subject alternative names are not allowed"
-  subject=web01 disallowed="[DNS:puppet.example.com]" disallowed_count=1
+  role=frontend subject=web01 disallowed="[DNS:puppet.example.com]" disallowed_count=1
   setting=allow_subject_alt_names
 ```
 
@@ -2790,7 +2790,12 @@ is the one an operator can outgrow: its startup peak is fleet-proportional at
 roughly 420 bytes per certificate, and **raising the container limit does not
 reach it**. The share also has to carry the Go runtime's own footprint, a few
 MiB before any inventory, so the usable headroom in the 24MiB default is nearer
-16MiB: raise `memory_reserve_signer` beyond roughly 40,000 certificates.
+16MiB: raise `memory_reserve_signer` beyond roughly 40,000 certificates. To
+see how close the signer runs to its share, compare
+`go_memstats_heap_inuse_bytes{role="signer"}` and
+`process_resident_memory_bytes{role="signer"}` with
+`go_gc_gomemlimit_bytes{role="signer"}`; see
+[one series per process](metrics.md#one-series-per-process).
 
 `memory_reserve_launcher` and `memory_reserve_signer` take an integer with an
 optional IEC suffix, with or without the trailing `B`. Leaving either empty, or
@@ -2836,6 +2841,56 @@ start, not a division that did not happen.
 
 `--single-process` divides nothing either, because there is no tree to divide;
 those installs should set `GOMEMLIMIT` in the ordinary per-process way.
+
+## Log output
+
+Logging goes to stderr as logfmt, or as JSON lines to `logfile` when it is set.
+In the default deployment three processes write to that one destination: the
+launcher, the isolated signer and the frontend (see
+[CA key security](ca-key-security.md#process-isolation)). Every record carries
+a `role` attribute naming the process that wrote it:
+
+| `role` | Process |
+| --- | --- |
+| `launcher` | the supervisor the operator or service manager started |
+| `signer` | the isolated child that holds the CA key |
+| `frontend` | the child that serves the API |
+| `single-process` | the one process `--single-process` runs instead of all three |
+| `generate`, `rebuild-inventory-hmac` | those offline commands, whose audit records go to the server's `logfile` when it exists |
+
+```text
+time=2026-11-17T10:00:00.000Z level=INFO msg="Signer process ready" role=signer pid=4122
+```
+
+```json
+{"time":"2026-11-17T10:00:00.000Z","level":"INFO","msg":"Signer process ready","role":"signer","pid":4122}
+```
+
+So `jq 'select(.role=="signer")'` over a `logfile`, or a Loki `| logfmt | role="signer"`
+over a container's stderr, picks out one process. The `go_*` and `process_*`
+series in the [metrics](metrics.md#standard-go--web-application-metrics) carry
+the same label with the same values, so a log line and a series about one
+process filter alike.
+
+`role` is a different attribute from the `process` some launcher messages carry.
+`process` names the child the message is *about*: the launcher's
+`msg="CA child process exited unexpectedly" role=launcher process=frontend` is
+the launcher reporting the frontend's exit.
+
+Output that does not go through the logger carries no `role`:
+
+- A Go runtime panic or fatal error, which writes its stack trace straight to
+  stderr. The stack trace names the functions, which usually identifies the
+  process.
+- Anything written before a process has configured its logger, such as the
+  `--daemon` parent's warning before it forks.
+- The few lines a process writes straight to stderr after that: the `error:`
+  line a process prints when it exits on an error, and a failure to close the
+  logfile at shutdown. When a child exits, the launcher's own
+  `msg="CA child process exited unexpectedly" role=launcher process=...` line
+  names it.
+- Everything `openvox-ca-ctl` logs. It is a separate program, not one of the
+  server's processes, and its records have no `role`.
 
 ## Graceful shutdown
 

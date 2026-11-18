@@ -96,7 +96,7 @@ var _ = Describe("setupLogger handler selection", func() {
 
 	It("writes JSON to the log file when one is configured", func() {
 		path := filepath.Join(GinkgoT().TempDir(), "ca.log")
-		f, err := setupLogger(&serverConfig{LogFile: path})
+		f, err := setupLogger(&serverConfig{LogFile: path}, roleFrontend)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f).NotTo(BeNil())
 		DeferCleanup(func() { Expect(f.Close()).To(Succeed()) })
@@ -121,7 +121,7 @@ var _ = Describe("setupLogger handler selection", func() {
 		origStderr := os.Stderr
 		defer func() { os.Stderr = origStderr }()
 		os.Stderr = w
-		f, err := setupLogger(&serverConfig{})
+		f, err := setupLogger(&serverConfig{}, roleFrontend)
 		os.Stderr = origStderr
 		Expect(err).NotTo(HaveOccurred())
 		Expect(f).To(BeNil(), "nothing to close when logging to stderr")
@@ -142,7 +142,7 @@ var _ = Describe("setupLogger handler selection", func() {
 	// Debug and Trace arms would break -v with every spec green.
 	DescribeTable("maps verbosity to a level",
 		func(verbosity int, enabled, notEnabled []slog.Level) {
-			_, err := setupLogger(&serverConfig{Verbosity: verbosity})
+			_, err := setupLogger(&serverConfig{Verbosity: verbosity}, roleFrontend)
 			Expect(err).NotTo(HaveOccurred())
 			for _, lvl := range enabled {
 				Expect(slog.Default().Enabled(context.Background(), lvl)).To(BeTrue(),
@@ -233,7 +233,7 @@ var _ = Describe("setupLogger handler selection", func() {
 			func(emit func(), jsonTail string) {
 				By("the JSON handler, which a configured log file selects")
 				path := filepath.Join(GinkgoT().TempDir(), "ca.log")
-				f, err := setupLogger(&serverConfig{LogFile: path})
+				f, err := setupLogger(&serverConfig{LogFile: path}, roleFrontend)
 				Expect(err).NotTo(HaveOccurred())
 				DeferCleanup(func() { _ = f.Close() })
 				Expect(slog.Default().Handler()).To(BeAssignableToTypeOf(&slog.JSONHandler{}))
@@ -253,7 +253,7 @@ var _ = Describe("setupLogger handler selection", func() {
 				// this pipe, the run's own diagnostics would vanish into it.
 				defer func() { os.Stderr = origStderr }()
 				os.Stderr = w
-				stderrFile, err := setupLogger(&serverConfig{})
+				stderrFile, err := setupLogger(&serverConfig{}, roleFrontend)
 				os.Stderr = origStderr
 				Expect(err).NotTo(HaveOccurred())
 				Expect(stderrFile).To(BeNil())
@@ -316,7 +316,7 @@ var _ = Describe("setupLogger handler selection", func() {
 		// falls back to stderr — so what is pinned here is the contract they
 		// both depend on: an error that names the path, and no file handle.
 		missing := filepath.Join(GinkgoT().TempDir(), "no-such-dir", "ca.log")
-		f, err := setupLogger(&serverConfig{LogFile: missing})
+		f, err := setupLogger(&serverConfig{LogFile: missing}, roleFrontend)
 		Expect(err).To(MatchError(ContainSubstring("failed to open log file")))
 		Expect(err).To(MatchError(ContainSubstring(missing)))
 		Expect(f).To(BeNil())
