@@ -74,18 +74,6 @@ var _ = Describe("chartValuesFiles", func() {
 		Expect(names).To(ContainElement(chartFloorFixture))
 	})
 
-	It("holds every fixture to the kubeVersion floor as well as the newest schemas", func() {
-		// The chart README says every value works at the floor; this is
-		// what keeps that checked rather than asserted.
-		files, err := chartValuesFiles()
-		Expect(err).NotTo(HaveOccurred())
-		Expect(files).NotTo(BeEmpty())
-		for _, f := range files {
-			name := chartFixtureName(f)
-			Expect(kubeconformTargets(name)).To(ConsistOf(kubeconformVersion, kubeconformFloorVersion), name)
-		}
-	})
-
 	// The repository's own fixtures are all .yaml, so without these two the
 	// second glob pattern and the empty-set guard are never executed by the
 	// suite: a later edit could drop either and every test would still pass,

@@ -4562,16 +4562,6 @@ const kubeconformFloorVersion = "1.34.0"
 // for a stale local copy passing what CI fails.
 var kubeconformCacheDir = filepath.Join(".test-output", "kubeconform-cache")
 
-// kubeconformTargets is the Kubernetes versions chart:validate checks the
-// named fixture against: the newest schemas and the kubeVersion floor
-// Chart.yaml advertises, for every fixture, because the chart README says
-// every value works at the floor. The name is taken so that a fixture that
-// genuinely needs more than the floor has one place to be exempted, with its
-// reason, where a spec will notice.
-func kubeconformTargets(string) []string {
-	return []string{kubeconformVersion, kubeconformFloorVersion}
-}
-
 // chartFloorFixture is the fixture that stands in for the chart's defaults,
 // which chart:validate refuses to run without: the defaults are the one render
 // every install shares. Named here rather than inline so that renaming it
@@ -5179,7 +5169,9 @@ func (Chart) Validate() error {
 		}
 		rendered = append(rendered, path)
 
-		targets := kubeconformTargets(name)
+		// Every fixture is held to the kubeVersion floor as well as the newest
+		// schemas: the chart README says every value works at the floor.
+		targets := []string{kubeconformVersion, kubeconformFloorVersion}
 		if name == chartFloorFixture {
 			floorChecked = true
 		}
