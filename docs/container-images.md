@@ -161,16 +161,16 @@ not work, and needs another route:
   can read the CA's private keys through the server's `/proc/1/root`, so pin the
   image by digest and give it the trust you give the CA image itself.
 - **Healthchecks.** A Docker or Compose healthcheck that runs `curl` or `wget`
-  cannot run here. Kubernetes `httpGet` probes are unaffected, because the
-  kubelet makes the request from outside the container.
+  cannot run here. The image's own [health check](#health-check), `openvox-ca
+  healthcheck`, needs neither, and Kubernetes `httpGet` probes are unaffected,
+  because the kubelet makes the request from outside the container.
 - **A policy-based autosign executable** written as a script needs its
   interpreter, which the image does not have. Use a statically linked
   executable, or another variant.
 
 ### Health check
 
-The CentOS and Alpine images declare a `HEALTHCHECK` that runs `openvox-ca
-healthcheck`, so
+Every image declares a `HEALTHCHECK` that runs `openvox-ca healthcheck`, so
 `docker ps` and `podman ps` report the container's health without any
 configuration. It requests `/healthz/ready` every 30 seconds and marks the
 container unhealthy after three failures in a row. The first two minutes are a

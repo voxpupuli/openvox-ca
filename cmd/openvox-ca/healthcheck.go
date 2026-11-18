@@ -48,9 +48,9 @@ var healthProbePaths = map[string]string{
 const defaultHealthcheckTimeout = 3 * time.Second
 
 // newHealthcheckCmd builds the "healthcheck" subcommand, for a container
-// image's HEALTHCHECK. An image with no shell and no HTTP client, such as the planned
-// distroless flavour (#317), can run only what it already carries, so the
-// check is part of the server binary.
+// image's HEALTHCHECK. An image with no shell and no HTTP client, such as the
+// distroless one, can run only what it already carries, so the check is part
+// of the server binary.
 //
 // It reads the server's own configuration file and environment to find the
 // port, but it cannot see the flags the server was started with, so it does

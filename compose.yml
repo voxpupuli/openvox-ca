@@ -54,9 +54,9 @@ services:
     volumes:
       - ca-data:/data
     restart: unless-stopped
-    # No healthcheck here: the CentOS and Alpine images declare their own,
-    # `openvox-ca healthcheck`. Images released before it (v1.0.0-alpha1 and
-    # earlier) declare none. See "Health check" in docs/container-images.md.
+    # No healthcheck here: every image variant declares its own, `openvox-ca
+    # healthcheck`. Images released before it (v1.0.0-alpha1 and earlier)
+    # declare none. See "Health check" in docs/container-images.md.
 
 volumes:
   ca-data:
