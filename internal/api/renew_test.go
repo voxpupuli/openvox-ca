@@ -256,6 +256,15 @@ var _ = Describe("POST /renew/{subject}", func() {
 			mint("foreign-node", 2048, true, time.Now().Add(time.Hour))
 			return "/renew/foreign-node", nil, "foreign-node"
 		}, http.StatusConflict, "not issued by this CA"),
+		Entry("a re-key onto a CSR key below policy", func() (string, []byte, string) {
+			issue("weak-csr-node")
+			key, err := rsa.GenerateKey(rand.Reader, 1024)
+			Expect(err).NotTo(HaveOccurred())
+			der, err := x509.CreateCertificateRequest(rand.Reader,
+				&x509.CertificateRequest{Subject: pkix.Name{CommonName: "weak-csr-node"}}, key)
+			Expect(err).NotTo(HaveOccurred())
+			return "/renew/weak-csr-node", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}), "weak-csr-node"
+		}, http.StatusUnprocessableEntity, "key does not meet policy"),
 		Entry("a stored key below policy", func() (string, []byte, string) {
 			mint("weak-node", 1024, false, time.Now().Add(time.Hour))
 			return "/renew/weak-node", nil, "weak-node"

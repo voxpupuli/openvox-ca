@@ -317,6 +317,20 @@ var _ = Describe("CA RenewStored", func() {
 			Expect(revoked(original.SerialNumber)).To(BeFalse())
 		})
 
+		It("refuses a CSR whose key is below policy, and issues nothing", func() {
+			original := issue("weak-rekey")
+			key, err := rsa.GenerateKey(rand.Reader, 1024)
+			Expect(err).NotTo(HaveOccurred())
+			der, err := x509.CreateCertificateRequest(rand.Reader,
+				&x509.CertificateRequest{Subject: pkix.Name{CommonName: "weak-rekey"}}, key)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = myCA.RenewStored(ctx, "weak-rekey", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+			Expect(err).To(MatchError(ca.ErrKeyPolicy))
+			Expect(stored("weak-rekey").SerialNumber).To(Equal(original.SerialNumber))
+			Expect(revoked(original.SerialNumber)).To(BeFalse())
+		})
+
 		It("refuses a CSR for another name", func() {
 			issue("csr-owner")
 			csrPEM, _ := buildCSR("someone-else")
