@@ -276,7 +276,8 @@ sed 's|chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet /rootfs/data
 # 7-17. The image check. Build the mutant with the label CI gives it, then run
 #    the check against it:
 #    docker build --label org.opencontainers.image.version=edge-distroless \
-#        -f /tmp/mut -t mut . && PUSH=false LOADED=mut SUFFIX=-distroless bash /tmp/check.sh
+#        -f /tmp/mut -t mut . && PUSH=false LOADED=mut SUFFIX=-distroless \
+#        SUFFIXES='-alpine -distroless' bash /tmp/check.sh
 # 7. Copy per directory, which the builder-stage guard cannot see.
 #    -- expect "/data is owned by 0:0, but the image runs as 65532:65532"
 sed 's|^COPY --from=builder /rootfs/ /$|COPY --from=builder /rootfs/etc/puppetlabs /etc/puppetlabs\nCOPY --from=builder /rootfs/data /data|' \

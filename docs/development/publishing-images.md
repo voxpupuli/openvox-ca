@@ -16,7 +16,9 @@ Container Registry (GHCR).
 | Distroless | [`Dockerfile.distroless`](../../Dockerfile.distroless) | `gcr.io/distroless/static-debian13:nonroot` | `-distroless` |
 
 Every variant is built for `linux/amd64` and `linux/arm64` and published as a
-single multi-arch manifest per variant, as `ghcr.io/voxpupuli/openvox-ca`.
+single multi-arch manifest per variant, as `ghcr.io/voxpupuli/openvox-ca`. The
+variant list is written once, in the workflow's setup job, with each variant's
+Dockerfile and tag suffix; the build and merge jobs both read it.
 
 The Alpine and distroless bases are pinned by digest and Renovate refreshes the
 digests. For distroless that is the digest of its `nonroot` tag, the only kind
