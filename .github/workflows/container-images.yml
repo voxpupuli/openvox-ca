@@ -1,14 +1,14 @@
 name: Container images
 
-# Builds the CentOS Stream and Alpine runtime images for linux/amd64 and
-# linux/arm64 and publishes multi-arch manifests to the GitHub Container
-# Registry (GHCR).
+# Builds the CentOS Stream, Alpine and distroless runtime images for
+# linux/amd64 and linux/arm64 and publishes multi-arch manifests to the GitHub
+# Container Registry (GHCR).
 #
 # Triggers:
 #   * Push to main            -> build + push the rolling "edge" (and "main") tags.
 #   * Release tags (v*)        -> build + push versioned + latest tags.
 #   * Manual (workflow_dispatch) -> build, push only if the "push" input is set.
-#   * Pull requests, always    -> build both variants on both architectures as a
+#   * Pull requests, always    -> build every variant on both architectures as a
 #     validation check. Same-repo PRs additionally push a throwaway pr-<n> tag;
 #     fork PRs build only and discard the result (their GITHUB_TOKEN is
 #     read-only and cannot write packages).
@@ -61,7 +61,34 @@ jobs:
     outputs:
       push: ${{ steps.cfg.outputs.push }}
       image: ${{ steps.cfg.outputs.image }}
+      variants: ${{ steps.variants.outputs.variants }}
+      suffixes: ${{ steps.variants.outputs.suffixes }}
     steps:
+      # The one list of published variants. The build and merge matrices both
+      # read it, so a variant's Dockerfile and tag suffix are written down once:
+      # the suffix names the tags in the merge job and the version label in the
+      # build job, and the image check compares the two. Every suffix is
+      # "-<name>" except that of the single unsuffixed variant, which takes the
+      # plain tags and latest.
+      - name: Define the image variants
+        id: variants
+        run: |
+          variants='[
+            {"name": "centos",     "dockerfile": "Dockerfile",            "suffix": ""},
+            {"name": "alpine",     "dockerfile": "Dockerfile.alpine",     "suffix": "-alpine"},
+            {"name": "distroless", "dockerfile": "Dockerfile.distroless", "suffix": "-distroless"}
+          ]'
+          if ! jq -e '([.[] | select(.suffix == "")] | length == 1)
+                and all(.[]; .suffix == "" or .suffix == "-" + .name)
+                and (map(.name) | length == (unique | length))' <<< "$variants" > /dev/null; then
+            echo "::error::the variant list needs unique names, exactly one unsuffixed variant, and every other suffix \"-<name>\""
+            exit 1
+          fi
+          {
+            echo "variants=$(jq -c . <<< "$variants")"
+            echo "suffixes=$(jq -r '[.[].suffix | select(. != "")] | join(" ")' <<< "$variants")"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Determine push policy and image name
         id: cfg
         env:
@@ -111,7 +138,7 @@ jobs:
   # Each image is pushed by digest (no tag); the merge job assembles the
   # per-variant multi-arch manifest from the collected digests.
   build:
-    name: Build ${{ matrix.variant }} (${{ matrix.arch }})
+    name: Build ${{ matrix.variant.name }} (${{ matrix.arch }})
     needs: [setup, verify-tag]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -122,13 +149,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [centos, alpine]
+        # From the setup job's variant list. The variant's tag suffix also
+        # suffixes the version label here, which is otherwise identical across
+        # variants and leaves only the tag to say which image you have.
+        variant: ${{ fromJSON(needs.setup.outputs.variants) }}
         platform: [linux/amd64, linux/arm64]
         include:
-          - variant: centos
-            dockerfile: Dockerfile
-          - variant: alpine
-            dockerfile: Dockerfile.alpine
           - platform: linux/amd64
             arch: amd64
             runner: ubuntu-latest
@@ -156,6 +182,9 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ needs.setup.outputs.image }}
+          flavor: |
+            latest=false
+            suffix=${{ matrix.variant.suffix }}
 
       # Push path: build and push by digest for later manifest assembly.
       - name: Build and push by digest
@@ -164,7 +193,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: ${{ matrix.variant.dockerfile }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           # Provenance attestations create extra manifests that confuse
@@ -173,20 +202,133 @@ jobs:
           outputs: type=image,name=${{ needs.setup.outputs.image }},push-by-digest=true,name-canonical=true,push=true
 
       # Validation path (fork PRs / dispatch without push): build for the
-      # runner's native arch, load it, and smoke-test the entrypoint.
+      # runner's native arch and load it for the image check below, which
+      # also smoke-tests the entrypoint.
       - name: Build and load for smoke test
         if: needs.setup.outputs.push != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: ${{ matrix.variant.dockerfile }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           load: true
-          tags: openvox-ca:smoke-${{ matrix.variant }}-${{ matrix.arch }}
-      - name: Smoke test entrypoint
-        if: needs.setup.outputs.push != 'true'
-        run: docker run --rm openvox-ca:smoke-${{ matrix.variant }}-${{ matrix.arch }} --help
+          tags: openvox-ca:smoke-${{ matrix.variant.name }}-${{ matrix.arch }}
+
+      # Who the image runs as, and whether it can write where the CA writes.
+      # Each Dockerfile asserts this as it builds, but Dockerfile.distroless can
+      # only do so in its builder stage, before the COPY into the runtime
+      # stage has had the chance to change an owner. So this reads the image
+      # itself: USER must be a numeric uid:gid other than root, and the
+      # image's default --cadir and /data must be owned by exactly that. The
+      # default --cadir is read out of the image's CMD rather than repeated
+      # here, so moving it there without moving the directory fails. The
+      # version label must carry the variant's tag suffix. Then it checks
+      # that openvox-ca starts at all (a cgo build has no libc to load in
+      # distroless, and builds without complaint), has openvox-ca-ctl
+      # initialise a CA in each of those directories as the image's own user
+      # (an owner in a listing is not a write), and starts the server through
+      # the image's entrypoint, which bootstraps a CA in the default cadir and
+      # must answer /healthz/ready. On
+      # the push path nothing was loaded, so the image is pulled by the digest
+      # that was pushed, and this is the only step on that path that runs it.
+      # CI only takes the passing branch; the mutations that exercise the
+      # others are in docs/development/testing.md, "Container identity guards".
+      - name: Check the image's user and writable directories
+        env:
+          PUSH: ${{ needs.setup.outputs.push }}
+          PUSHED: ${{ needs.setup.outputs.image }}@${{ steps.push.outputs.digest }}
+          LOADED: openvox-ca:smoke-${{ matrix.variant.name }}-${{ matrix.arch }}
+          SUFFIX: ${{ matrix.variant.suffix }}
+          SUFFIXES: ${{ needs.setup.outputs.suffixes }}
+        run: |
+          set -euo pipefail
+          if [ "$PUSH" = true ]; then
+            ref="$PUSHED"
+            docker pull -q "$ref" > /dev/null
+          else
+            ref="$LOADED"
+          fi
+          user="$(docker image inspect --format '{{.Config.User}}' "$ref")"
+          if ! [[ "$user" =~ ^([0-9]+):([0-9]+)$ ]]; then
+            echo "::error::USER is '$user'; it must be a numeric uid:gid"
+            exit 1
+          fi
+          uid="${BASH_REMATCH[1]}"
+          gid="${BASH_REMATCH[2]}"
+          if [ "$uid" -eq 0 ]; then
+            echo "::error::USER is '$user'; the image must not run as root"
+            exit 1
+          fi
+          cmd="$(docker image inspect --format '{{json .Config.Cmd}}' "$ref")"
+          cadir="$(jq -r '(. // [])[] | select(startswith("--cadir=")) | sub("^--cadir="; "")' <<< "$cmd")"
+          if ! [[ "$cadir" =~ ^/[^[:space:]]+$ ]]; then
+            echo "::error::CMD is $cmd; it must name the default cadir once, as --cadir=<absolute path>"
+            exit 1
+          fi
+          version="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$ref")"
+          if [ -z "$version" ] || [[ "$version" != *"$SUFFIX" ]]; then
+            echo "::error::the version label is '$version'; it must end with this variant's tag suffix '$SUFFIX'"
+            exit 1
+          fi
+          # The unsuffixed variant passes the test above with any label, so it
+          # must also not carry another variant's suffix.
+          if [ -z "$SUFFIX" ]; then
+            for other in $SUFFIXES; do
+              if [[ "$version" == *"$other" ]]; then
+                echo "::error::the version label is '$version', another variant's; this variant's tags carry no suffix"
+                exit 1
+              fi
+            done
+          fi
+          sid=""
+          cid="$(docker create "$ref")"
+          trap 'docker rm -f "$cid" ${sid:+"$sid"} > /dev/null' EXIT
+          listing="$(docker export "$cid" | tar --numeric-owner -tvf -)"
+          for dir in "${cadir#/}/" data/; do
+            owner="$(awk -v p="$dir" '$6 == p { print $2 }' <<< "$listing")"
+            if [ -z "$owner" ]; then
+              echo "::error::/${dir%/} is not in the image"
+              exit 1
+            fi
+            if [ "$owner" != "$uid/$gid" ]; then
+              echo "::error::/${dir%/} is owned by ${owner/\//:}, but the image runs as $uid:$gid"
+              exit 1
+            fi
+            echo "ok: /${dir%/} is owned by $uid:$gid"
+          done
+          if ! docker run --rm "$ref" --version; then
+            echo "::error::openvox-ca does not run in this image"
+            exit 1
+          fi
+          for dir in "$cadir" /data; do
+            if ! docker run --rm --entrypoint /usr/local/bin/openvox-ca-ctl "$ref" setup --cadir "$dir"; then
+              echo "::error::openvox-ca-ctl setup could not initialise a CA in $dir as $uid:$gid"
+              exit 1
+            fi
+            echo "ok: a CA was initialised in $dir as $uid:$gid"
+          done
+          sid="$(docker run -d -p 127.0.0.1::8140 "$ref" --cadir="$cadir" --hostname=localhost \
+            --tls-cert="$cadir/ca_crt.pem" --tls-key="$cadir/ca_key.pem")"
+          ready=""
+          for _ in $(seq 1 30); do
+            port="$(docker port "$sid" 8140/tcp 2> /dev/null | head -n 1)" || true
+            port="${port##*:}"
+            if [ -n "$port" ] && curl -skf "https://127.0.0.1:${port}/healthz/ready" > /dev/null 2>&1; then
+              ready=yes
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' "$sid")" != true ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$ready" ]; then
+            echo "::error::the server did not answer /healthz/ready: it exited, or 60 seconds passed"
+            docker logs "$sid" 2>&1 | tail -n 40
+            exit 1
+          fi
+          echo "ok: the server is ready on $cadir as $uid:$gid"
 
       - name: Export digest
         if: needs.setup.outputs.push == 'true'
@@ -199,17 +341,19 @@ jobs:
         if: needs.setup.outputs.push == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: digests-${{ matrix.variant }}-${{ matrix.arch }}
+          name: digests-${{ matrix.variant.name }}-${{ matrix.arch }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
       # -- Provenance and SBOM for this per-architecture image ---------------─
       # The per-arch images are the meaningful ones to catalogue: each has its
-      # own binary and its own base package set (CentOS Stream vs Alpine), so
+      # own binary and its own base package set (CentOS Stream, Alpine or
+      # distroless's Debian packages), so
       # scanning them here catalogues that variant's base-layer packages as well
       # as the Go modules. Which packages those are is whatever the image's own
-      # install line declares, so they are not listed here. The merged index
+      # install line declares, or for distroless the base image itself, so they
+      # are not listed here. The merged index
       # gets provenance only.
       #
       # Every step below is keyed off the same push output as the build: fork
@@ -279,7 +423,7 @@ jobs:
 
   # -- Merge per-architecture digests into one multi-arch manifest ------------─
   merge:
-    name: Publish ${{ matrix.variant }} manifest
+    name: Publish ${{ matrix.variant.name }} manifest
     needs: [setup, build]
     if: needs.setup.outputs.push == 'true'
     runs-on: ubuntu-latest
@@ -290,22 +434,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # CentOS Stream is the default image: unsuffixed tags + latest.
-          - variant: centos
-            flavor: |
-              latest=auto
-          # Alpine images carry an -alpine suffix, including latest-alpine.
-          - variant: alpine
-            flavor: |
-              latest=auto
-              suffix=-alpine,onlatest=true
+        # From the setup job's variant list. The unsuffixed variant (CentOS
+        # Stream) takes the plain tags and latest; every other variant carries
+        # its suffix on every tag, latest included.
+        variant: ${{ fromJSON(needs.setup.outputs.variants) }}
     steps:
       - name: Download digests
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: /tmp/digests
-          pattern: digests-${{ matrix.variant }}-*
+          pattern: digests-${{ matrix.variant.name }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -323,7 +461,9 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ needs.setup.outputs.image }}
-          flavor: ${{ matrix.flavor }}
+          flavor: |
+            latest=auto
+            suffix=${{ matrix.variant.suffix }},onlatest=true
           tags: |
             type=edge
             type=semver,pattern={{version}}

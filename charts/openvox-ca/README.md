@@ -82,7 +82,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 | --- | --- | --- |
 | `image.registry` | `ghcr.io` | Registry hosting the image |
 | `image.repository` | `voxpupuli/openvox-ca` | Image repository |
-| `image.tag` | `""` | Empty resolves to `<appVersion>-alpine`. An explicit tag is used verbatim — this is how you select the CentOS Stream variant (`tag: "0.9.0"`) |
+| `image.tag` | `""` | Empty resolves to `<appVersion>-alpine`. An explicit tag is used verbatim — this is how you select the CentOS Stream variant (`tag: "0.9.0"`) or the distroless one (`tag: "0.9.0-distroless"`, whose image user is `65532`; `podSecurityContext` still decides the pod's) |
 | `image.digest` | `""` | `sha256:…` digest; takes precedence over `tag` |
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | |
@@ -116,7 +116,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `tls.existingSecret` | `""` | Secret holding the server certificate; sets `tls_cert`/`tls_key`. The server re-reads the keypair on `SIGHUP`, but nothing sends one, so a renewal needs a signal (`kubectl exec <pod> -- kill -HUP 1`) or a restart. Mutually exclusive with `config.serving_cert`, which the chart refuses at install time — see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) |
+| `tls.existingSecret` | `""` | Secret holding the server certificate; sets `tls_cert`/`tls_key`. The server re-reads the keypair on `SIGHUP`, but nothing sends one, so a renewal needs a signal (`kubectl exec <pod> -- kill -HUP 1`, or `kubectl debug --target` on the distroless image, which has no `kill`) or a restart. Mutually exclusive with `config.serving_cert`, which the chart refuses at install time — see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) |
 | `tls.certKey` / `tls.keyKey` | `tls.crt` / `tls.key` | Data keys within that Secret |
 | `tls.mountPath` | `/run/secrets/openvox-ca-tls` | |
 | `ca.existingSecret` | `""` | Secret holding the CA certificate and key; sets `ca_cert_file`/`ca_key_file`. Under a provider that holds the key (`config.ca_key_provider: openbao`) clear the latter with `config.ca_key_file: ""` |

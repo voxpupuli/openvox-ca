@@ -24,6 +24,9 @@ image:
   #   image:
   #     tag: "0.9.0"
   #
+  # The distroless variant is "0.9.0-distroless". Its own user is 65532:65532,
+  # but podSecurityContext below sets the uid the pod runs as either way.
+  #
   # An explicit tag is used exactly as given; the chart never appends a suffix
   # to it. Charts built from an unreleased tree (a -dev appVersion) fall back
   # to the rolling "edge-alpine" tag, which is what main publishes.
@@ -222,7 +225,8 @@ autosign:
 # Secret, and the running process keeps serving the old certificate until it is
 # signalled or restarted — while the probes speak to that same listener, so
 # readiness stays green until it expires and every agent fails at once. Act on
-# renewal: `kubectl exec <pod> -- kill -HUP 1` (PID 1 forwards it, no restart),
+# renewal: `kubectl exec <pod> -- kill -HUP 1` (PID 1 forwards it, no restart;
+# the distroless image has no `kill`, so use `kubectl debug --target` there),
 # `kubectl rollout restart`, a Reloader annotation on the pod template
 # (`reloader.stakater.com/auto: "true"` watches every mounted Secret and
 # ConfigMap and restarts the pod; ci/postgres-ha-values.yaml sets it under

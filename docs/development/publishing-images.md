@@ -6,25 +6,34 @@
 > [cutting a release](releasing.md).
 
 The [`Container images`](../../.github/workflows/container-images.yml) workflow
-builds the two runtime images and publishes multi-arch manifests to the GitHub
+builds the three runtime images and publishes multi-arch manifests to the GitHub
 Container Registry (GHCR).
 
 | Variant | Dockerfile | Base image | Tag suffix |
 | --- | --- | --- | --- |
 | CentOS Stream | [`Dockerfile`](../../Dockerfile) | `quay.io/centos/centos` | *(none)* |
 | Alpine | [`Dockerfile.alpine`](../../Dockerfile.alpine) | `alpine` | `-alpine` |
+| Distroless | [`Dockerfile.distroless`](../../Dockerfile.distroless) | `gcr.io/distroless/static-debian13:nonroot` | `-distroless` |
 
-Both variants are built for `linux/amd64` and `linux/arm64` and published as a
-single multi-arch manifest per variant, as `ghcr.io/voxpupuli/openvox-ca`.
+Every variant is built for `linux/amd64` and `linux/arm64` and published as a
+single multi-arch manifest per variant, as `ghcr.io/voxpupuli/openvox-ca`. The
+variant list is written once, in the workflow's setup job, with each variant's
+Dockerfile and tag suffix; the build and merge jobs both read it.
+
+The Alpine and distroless bases are pinned by digest and Renovate refreshes the
+digests. For distroless that is the digest of its `nonroot` tag, the only kind
+of update it can offer: the Debian release is part of the image's name, so
+moving to the next one (`static-debian14`) is a hand edit. CentOS Stream is not
+pinned, because quay.io does not keep superseded digests (see `renovate.json`).
 
 ## When images are built
 
 | Trigger | What happens |
 | --- | --- |
-| **Push to `main`** | Builds both variants on both architectures and pushes the rolling `edge` (and `main`) tags, plus their `-alpine` counterparts. `edge` always points at the latest default-branch build. |
-| **Release tag** (`git push` of a `v*` tag) | Builds both variants on both architectures and pushes the semver tags (`1.2.3`, `1.2`, and — for v1+ only — `1`), `latest`, and their `-alpine` counterparts. The major-only tag is suppressed for `v0.*` because a `0.x` major carries no compatibility promise. |
+| **Push to `main`** | Builds every variant on both architectures and pushes the rolling `edge` (and `main`) tags, plus their `-alpine` and `-distroless` counterparts. `edge` always points at the latest default-branch build. |
+| **Release tag** (`git push` of a `v*` tag) | Builds every variant on both architectures and pushes the semver tags (`1.2.3`, `1.2`, and — for v1+ only — `1`), `latest`, and their `-alpine` and `-distroless` counterparts. The major-only tag is suppressed for `v0.*` because a `0.x` major carries no compatibility promise. |
 | **Manual** (Actions → *Container images* → *Run workflow*) | Builds everything. Pushes only if you tick the **push** input; otherwise it builds and smoke-tests without publishing. |
-| **Pull request** | Always builds both variants on both architectures as a validation check. Same-repo PRs also push a throwaway `pr-<n>` tag; fork PRs build only and discard the result (their token cannot write packages). The *Container images success* job aggregates the run, and `main`'s ruleset requires it, so a PR whose image build fails cannot merge. On a same-repo PR that includes publishing and signing `pr-<n>`, so a GHCR or Sigstore outage blocks it too: re-run the failed jobs once the service is back. Within a day, that is; the digests `merge` reads expire after one, so later re-run all jobs or push again. If the outage will not wait, a maintainer can instead dispatch the workflow on the PR's branch with **push** unticked: that run builds and smoke-tests every leg, skips `merge`, and reports *Container images success* on the same head commit, without publishing or signing `pr-<n>`. |
+| **Pull request** | Always builds every variant on both architectures as a validation check. Same-repo PRs also push a throwaway `pr-<n>` tag; fork PRs build only and discard the result (their token cannot write packages). The *Container images success* job aggregates the run, and `main`'s ruleset requires it, so a PR whose image build fails cannot merge. On a same-repo PR that includes publishing and signing `pr-<n>`, so a GHCR or Sigstore outage blocks it too: re-run the failed jobs once the service is back. Within a day, that is; the digests `merge` reads expire after one, so later re-run all jobs or push again. If the outage will not wait, a maintainer can instead dispatch the workflow on the PR's branch with **push** unticked: that run builds and smoke-tests every leg, skips `merge`, and reports *Container images success* on the same head commit, without publishing or signing `pr-<n>`. |
 
 Architecture builds run on native GitHub-hosted runners — `ubuntu-latest`
 (amd64) and `ubuntu-24.04-arm` (arm64) — and the per-architecture digests are
@@ -41,15 +50,16 @@ diverge.
 
 | Where | What is attached | Attached to |
 | --- | --- | --- |
-| `build` (×4) | SLSA v1.0 provenance; SBOMs in SPDX-JSON and CycloneDX-JSON | The per-architecture digest |
-| `merge` (×2) | SLSA v1.0 provenance; a `cosign sign` signature, `--recursive` | The index digest — and, via `--recursive`, each child manifest |
+| `build` (×6) | SLSA v1.0 provenance; SBOMs in SPDX-JSON and CycloneDX-JSON | The per-architecture digest |
+| `merge` (×3) | SLSA v1.0 provenance; a `cosign sign` signature, `--recursive` | The index digest — and, via `--recursive`, each child manifest |
 
 The per-architecture images are the ones worth cataloguing: each has its own
 binary and its own base package set, so the SBOM records whichever CentOS
-Stream or Alpine packages that variant installs, as well as the Go modules.
-The packages are deliberately not enumerated here: each image's `dnf install` or
-`apk add` line is the authority, and naming a subset in prose guarantees this
-sentence is wrong the next time one of them changes.
+Stream, Alpine or Debian packages that variant carries, as well as the Go
+modules. The packages are deliberately not enumerated here: each image's
+`dnf install` or `apk add` line is the authority, or for distroless the base
+image itself, and naming a subset in prose guarantees this sentence is wrong
+the next time one of them changes.
 Syft reads the image back out of the registry by digest rather than scanning a
 local rebuild, so the document describes what was actually pushed. The merged
 index carries provenance only; an SBOM of an index would just be the union of

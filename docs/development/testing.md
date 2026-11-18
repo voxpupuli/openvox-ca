@@ -55,7 +55,7 @@ wall clock than the same run without it.
 ## Container / Compose topologies
 
 A test runtime image (`test/Dockerfile.run`) and `test/compose.yml` are provided for development and integration testing.
-That image is the *fixture* image, separate from the two published ones: it carries the packages the suites
+That image is the *fixture* image, separate from the published ones: it carries the packages the suites
 invoke rather than the ones `openvox-ca` needs to run. Its command contract is described under
 [Fixture image command contract](#fixture-image-command-contract).
 
@@ -188,11 +188,31 @@ gain, because its InnoDB deadlock retry means an append spec can pass by
 
 ## Container identity guards
 
-Every image asserts at build time who it runs as, and the two published images
+Every image asserts at build time who it runs as, and the published images
 additionally assert that the directories the CA writes are owned by that
 account. Both guards exist because `USER` is numeric and cannot reference the
 account it is supposed to name — the uid in `useradd` and the uid in `USER` are
 separate literals, and nothing else stops them drifting apart.
+
+`Dockerfile.distroless` is built differently, because its runtime stage has no
+shell to run an assertion in. Its uid is one build argument, `CA_UID`, which
+both `USER` and the `chown` take, so those two cannot drift. The ownership
+assertion runs in the builder stage instead, against the tree the runtime stage
+copies. That leaves a gap: `COPY` can change an owner on the way in. A
+per-directory `COPY` gives the directory it creates root ownership, even though
+the builder assertion has passed. So container-images.yml's *Check the image's
+user and writable directories* step reads every published image after it is
+built, whichever Dockerfile it comes from. `USER` must be a numeric, non-root
+`uid:gid`, and the default `--cadir` and `/data` must be owned by exactly that.
+The default `--cadir` is read out of the image's `CMD`, not repeated in the
+step, so moving it there without moving the directory fails too. The version
+label must end with the variant's tag suffix, and on the variant without one
+must not end with another variant's, so the label says which variant an image
+is. The step then runs `openvox-ca --version`, because a cgo build
+fails only when a base without libc tries to start it, and has
+`openvox-ca-ctl setup` initialise a CA in each of those directories as the
+image's user, because an owner in a listing is not a write. Last, it starts the
+server through the image's entrypoint and waits for `/healthz/ready`.
 
 CI only ever exercises the passing branch of these guards, so **whenever you
 edit one, re-verify by hand that it still fails.** A guard that has stopped
@@ -236,15 +256,76 @@ sed 's|^RUN expected=|RUN usermod -aG wheel puppet \&\& expected=|' \
     docker/puppet/Dockerfile > /tmp/mut && docker build -f /tmp/mut docker/puppet
 ```
 
+For `Dockerfile.distroless`, mutations 5 and 6 abort its build. Mutations 7 to
+17 build a bad image, and the image check must then reject it. To run that check
+by hand, take its `run:` script out of the workflow as the first command below
+does. Run it on Linux, because the parsing expects GNU tar's listing format:
+
+```bash
+yq -r ".jobs.build.steps[] | select(.name == \"Check the image's user and writable directories\") | .run" \
+    .github/workflows/container-images.yml > /tmp/check.sh
+
+# 5, 6. Ownership in the builder stage. Drop either argument of the chown.
+#    -- expect "/etc/puppetlabs/puppet/ssl/ca is owned by 0:0, not 65532:65532"
+sed 's|chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet /rootfs/data|chown -R "${CA_UID}:${CA_UID}" /rootfs/data|' \
+    Dockerfile.distroless > /tmp/mut && docker build -f /tmp/mut .
+#    -- expect "/data is owned by 0:0, not 65532:65532"
+sed 's|chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet /rootfs/data|chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet|' \
+    Dockerfile.distroless > /tmp/mut && docker build -f /tmp/mut .
+
+# 7-17. The image check. Build the mutant with the label CI gives it, then run
+#    the check against it:
+#    docker build --label org.opencontainers.image.version=edge-distroless \
+#        -f /tmp/mut -t mut . && PUSH=false LOADED=mut SUFFIX=-distroless \
+#        SUFFIXES='-alpine -distroless' bash /tmp/check.sh
+# 7. Copy per directory, which the builder-stage guard cannot see.
+#    -- expect "/data is owned by 0:0, but the image runs as 65532:65532"
+sed 's|^COPY --from=builder /rootfs/ /$|COPY --from=builder /rootfs/etc/puppetlabs /etc/puppetlabs\nCOPY --from=builder /rootfs/data /data|' \
+    Dockerfile.distroless > /tmp/mut
+# 8. Run as root.  -- expect "USER is '0:0'; the image must not run as root"
+sed 's|^USER ${CA_UID}:${CA_UID}$|USER 0:0|' Dockerfile.distroless > /tmp/mut
+# 9. Run as a name. -- expect "USER is 'nonroot'; it must be a numeric uid:gid"
+sed 's|^USER ${CA_UID}:${CA_UID}$|USER nonroot|' Dockerfile.distroless > /tmp/mut
+# 10. Copy nothing. -- expect "/etc/puppetlabs/puppet/ssl/ca is not in the image"
+sed '/^COPY --from=builder \/rootfs\/ \/$/d' Dockerfile.distroless > /tmp/mut
+# 11. Link against libc, which distroless does not have.
+#    -- expect "openvox-ca does not run in this image", after docker's
+#    "exec /usr/local/bin/openvox-ca: no such file or directory"
+sed 's/^ENV CGO_ENABLED=0 GOOS=linux$/ENV CGO_ENABLED=1 GOOS=linux/' Dockerfile.distroless > /tmp/mut
+# 12. Own a directory without being able to write it.
+#    -- expect "openvox-ca-ctl setup could not initialise a CA in /data as 65532:65532"
+sed 's|^    chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet /rootfs/data \&\& \\$|    chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet /rootfs/data \&\& chmod 0555 /rootfs/data \&\& \\|' \
+    Dockerfile.distroless > /tmp/mut
+# 13. Move the default cadir in CMD and nowhere else.
+#    -- expect "/srv/ca is not in the image"
+sed 's|^CMD \["--cadir=/etc/puppetlabs/puppet/ssl/ca", \\$|CMD ["--cadir=/srv/ca", \\|' \
+    Dockerfile.distroless > /tmp/mut
+# 14. Drop the default cadir from CMD.
+#    -- expect "CMD is ["--verbosity=1"]; it must name the default cadir once, as --cadir=<absolute path>"
+sed 's|^CMD \["--cadir=/etc/puppetlabs/puppet/ssl/ca", \\$|CMD [\\|' Dockerfile.distroless > /tmp/mut
+# 15. Label it as another variant: build the unmodified Dockerfile.distroless
+#    with --label org.opencontainers.image.version=edge instead.
+#    -- expect "the version label is 'edge'; it must end with this variant's tag suffix '-distroless'"
+# 16. An entrypoint that does not serve.
+#    -- expect "the server did not answer /healthz/ready: it exited, or 60 seconds
+#    passed", followed by the server's own "unknown flag: --cadir"
+sed 's|^ENTRYPOINT \["/usr/local/bin/openvox-ca"\]$|ENTRYPOINT ["/usr/local/bin/openvox-ca-ctl"]|' \
+    Dockerfile.distroless > /tmp/mut
+# 17. Label the unsuffixed variant as another: build Dockerfile with
+#    --label org.opencontainers.image.version=edge-alpine and run the check
+#    with SUFFIX= (empty).
+#    -- expect "the version label is 'edge-alpine', another variant's; this variant's tags carry no suffix"
+```
+
 These are deliberately not a CI job: each mutation is a full image build, and
 the failure they guard against is introduced by editing the assertion itself —
 which is exactly when this procedure is required.
 
 ## Image build context check
 
-CI's *Image build context* job builds `Dockerfile.alpine`'s builder stage from
-the checkout and reads the build settings back out of both binaries with
-`go version -m`. It fails unless each carries `vcs.revision` equal to the
+CI's *Image build context* job builds the builder stages of `Dockerfile.alpine`
+and `Dockerfile.distroless` from the checkout and reads the build settings back
+out of both binaries in each with `go version -m`. It fails unless each carries `vcs.revision` equal to the
 checked-out commit, `vcs.modified=false` and `-trimpath=true`. The first two
 hold only while [`.dockerignore`](../../.dockerignore) excludes nothing git
 tracks and keeps `.git`; the third pins the `-trimpath` the Dockerfiles share
@@ -258,21 +339,24 @@ is a file pointing outside the build context. Then run the job's two steps in
 the clone, or build the stage and read the settings by hand:
 
 ```bash
-docker build --target builder -f Dockerfile.alpine -t openvox-ca-builder .
-docker run --rm openvox-ca-builder go version -m /openvox-ca | grep -E 'vcs\.|trimpath'
+docker build --target builder -f Dockerfile.alpine -t openvox-ca-builder-alpine .
+docker build --target builder -f Dockerfile.distroless -t openvox-ca-builder-distroless .
+docker run --rm openvox-ca-builder-alpine go version -m /openvox-ca | grep -E 'vcs\.|trimpath'
 
 # 1. Exclude a tracked path: append `docs/` to .dockerignore and commit.
 #    -- expect "is not stamped vcs.modified=false; .dockerignore excludes a tracked file"
 # 2. Exclude the repository: append `.git` to .dockerignore and commit.
 #    -- expect "is not stamped with vcs.revision=<sha>; is .git excluded from the build context?"
-# 3. Drop -trimpath from both go build lines in Dockerfile.alpine and commit.
-#    -- expect "is not built with -trimpath"
+# 3a. Drop -trimpath from both go build lines in Dockerfile.alpine and commit.
+#    -- expect "Dockerfile.alpine: /openvox-ca is not built with -trimpath"
+# 3b. The same in Dockerfile.distroless, which proves the loop reaches it.
+#    -- expect "Dockerfile.distroless: /openvox-ca is not built with -trimpath"
 ```
 
 ## Fixture image command contract
 
 `test/Dockerfile.run` builds the image the integration suites run *inside*. It is
-not either published image, and its package list exists for the suites rather
+not one of the published images, and its package list exists for the suites rather
 than for `openvox-ca` — which needs none of it, being statically linked.
 
 The contract is split across two files on purpose, and they have to move

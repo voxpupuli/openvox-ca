@@ -1,0 +1,74 @@
+# The uid:gid the CA runs as, and owns its writable directories as. One value
+# serves both stages: the runtime stage has no shell, so it cannot assert after
+# the fact that `USER` and the owner of those directories agree, the way the
+# other two Dockerfiles do. Deriving both from this argument makes them agree
+# by construction instead. 65532 is the base image's own `nonroot` user, so the
+# uid also has an /etc/passwd entry (home /home/nonroot).
+ARG CA_UID=65532
+
+# ---- Build Stage ----
+FROM golang:1.27.4@sha256:08bcb99a38f85a265f9a93d1d3323e2440eec333380f3ea26ee0dec9264bb41c AS builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+ENV CGO_ENABLED=0 GOOS=linux
+# -trimpath, as the release tarballs are built (buildDistVariant in
+# magefile.go): it keeps the builder's paths -- /src, and the toolchain's own
+# location, which differs between the images -- out of the binaries.
+RUN go build -trimpath -ldflags="-s -w" -o /openvox-ca     ./cmd/openvox-ca/ && \
+    go build -trimpath -ldflags="-s -w" -o /openvox-ca-ctl ./cmd/openvox-ca-ctl/
+
+# The directories the CA writes, laid out under /rootfs for the runtime stage to
+# copy whole. They are made here because the runtime stage cannot run anything.
+# The first is the image's default --cadir, the second is what compose.yml and
+# the docs mount. The assertion below must be re-verified by hand when edited --
+# CI only ever takes its passing branch. See docs/development/testing.md,
+# "Container identity guards", for the mutations and the messages they should
+# produce. CA_UID is declared here rather than at the top of the stage: every
+# RUN after an ARG takes it into its cache key, and declaring it later leaves
+# the download and build layers identical to Dockerfile.alpine's, so a builder
+# that has built one reuses them for the other.
+ARG CA_UID
+RUN mkdir -p /rootfs/etc/puppetlabs/puppet/ssl/ca /rootfs/data && \
+    chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet /rootfs/data && \
+    for d in /rootfs/etc/puppetlabs/puppet/ssl/ca /rootfs/data; do \
+        [ "$(stat -c %u:%g "$d")" = "${CA_UID}:${CA_UID}" ] || \
+            { echo "${d#/rootfs} is owned by $(stat -c %u:%g "$d"), not ${CA_UID}:${CA_UID}; the CA could not write there" >&2; exit 1; }; \
+    done
+
+# ---- Runtime Stage ----
+# No shell and no package manager: the image holds the two statically linked
+# binaries and what the base provides, which includes the system trust store
+# (/etc/ssl/certs/ca-certificates.crt, named by SSL_CERT_FILE) that
+# openvox-ca-ctl's HTTPS client needs when invoked without --ca-cert against a
+# publicly-trusted server. The :nonroot variant is used although USER below
+# overrides its user, so that losing that line leaves the image unprivileged
+# rather than root.
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
+ARG CA_UID
+
+# One COPY of the whole tree, not one per directory. COPY keeps the owner of
+# everything beneath its source but not of the directory it copies into:
+# `COPY --from=builder /rootfs/data /data` publishes a root-owned /data, which
+# the builder-stage assertion above cannot see. Copying from / keeps both
+# directories' owners and leaves /etc/puppetlabs root-owned, as in the other
+# images.
+COPY --from=builder /rootfs/ /
+COPY --from=builder /openvox-ca     /usr/local/bin/openvox-ca
+COPY --from=builder /openvox-ca-ctl /usr/local/bin/openvox-ca-ctl
+
+USER ${CA_UID}:${CA_UID}
+EXPOSE 8140
+
+# HEALTHCHECK: none yet. With no shell and no curl here, a check has to exec
+# one of the binaries directly (exec form); #366 adds a subcommand for it.
+
+# NOTE: autosign is OFF by default. Set --autosign-config=true only in
+# dev/test environments. Autosign lets any CSR submitter obtain a signed
+# certificate without operator review.
+ENTRYPOINT ["/usr/local/bin/openvox-ca"]
+CMD ["--cadir=/etc/puppetlabs/puppet/ssl/ca", \
+     "--verbosity=1"]

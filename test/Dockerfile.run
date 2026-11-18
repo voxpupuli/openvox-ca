@@ -1,7 +1,7 @@
 # Integration test fixture image, built from locally-compiled binaries.
 #
-# This is NOT the published runtime image -- see Dockerfile and
-# Dockerfile.alpine for those. It exists to run the suites, and the packages
+# This is NOT the published runtime image -- see Dockerfile, Dockerfile.alpine
+# and Dockerfile.distroless for those. It exists to run the suites, and the packages
 # below are chosen for what the suites invoke, not for what openvox-ca needs in
 # order to run. Keeping the two apart is what lets the published image be
 # minimised independently of the test suites (#316, under #292).
@@ -72,7 +72,8 @@ FROM quay.io/centos/centos:stream10
 # alternative -- quay does not retain superseded CentOS Stream digests, which
 # renovate.json records as its reason for declining to pin it.
 #
-# uid/gid 1000 pinned to match the published images (see Dockerfile): `USER`
+# uid/gid 1000 pinned to match the CentOS Stream and Alpine published images
+# (see Dockerfile): `USER`
 # has to be numeric, and the local runtime image should present the same
 # identity as the one it stands in for.
 # The assertion below must be re-verified by hand when edited -- CI only ever
