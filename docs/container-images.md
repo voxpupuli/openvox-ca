@@ -95,7 +95,9 @@ removes this bootstrap entirely and renews the certificate unattended, which
 nothing else does once the CA key is held at a provider — or issue one with `openvox-ca-ctl generate` and
 point `--tls-cert`/`--tls-key` at that. The same goes for the rest of a
 production deployment — mTLS, an alternative storage backend, autosigning: pass the
-relevant flags, or mount a config file and set `--config`. See [configuring the
+relevant flags, or mount a config file at `/etc/openvox-ca/config.yaml` (or
+set `OPENVOX_CA_CONFIG` to where you mounted it), which the [health
+check](#health-check) reads too. See [configuring the
 server](configuration.md) for the full reference, and the [HTTP API
 reference](api.md) for the endpoints agents use.
 
@@ -158,21 +160,68 @@ not work, and needs another route:
   that enforces the `restricted` Pod Security standard admit it. That container
   can read the CA's private keys through the server's `/proc/1/root`, so pin the
   image by digest and give it the trust you give the CA image itself.
-- **Healthchecks.** A Docker or Compose healthcheck that runs `curl` or `wget`,
-  such as the one in this repository's
-  [`compose.yml`](https://github.com/voxpupuli/openvox-ca/blob/main/compose.yml),
-  cannot run here. Kubernetes `httpGet` probes are unaffected, because the
-  kubelet makes the request from outside the container.
+- **Healthchecks.** A Docker or Compose healthcheck that runs `curl` or `wget`
+  cannot run here. The image's own [health check](#health-check), `openvox-ca
+  healthcheck`, needs neither, and Kubernetes `httpGet` probes are unaffected,
+  because the kubelet makes the request from outside the container.
 - **A policy-based autosign executable** written as a script needs its
   interpreter, which the image does not have. Use a statically linked
   executable, or another variant.
+
+### Health check
+
+Every image declares a `HEALTHCHECK` that runs `openvox-ca healthcheck`, so
+`docker ps` and `podman ps` report the container's health without any
+configuration. It requests `/healthz/ready` every 30 seconds and marks the
+container unhealthy after three failures in a row. The first two minutes are a
+grace period, because the first start generates the CA key; the first check
+that passes ends it.
+
+The check is its own process. It sees the container's environment and the
+server's config file, but not the arguments the server was started with:
+
+- **Port.** It reads `port` from the config file that `OPENVOX_CA_CONFIG`
+  names, or else `/etc/openvox-ca/config.yaml`, and from `OPENVOX_CA_PORT`, as
+  the server does, and defaults to 8140. A file passed to the server with
+  `--config` is invisible to it. To move the port, set `OPENVOX_CA_PORT` on the
+  container rather than passing `--port`, so the server and the check agree. A
+  server listening on every address is checked over loopback; one bound with
+  `host` to a specific address is checked there.
+- **Scheme.** It tries HTTPS first and falls back to plain HTTP only when the
+  server answers in plain HTTP, so TLS enabled with `--tls-cert` on the command
+  line needs nothing repeated.
+- **Certificate.** It does not verify the server's certificate. It sends no
+  credentials and reads nothing but the status code, and the CA's own
+  certificate, which the example above serves, cannot be verified at all.
+
+It exits 0 when the endpoint answers 200, and 1 otherwise with a one-line
+reason, which `docker inspect --format '{{json .State.Health}}' openvox-ca`
+shows. To change what it checks, override it with the exec form, which works in
+an image without a shell:
+
+```yaml
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/openvox-ca", "healthcheck", "--port", "8141"]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--probe` | `ready` | `live`, `ready` or `startup`: which `/healthz/` endpoint to request |
+| `--port` | from configuration | Port to check |
+| `--host` | from configuration | Address to check |
+| `--config` | `OPENVOX_CA_CONFIG`, else `/etc/openvox-ca/config.yaml` | The server's config file |
+| `--timeout` | `3s` | Give up and report unhealthy after this long |
+
+Kubernetes ignores an image's `HEALTHCHECK`. The [Helm chart](helm-chart.md)
+uses the kubelet's own HTTP probes on the same three endpoints instead, which
+cost the pod nothing between checks.
 
 ### Compose
 
 The [`compose.yml`](https://github.com/voxpupuli/openvox-ca/blob/main/compose.yml) at the repository root is the equivalent
 Docker/Podman Compose deployment: edit `--hostname`, then `docker compose up
--d` (or `podman-compose up -d`). Its healthcheck runs `curl` or `wget` inside
-the container, so it does not work with the distroless variant. The
+-d` (or `podman-compose up -d`). It declares no healthcheck of its own, so the
+service has the image's [health check](#health-check). The
 `test/compose*.yml` files, by contrast,
 are the integration-test topologies — they build throwaway images from the
 working tree and are not deployment examples.

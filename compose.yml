@@ -37,11 +37,9 @@ services:
     # guarantee: two pulls at different times can yield different images.
     # Pin a release tag (e.g. :1.2.3) or a digest for production
     # deployments. `-alpine` and `-distroless` variants of every tag are also
-    # published, but the healthcheck below needs curl or wget in the image,
-    # which the distroless variant does not have: with that variant, replace
-    # the healthcheck block with `healthcheck: { disable: true }`. It also runs
-    # as uid 65532 rather than 1000, so re-own an existing ca-data volume to
-    # 65532:65532 before switching (docs/container-images.md, "Runtime user").
+    # published. The distroless variant runs as uid 65532 rather than 1000, so
+    # re-own an existing ca-data volume to 65532:65532 before switching
+    # (docs/container-images.md, "Runtime user").
     image: ghcr.io/voxpupuli/openvox-ca:latest
     command:
       - --cadir=/data
@@ -56,19 +54,9 @@ services:
     volumes:
       - ca-data:/data
     restart: unless-stopped
-    healthcheck:
-      # curl exists in the default image, busybox wget in the -alpine
-      # variant; certificate verification is disabled because the CA's own
-      # cert cannot be verified at all -- see the note at the top of this
-      # file. Starting this stack therefore logs two warnings on every run,
-      # "cannot serve TLS to a client that verifies it" and "puts a signing
-      # key on the network-facing listener": both expected here, and both
-      # the thing to fix before agents are pointed at it.
-      test: ["CMD-SHELL", "curl -skf https://localhost:8140/healthz/ready || wget -q --no-check-certificate -O /dev/null https://localhost:8140/healthz/ready"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+    # No healthcheck here: every image variant declares its own, `openvox-ca
+    # healthcheck`. Images released before it (v1.0.0-alpha1 and earlier)
+    # declare none. See "Health check" in docs/container-images.md.
 
 volumes:
   ca-data:

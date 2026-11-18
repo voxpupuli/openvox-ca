@@ -563,6 +563,10 @@ See [running under an external root CA](openbao-transit.md#running-under-an-exte
 `ca_key_provider`, including the default file provider —
 for the end-to-end procedure.
 
+`openvox-ca healthcheck` is on the server binary as well, but is not one of the
+four: it reaches no storage, only a running server's health endpoint. See
+[health check](container-images.md#health-check).
+
 ### `generate`: minting a certificate offline
 
 `generate` issues a certificate directly against the configured storage backend

@@ -20,13 +20,9 @@ RUN go build -trimpath -ldflags="-s -w" -o /openvox-ca     ./cmd/openvox-ca/ && 
 # ---- Runtime Stage ----
 FROM quay.io/centos/centos:stream10
 
-# curl: the healthcheck in this repository's compose.yml runs
-#   `curl -skf https://localhost:8140/healthz/ready` inside this container, with
-#   a busybox-wget fallback that only exists in the -alpine variant. stream10
-#   ships no wget, so curl is what makes that example work. It is declared
-#   rather than left to the base even though curl-minimal is currently part of
-#   it: a dependency satisfied only by what the base happens to include is the
-#   failure mode that #316 exists to stop repeating.
+# curl is not installed: the health check is `openvox-ca healthcheck` (below),
+# so nothing here needs an HTTP client. The base still carries curl-minimal,
+# but that is the base's choice, and nothing in this image depends on it.
 #
 # openssl is NOT installed. It was here for CSR generation and certificate
 # inspection in the integration suites, which do not run in this image -- they
@@ -44,8 +40,7 @@ FROM quay.io/centos/centos:stream10
 # Both assertions below must be re-verified by hand when edited -- CI only ever
 # takes their passing branch. See docs/development/testing.md, "Container
 # identity guards", for the mutations and the messages they should produce.
-RUN dnf install -y curl && dnf clean all && \
-    groupadd -g 1000 puppet && \
+RUN groupadd -g 1000 puppet && \
     useradd -m -u 1000 -g 1000 puppet && \
     { [ "$(id -u puppet):$(id -g puppet)" = "1000:1000" ] || \
         { echo "puppet is $(id -u puppet):$(id -g puppet), not 1000:1000; USER below must match" >&2; exit 1; }; } && \
@@ -61,6 +56,18 @@ COPY --from=builder /openvox-ca-ctl /usr/local/bin/openvox-ca-ctl
 
 USER 1000:1000
 EXPOSE 8140
+
+# The image's own health state, for `docker ps`, compose and Podman. It is a
+# subcommand of the server binary rather than curl or wget so the same line
+# works in every image, including one with no shell. It requests
+# /healthz/ready, over HTTPS or plain HTTP as the server speaks, on the port
+# from the server's config file and OPENVOX_CA_* environment; a port set only
+# with --port on the server's command line (CMD below, or `docker run`) needs
+# this line overridden. See docs/container-images.md#health-check.
+# --start-period is generous because the first start generates the CA key; a
+# check that passes ends it early.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD ["/usr/local/bin/openvox-ca", "healthcheck"]
 
 # --cadir             : where CA state is stored
 # --verbosity         : debug logging

@@ -47,6 +47,18 @@ COPY --from=builder /openvox-ca-ctl /usr/local/bin/openvox-ca-ctl
 USER 1000:1000
 EXPOSE 8140
 
+# The image's own health state, for `docker ps`, compose and Podman. It is a
+# subcommand of the server binary rather than curl or wget so the same line
+# works in every image, including one with no shell. It requests
+# /healthz/ready, over HTTPS or plain HTTP as the server speaks, on the port
+# from the server's config file and OPENVOX_CA_* environment; a port set only
+# with --port on the server's command line (CMD below, or `docker run`) needs
+# this line overridden. See docs/container-images.md#health-check.
+# --start-period is generous because the first start generates the CA key; a
+# check that passes ends it early.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD ["/usr/local/bin/openvox-ca", "healthcheck"]
+
 # NOTE: autosign is OFF by default. Set --autosign-config=true only in
 # dev/test environments. Autosign lets any CSR submitter obtain a signed
 # certificate without operator review.
