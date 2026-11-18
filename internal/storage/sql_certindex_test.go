@@ -60,6 +60,7 @@ func certIndexRoundTrip(b *SQLBackend) {
 		DNSAltNames:    []string{"node1", "node1.example.com"},
 		IPAltNames:     []string{"192.0.2.10", "2001:db8::1"},
 		AuthExtensions: map[string]string{"pp_auth_role": "webserver"},
+		Fingerprints:   map[string]string{"SHA1": "01:02", "SHA512": "03:04"},
 	}
 	Expect(svc.AppendInventory(ctx, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1")).To(Succeed())
 	Expect(svc.AppendInventoryRecord(ctx, "0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node1", &proj)).To(Succeed())
@@ -84,6 +85,7 @@ func certIndexRoundTrip(b *SQLBackend) {
 	Expect(recs[0].DNSAltNames).To(Equal(proj.DNSAltNames))
 	Expect(recs[0].IPAltNames).To(Equal(proj.IPAltNames))
 	Expect(recs[0].AuthExtensions).To(Equal(proj.AuthExtensions))
+	Expect(recs[0].Fingerprints).To(Equal(proj.Fingerprints))
 	Expect(recs[1].Subject).To(Equal("node2"))
 	Expect(recs[1].Fingerprint).To(BeEmpty(), "appended without a projection")
 
@@ -118,6 +120,15 @@ func certIndexRoundTrip(b *SQLBackend) {
 	recs, _, err = svc.CertStatuses(ctx, "")
 	Expect(err).NotTo(HaveOccurred())
 	Expect(recs[1].IPAltNames).To(Equal([]string{"198.51.100.7"}))
+	Expect(recs[1].Fingerprints).To(BeNil())
+
+	// A backfill adding other digests, through the dialect's own UPDATE.
+	Expect(svc.SetCertProjection(ctx, "0002", CertProjection{
+		Fingerprint: "dd:ee:ff", Fingerprints: map[string]string{"SHA512": "05:06"},
+	})).To(Succeed())
+	recs, _, err = svc.CertStatuses(ctx, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(recs[1].Fingerprints).To(Equal(map[string]string{"SHA512": "05:06"}))
 }
 
 // certIndexMigrationRollback rolls every applied migration group back and
@@ -158,6 +169,9 @@ func certIndexMigrationRollback(b *SQLBackend) {
 	exists, err := columnExists(ctx, b.db, inventoryTableV1, ipAltNamesColumnName)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(exists).To(BeTrue(), "the re-apply must restore %s", ipAltNamesColumnName)
+	exists, err = columnExists(ctx, b.db, inventoryTableV1, fingerprintsColumnName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(exists).To(BeTrue(), "the re-apply must restore %s", fingerprintsColumnName)
 	certIndexRoundTrip(b)
 }
 
@@ -214,6 +228,59 @@ func ipAltNamesMigrationDownUp(b *SQLBackend) {
 		"a row projected before %s existed must read as unprojected", ipAltNamesColumnName)
 }
 
+// fingerprintsMigrationDownUp runs the fingerprints migration's down and up
+// steps on their own, against a table holding a row, for the reason
+// ipAltNamesMigrationDownUp gives. Shared with the PostgreSQL/MySQL
+// integration suites.
+func fingerprintsMigrationDownUp(b *SQLBackend) {
+	ctx := context.Background()
+	svc := NewWithBackend(b, "")
+	Expect(svc.TouchInventory(ctx)).To(Succeed(), "TouchInventory")
+	Expect(svc.InitHMAC(ctx)).To(Succeed(), "InitHMAC")
+	proj := CertProjection{
+		Fingerprint:  "aa:bb:cc",
+		IPAltNames:   []string{"192.0.2.10"},
+		Fingerprints: map[string]string{"SHA1": "01:02"},
+	}
+	Expect(svc.AppendInventoryRecord(ctx, "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1", &proj)).
+		To(Succeed())
+
+	migrator := migrate.NewMigrator(b.db, sqlMigrations)
+	var m *migrate.Migration
+	for _, candidate := range sqlMigrations.Sorted() {
+		if candidate.Name == "20261118000000" {
+			m = &candidate
+		}
+	}
+	Expect(m).NotTo(BeNil(), "the fingerprints migration must be registered under its file's timestamp")
+
+	Expect(m.Down(ctx, migrator, m)).To(Succeed(), "down")
+	DeferCleanup(func(ctx SpecContext) {
+		Expect(m.Up(ctx, migrator, m)).To(Succeed(), "restoring %s for the next spec", fingerprintsColumnName)
+	})
+	exists, err := columnExists(ctx, b.db, inventoryTableV1, fingerprintsColumnName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(exists).To(BeFalse(), "down must drop %s", fingerprintsColumnName)
+	entries, err := b.Entries(ctx)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(entries).To(HaveLen(1), "down must leave the inventory itself alone")
+
+	Expect(m.Up(ctx, migrator, m)).To(Succeed(), "up")
+	exists, err = columnExists(ctx, b.db, inventoryTableV1, fingerprintsColumnName)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(exists).To(BeTrue(), "up must add %s", fingerprintsColumnName)
+
+	// The row now holds NULL fingerprints, the shape every row has when the
+	// column is first added. Unlike a NULL ip_alt_names, it is still a
+	// projection, one holding no other digests.
+	putCertBlob(b, "node1")
+	recs, err := b.Statuses(ctx, "")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(recs).To(HaveLen(1))
+	Expect(recs[0].CertProjection).To(Equal(CertProjection{Fingerprint: "aa:bb:cc", IPAltNames: []string{"192.0.2.10"}}),
+		"a row projected before %s existed must keep its projection", fingerprintsColumnName)
+}
+
 var _ = Describe("SQLiteCertIndex", func() {
 	It("round-trips the certificate index end to end", func() {
 		certIndexRoundTrip(newSQLiteBackend())
@@ -225,6 +292,10 @@ var _ = Describe("SQLiteCertIndex", func() {
 
 	It("drops and restores ip_alt_names through that migration's own steps", func() {
 		ipAltNamesMigrationDownUp(newSQLiteBackend())
+	})
+
+	It("drops and restores fingerprints through that migration's own steps", func() {
+		fingerprintsMigrationDownUp(newSQLiteBackend())
 	})
 
 	It("persists the projection at append time and serves it back from Statuses", func() {
@@ -367,6 +438,18 @@ var _ = Describe("SQLiteCertIndex", func() {
 			Fingerprint: "aa:bb:cc",
 			DNSAltNames: `["node1"]`,
 			IPAltNames:  "{not-json",
+		}
+		Expect(row.record().CertProjection).To(Equal(CertProjection{}))
+	})
+
+	It("degrades a projection with corrupt fingerprints to a missing one", func() {
+		row := sqlInventoryRow{
+			Serial: "0001", Subject: "node1",
+			NotBefore: "2024-01-01T00:00:00UTC", NotAfter: "2029-01-01T00:00:00UTC",
+			State:        CertStateSigned,
+			Fingerprint:  "aa:bb:cc",
+			IPAltNames:   "[]",
+			Fingerprints: "{not-json",
 		}
 		Expect(row.record().CertProjection).To(Equal(CertProjection{}))
 	})

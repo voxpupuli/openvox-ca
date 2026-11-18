@@ -226,6 +226,30 @@ var _ = Describe("EtcdInventoryRecordCodec", func() {
 		Expect(got.State).To(Equal(CertStateRevoked), "state is not part of the projection and survives")
 	})
 
+	It("round-trips fingerprints in other digests", func() {
+		rec := CertRecord{
+			InventoryEntry: InventoryEntry{Serial: "0001", NotBefore: "nb", NotAfter: "na", Subject: "node1"},
+			CertProjection: CertProjection{
+				Fingerprint:  "aa:bb:cc",
+				Fingerprints: map[string]string{"SHA1": "01:02", "SHA512": "03:04"},
+			},
+			State: CertStateSigned,
+		}
+		data, err := encodeInventoryRecord(rec)
+		Expect(err).NotTo(HaveOccurred())
+		got, err := decodeInventoryRecord(data)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(rec))
+	})
+
+	It("reads a projection written before fingerprints existed as a projection with no other digests", func() {
+		got, err := decodeInventoryRecord([]byte(`{"serial":"0001","subject":"node1",` +
+			`"fingerprint":"aa:bb:cc","ip_alt_names":[],"state":"signed"}`))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got.CertProjection).To(Equal(CertProjection{Fingerprint: "aa:bb:cc"}),
+			"a missing digest is not a missing projection; the rest of it stands")
+	})
+
 	It("leaves ip_alt_names out of a record with no projection", func() {
 		data, err := encodeInventoryRecord(CertRecord{InventoryEntry: InventoryEntry{
 			Serial: "0001", NotBefore: "nb", NotAfter: "na", Subject: "node1",

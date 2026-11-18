@@ -227,7 +227,7 @@ over the store's only baseline.
 
 The inventory table doubles as a **certificate index**: alongside the four
 canonical columns, each row carries a denormalised display projection
-(`fingerprint_sha256`, `dns_alt_names`, `ip_alt_names`, `auth_extensions`, filled at signing or
+(`fingerprint_sha256`, `dns_alt_names`, `ip_alt_names`, `auth_extensions`, `fingerprints`, filled at signing or
 import — see `issueLeafLocked` and `ImportCertificate`)
 and the one mutable fact, revocation (`state`, `revoked_at`). Backends owning
 the rows may advertise a second optional capability:
@@ -286,6 +286,10 @@ Design rules that keep the index honest:
   startup backfill above. On etcd and Redis, a revocation that rewrites such a
   record drops the stale projection with it, which leaves the record in that
   same state.
+- **A projection without `fingerprints` is still a projection.** The field
+  holds fingerprints in other digests than SHA-256, and only the ones its
+  writer chose, so its absence means "none of those", not "written before the
+  field".
 - **Statuses is gated on blob existence.** Historical rows survive cleaning
   (that is the inventory's job), so the index reports only subjects whose
   `cert/<subject>` blob still exists, and only their latest issuance —

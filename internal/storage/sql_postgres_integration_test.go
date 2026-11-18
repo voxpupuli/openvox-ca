@@ -256,6 +256,10 @@ var _ = Describe("Postgres CertIndex", func() {
 	It("drops and restores ip_alt_names through that migration's own steps", func() {
 		ipAltNamesMigrationDownUp(newPostgresBackend())
 	})
+
+	It("drops and restores fingerprints through that migration's own steps", func() {
+		fingerprintsMigrationDownUp(newPostgresBackend())
+	})
 })
 
 var _ = Describe("Postgres schema migrations", func() {
