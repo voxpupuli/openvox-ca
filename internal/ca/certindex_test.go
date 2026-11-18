@@ -183,6 +183,16 @@ var _ = Describe("CA certificate index", func() {
 		return ca.SHA256ColonFingerprint(block.Bytes)
 	}
 
+	// storedDER returns the DER of the certificate currently stored for
+	// subject.
+	storedDER := func(s *storage.StorageService, subject string) []byte {
+		certPEM, err := s.GetCert(ctx, subject)
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(certPEM)
+		Expect(block).NotTo(BeNil())
+		return block.Bytes
+	}
+
 	newSQLiteService := func() *storage.StorageService {
 		dir := GinkgoT().TempDir()
 		sqliteDSN = "file:" + filepath.Join(dir, "ca.db")
@@ -260,6 +270,37 @@ var _ = Describe("CA certificate index", func() {
 			Expect(recs).To(HaveLen(1))
 			Expect(recs[0].Fingerprint).To(BeEmpty(),
 				"the projection must stay empty rather than describe another certificate")
+			Expect(buf.String()).To(ContainSubstring("serial does not match index record"))
+		})
+
+		It("leaves a populated row as it is when the stored certificate is not the one it names", func() {
+			// The same guard, reached the other way: a row with a full SHA-256
+			// projection, lacking only a digest the CA now reports. Repair must
+			// not add that digest, or any other field, from another certificate.
+			signLive(myCA, "node1")
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			before := recs[0].CertProjection
+			Expect(before.Fingerprint).NotTo(BeEmpty())
+
+			other := signLeafWithAuthRole("node1", "webserver")
+			Expect(store.SaveCert(ctx, "node1", other)).To(Succeed())
+
+			var buf bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(orig)
+
+			restarted := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			restarted.StatusFingerprintAlgorithms = []ca.FingerprintAlgorithm{ca.FingerprintSHA1}
+			Expect(restarted.Init(ctx)).To(Succeed())
+
+			recs, _, err = store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			Expect(recs[0].CertProjection).To(Equal(before),
+				"the row must keep its own projection, with no digest taken from another certificate")
 			Expect(buf.String()).To(ContainSubstring("serial does not match index record"))
 		})
 
@@ -431,6 +472,136 @@ var _ = Describe("CA certificate index", func() {
 			Expect(recs[0].Fingerprint).To(Equal(storedFingerprint(store, "old-row")))
 			Expect(recs[0].IPAltNames).To(Equal([]string{"192.0.2.10"}),
 				"repair must rewrite the row from the stored PEM, IP SANs included")
+		})
+
+		It("projects the configured fingerprints at signing", func() {
+			myCA.StatusFingerprintAlgorithms = []ca.FingerprintAlgorithm{ca.FingerprintSHA1, ca.FingerprintSHA512}
+			signLive(myCA, "node1")
+
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			der := storedDER(store, "node1")
+			Expect(recs[0].Fingerprints).To(Equal(map[string]string{
+				"SHA1":   ca.ColonFingerprint(ca.FingerprintSHA1, der),
+				"SHA512": ca.ColonFingerprint(ca.FingerprintSHA512, der),
+			}))
+		})
+
+		It("projects the configured fingerprints from an imported certificate", func() {
+			myCA.StatusFingerprintAlgorithms = []ca.FingerprintAlgorithm{ca.FingerprintSHA512}
+			certPEM := signLeafWithIPs("imported", net.ParseIP("192.0.2.10"))
+			_, err := myCA.ImportCertificate(ctx, "imported", certPEM)
+			Expect(err).NotTo(HaveOccurred())
+
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			Expect(recs[0].Fingerprints).To(Equal(map[string]string{
+				"SHA512": ca.ColonFingerprint(ca.FingerprintSHA512, storedDER(store, "imported")),
+			}))
+		})
+
+		It("adds a fingerprint configured after the row was projected when repair runs", func() {
+			// Signed while the CA reported SHA-256 only, as every row is before
+			// status_fingerprint_algorithms is first set.
+			signLive(myCA, "node1")
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs[0].Fingerprints).To(BeNil())
+
+			restarted := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			restarted.StatusFingerprintAlgorithms = []ca.FingerprintAlgorithm{ca.FingerprintSHA1}
+			Expect(restarted.Init(ctx)).To(Succeed())
+
+			recs, _, err = store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			Expect(recs[0].Fingerprint).To(Equal(storedFingerprint(store, "node1")))
+			Expect(recs[0].Fingerprints).To(Equal(map[string]string{
+				"SHA1": ca.ColonFingerprint(ca.FingerprintSHA1, storedDER(store, "node1")),
+			}), "repair must add the newly configured digest from the stored PEM")
+		})
+
+		It("adds only the digests a row lacks when the configured list grows", func() {
+			// Projected while the CA reported SHA-1 besides SHA-256, then
+			// restarted reporting SHA-512 as well: the row holds some of the
+			// configured digests, not none.
+			myCA.StatusFingerprintAlgorithms = []ca.FingerprintAlgorithm{ca.FingerprintSHA1}
+			signLive(myCA, "node1")
+
+			restarted := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			restarted.StatusFingerprintAlgorithms = []ca.FingerprintAlgorithm{ca.FingerprintSHA1, ca.FingerprintSHA512}
+			Expect(restarted.Init(ctx)).To(Succeed())
+
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			der := storedDER(store, "node1")
+			Expect(recs[0].Fingerprints).To(Equal(map[string]string{
+				"SHA1":   ca.ColonFingerprint(ca.FingerprintSHA1, der),
+				"SHA512": ca.ColonFingerprint(ca.FingerprintSHA512, der),
+			}))
+		})
+
+		It("keeps the digests a row already holds when the list changes to another", func() {
+			// [SHA1] to [SHA512] is not a superset: replacing the row's map would
+			// drop SHA1, so a rollback, or a replica still on the old list,
+			// would rewrite every row again.
+			myCA.StatusFingerprintAlgorithms = []ca.FingerprintAlgorithm{ca.FingerprintSHA1}
+			signLive(myCA, "node1")
+
+			restarted := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			restarted.StatusFingerprintAlgorithms = []ca.FingerprintAlgorithm{ca.FingerprintSHA512}
+			Expect(restarted.Init(ctx)).To(Succeed())
+
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			der := storedDER(store, "node1")
+			Expect(recs[0].Fingerprints).To(Equal(map[string]string{
+				"SHA1":   ca.ColonFingerprint(ca.FingerprintSHA1, der),
+				"SHA512": ca.ColonFingerprint(ca.FingerprintSHA512, der),
+			}))
+		})
+
+		It("leaves a row holding every configured digest alone when repair runs", func() {
+			// The final row is the same whether repair rewrote it or not, so
+			// only the writes themselves can show that a row already in sync
+			// costs nothing at the next start. The wrapper relabels a subject
+			// nothing here uses, so it only records.
+			dir := GinkgoT().TempDir()
+			inner, err := storage.NewSQLBackend(storage.SQLConfig{
+				Dialect: storage.SQLitePure,
+				DSN:     "file:" + filepath.Join(dir, "ca.db"),
+			})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { _ = inner.Close() })
+			Expect(inner.EnsureReady(ctx)).To(Succeed())
+			wrapper := &unknownRepairBackend{SQLBackend: inner, subject: "no-such-subject"}
+			wrapped := storage.NewWithBackend(wrapper, dir)
+
+			sha1Only := []ca.FingerprintAlgorithm{ca.FingerprintSHA1}
+			first := newCA(wrapped)
+			first.StatusFingerprintAlgorithms = sha1Only
+			signLive(first, "node1")
+
+			restart := func(algs []ca.FingerprintAlgorithm) []string {
+				wrapper.writes = nil
+				wrapper.recording = true
+				defer func() { wrapper.recording = false }()
+				c := ca.New(wrapped, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+				c.StatusFingerprintAlgorithms = algs
+				Expect(c.Init(ctx)).To(Succeed())
+				return wrapper.writes
+			}
+
+			Expect(restart(sha1Only)).To(BeEmpty(), "a row holding every configured digest must not be rewritten")
+
+			// The must-fail twin: the same row, one digest short of the list.
+			writes := restart([]ca.FingerprintAlgorithm{ca.FingerprintSHA1, ca.FingerprintSHA512})
+			Expect(writes).To(HaveLen(1))
+			Expect(writes[0]).To(HavePrefix("SetProjection:"))
 		})
 
 		It("reconciles a zero-padded row serial against the CRL when repair runs", func() {

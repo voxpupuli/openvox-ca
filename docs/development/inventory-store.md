@@ -287,9 +287,10 @@ Design rules that keep the index honest:
   record drops the stale projection with it, which leaves the record in that
   same state.
 - **A projection without `fingerprints` is still a projection.** The field
-  holds fingerprints in other digests than SHA-256, and only the ones its
-  writer chose, so its absence means "none of those", not "written before the
-  field".
+  holds fingerprints in other digests than SHA-256, and only the ones the CA
+  was configured to report when it wrote the row, so its absence means "none
+  of those", not "written before the field". The startup repair pass adds
+  every configured digest a row lacks.
 - **Statuses is gated on blob existence.** Historical rows survive cleaning
   (that is the inventory's job), so the index reports only subjects whose
   `cert/<subject>` blob still exists, and only their latest issuance —

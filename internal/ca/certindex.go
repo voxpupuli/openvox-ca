@@ -21,12 +21,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/pem"
 	"log/slog"
+	"maps"
 	"math/big"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/voxpupuli/openvox-ca/internal/storage"
@@ -40,12 +39,7 @@ import (
 // rewrite.
 func SHA256ColonFingerprint(der []byte) string {
 	sum := sha256.Sum256(der)
-	raw := hex.EncodeToString(sum[:])
-	parts := make([]string, 0, len(sum))
-	for i := 0; i < len(raw); i += 2 {
-		parts = append(parts, raw[i:i+2])
-	}
-	return strings.Join(parts, ":")
+	return colonHex(sum[:])
 }
 
 // IPAddressStrings renders IP address SANs as text, in certificate order. It is
@@ -68,16 +62,37 @@ func IPAddressStrings(ips []net.IP) []string {
 }
 
 // certProjectionFor derives the certificate-index display projection from a
-// parsed certificate. Every field is immutable for the certificate's life,
-// which is what makes storing them alongside the inventory row safe: they can
-// never drift from the PEM because neither can change after signing.
-func certProjectionFor(cert *x509.Certificate) storage.CertProjection {
+// parsed certificate, with its fingerprints in algs besides SHA-256. Every
+// field is immutable for the certificate's life, which is what makes storing
+// them alongside the inventory row safe: they can never drift from the PEM
+// because neither can change after signing.
+func certProjectionFor(cert *x509.Certificate, algs []FingerprintAlgorithm) storage.CertProjection {
 	return storage.CertProjection{
 		Fingerprint:    SHA256ColonFingerprint(cert.Raw),
 		DNSAltNames:    cert.DNSNames,
 		IPAltNames:     IPAddressStrings(cert.IPAddresses),
 		AuthExtensions: AuthExtensionMap(cert.Extensions),
+		Fingerprints:   OtherFingerprints(algs, cert.Raw),
 	}
+}
+
+// LacksFingerprints reports whether proj is missing any of the fingerprints
+// in algs. A projection written while the CA reported fewer digests than it
+// does now is one, and the startup repair pass rewrites it from the PEM.
+func LacksFingerprints(proj storage.CertProjection, algs []FingerprintAlgorithm) bool {
+	for _, alg := range algs {
+		if _, ok := proj.Fingerprints[string(alg)]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// needsProjection reports whether rebuildCertIndex should rewrite rec's
+// projection from the stored PEM: it has none, or it lacks a fingerprint the
+// CA now reports.
+func (c *CA) needsProjection(rec storage.CertRecord) bool {
+	return rec.Fingerprint == "" || LacksFingerprints(rec.CertProjection, c.StatusFingerprintAlgorithms)
 }
 
 // rebuildCertIndex reconciles the certificate index with its authoritative
@@ -91,6 +106,8 @@ func certProjectionFor(cert *x509.Certificate) storage.CertProjection {
 //   - a record missing its projection (typically imported from a legacy
 //     inventory blob, where rows carry no display fields) is backfilled by
 //     parsing the subject's stored PEM once;
+//   - so is a record whose projection lacks a fingerprint in one of
+//     StatusFingerprintAlgorithms, written before that digest was configured;
 //   - a record whose revocation state disagrees with the signed CRL is
 //     rewritten to match it.
 //
@@ -112,14 +129,16 @@ func (c *CA) rebuildCertIndex(ctx context.Context) {
 
 	revoked := c.revokedSerialsLocked()
 
-	// The backfill reads and parses one stored PEM per projection-less record,
-	// so the first start after a blob→SQL migration legitimately takes a while
-	// on a large fleet. Announce the work up front and report progress, so the
-	// operator watching that first start sees a moving backfill rather than an
-	// apparent hang between "Loaded existing CA" and the listener coming up.
+	// The backfill reads and parses one stored PEM per record missing its
+	// projection or a configured fingerprint, so the first start after a
+	// blob→SQL migration, or after a digest is added to
+	// StatusFingerprintAlgorithms, legitimately takes a while on a large
+	// fleet. Announce the work up front and report progress, so the operator
+	// watching that first start sees a moving backfill rather than an apparent
+	// hang between "Loaded existing CA" and the listener coming up.
 	var missing int
 	for _, rec := range records {
-		if rec.Fingerprint == "" && rec.State != storage.CertStateUnknown {
+		if rec.State != storage.CertStateUnknown && c.needsProjection(rec) {
 			missing++
 		}
 	}
@@ -153,7 +172,7 @@ func (c *CA) rebuildCertIndex(ctx context.Context) {
 			// than re-attempt and warn on every start.
 			continue
 		}
-		if rec.Fingerprint == "" && c.backfillCertProjection(ctx, rec) {
+		if c.needsProjection(rec) && c.backfillCertProjection(ctx, rec) {
 			projected++
 			if projected%progressEvery == 0 {
 				slog.Info("Certificate index repair: backfill progress",
@@ -222,8 +241,9 @@ func (c *CA) revokedSerialsLocked() map[string]time.Time {
 	return revoked
 }
 
-// backfillCertProjection fills rec's missing display projection from the
-// subject's stored PEM, reporting whether it did. The PEM must carry rec's
+// backfillCertProjection rewrites rec's display projection from the subject's
+// stored PEM, reporting whether it did: one that is missing, or one lacking a
+// fingerprint in StatusFingerprintAlgorithms. The PEM must carry rec's
 // serial: a mismatch means the row does not describe the stored certificate
 // (e.g. a crash window between blob and inventory writes) and is left alone
 // rather than stamped with another certificate's fields.
@@ -251,12 +271,21 @@ func (c *CA) backfillCertProjection(ctx context.Context, rec storage.CertRecord)
 		return false
 	}
 	if recSerial.Cmp(cert.SerialNumber) != 0 {
-		slog.Warn("Certificate index repair: stored certificate serial does not match index record, leaving projection empty",
+		slog.Warn("Certificate index repair: stored certificate serial does not match index record, leaving the record as it is",
 			"subject", rec.Subject, "index_serial", rec.Serial, "cert_serial", serialHexStr(cert.SerialNumber))
 		return false
 	}
 
-	if err := c.Storage.SetCertProjection(ctx, rec.Serial, certProjectionFor(cert)); err != nil {
+	// Keep any fingerprint the row already holds: the serial check above makes
+	// it this certificate's, and dropping it would make a change to a list that
+	// is not a superset of the old one, or a rollback, rewrite every row again.
+	proj := certProjectionFor(cert, c.StatusFingerprintAlgorithms)
+	if len(rec.Fingerprints) > 0 {
+		merged := maps.Clone(rec.Fingerprints)
+		maps.Copy(merged, proj.Fingerprints)
+		proj.Fingerprints = merged
+	}
+	if err := c.Storage.SetCertProjection(ctx, rec.Serial, proj); err != nil {
 		slog.Warn("Certificate index repair: writing projection failed",
 			"subject", rec.Subject, "serial", rec.Serial, "error", err)
 		return false

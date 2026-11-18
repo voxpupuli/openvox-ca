@@ -127,8 +127,8 @@ linters:
       # specific, explained //nolint:gosec at each call site so the gate stays
       # sensitive to any future genuinely-tainted subprocess or conversion.
       excludes:
-        - G401 # SHA1 mandated by RFC 5280 §4.2.1.2 SKI / RFC 6960 OCSP CertID
-        - G505 # crypto/sha1 import mandated by RFC 5280 SKI / RFC 6960 CertID
+        - G401 # SHA1 mandated by RFC 5280 §4.2.1.2 SKI / RFC 6960 OCSP CertID; also the status API's SHA1 fingerprint (#406), which signs nothing
+        - G505 # crypto/sha1 import mandated by RFC 5280 SKI / RFC 6960 CertID, and for that fingerprint
         - G304 # file-backed cert store; paths are operator-config or gated by ValidateSubject + ".." checks
         - G104 # unhandled errors are covered (with line numbers) by errcheck
         - G702 # taint FP: subprocess argv is the operator's own os.Args / ValidateSubject-gated certname (see per-site G204 notes)
