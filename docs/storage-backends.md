@@ -1071,8 +1071,9 @@ in a file (see [keeping the database password private](#keeping-the-database-pas
 
 **Operational notes.** Back the database up with your normal PostgreSQL tooling.
 The CA private key lives in the database by default; enable `encrypt_ca_key` or
-pin it to a local file with `ca_key_file`. Grant the configured role rights to
-create tables on first run (or pre-create the schema and grant DML).
+pin it to a local file with `ca_key_file`. The configured role creates the
+tables on first run and changes them on later upgrades; see [database rights
+for schema migrations](#database-rights-for-schema-migrations).
 `openvox-ca-ctl setup` / `import` work on the local filesystem only.
 
 ### MySQL / MariaDB backend
@@ -1107,7 +1108,10 @@ On the command line, as for PostgreSQL:
 ```
 
 **Operational notes.** The CA private key lives in the database by default;
-enable `encrypt_ca_key` or pin it to a local file with `ca_key_file`.
+enable `encrypt_ca_key` or pin it to a local file with `ca_key_file`. The
+configured user creates the tables on first run and changes them on later
+upgrades; see [database rights for schema
+migrations](#database-rights-for-schema-migrations).
 `openvox-ca-ctl setup` / `import` work on the local filesystem only.
 
 Do not point two independent `openvox-ca` deployments at one MySQL server, even
@@ -1117,6 +1121,31 @@ serialise against each other. (Multiple replicas of *one* deployment sharing a
 database is the supported arrangement and is exactly what those locks are for.)
 PostgreSQL advisory locks are database-scoped, so the equivalent there is not to
 share a *database* with another application that uses `pg_advisory_lock`.
+
+### Database rights for schema migrations
+
+`openvox-ca` creates its tables on first run, and every later start runs any
+schema migrations a release adds before it serves, one replica at a time. So
+the role it connects as needs more than the rights to read and write rows:
+
+- **PostgreSQL:** only a table's owner can alter it, so the role must own the
+  tables it uses, `puppet_ca_inventory` among them. Letting it create them on
+  first run does that.
+- **MySQL/MariaDB:** the user needs `CREATE`, `ALTER` and `INDEX` on the
+  database, besides `SELECT`, `INSERT`, `UPDATE` and `DELETE`.
+
+If you create the schema yourself and grant the CA's role row access only, the
+first start after an upgrade that adds a migration fails before it serves.
+Apply that release's schema change yourself first, as the owner. A migration
+that adds a column looks for it before adding it, so the CA then finds it in
+place and only records the migration in `bun_migrations`, which row access
+allows. The release that adds
+[`status_fingerprint_algorithms`](configuration.md#status-fingerprints) adds
+one column:
+
+```sql
+ALTER TABLE puppet_ca_inventory ADD COLUMN fingerprints TEXT;
+```
 
 ### Keeping the database password private
 
