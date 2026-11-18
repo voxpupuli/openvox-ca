@@ -19,10 +19,17 @@
 // their validation, apart from the exporter in internal/k8sexport. It exists so
 // that something which only reads the server's configuration, such as
 // openvox-ca-ctl, can decode and check this block without linking client-go.
-// internal/k8sexport re-exports every name here, so its callers did not change.
+// internal/k8sexport re-exports every configuration name here, so its callers
+// did not change.
 //
-// Its specs live with internal/k8sexport's, which exercise it through those
-// aliases, so a per-package coverage report shows this package uncovered.
+// The scope constants and Scoped, which applies them to a PEM chain, are also
+// what the filesystem export in internal/fileexport publishes by. One
+// definition of what "self", "chain" and "root" select keeps the two exporters
+// from publishing different things for the same setting.
+//
+// The specs for Scoped and PEMBlocks live in this package, since both
+// exporters depend on them. The configuration types' specs live with
+// internal/k8sexport's, which exercise them through its aliases.
 package exportconfig
 
 import (
