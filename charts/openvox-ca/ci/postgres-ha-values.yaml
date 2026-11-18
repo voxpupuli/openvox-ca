@@ -69,6 +69,10 @@ extraVolumeMounts:
 podAnnotations:
   reloader.stakater.com/auto: "true"
 
+# One replica per node, refused rather than doubled up. With the strategy above
+# this rolls only because the chart adds matchLabelKeys: [pod-template-hash] to
+# a constraint whose labelSelector it defaults; without that the surge pod
+# counts the outgoing ones, finds every node at the skew limit, and waits.
 topologySpreadConstraints:
   - maxSkew: 1
     topologyKey: kubernetes.io/hostname

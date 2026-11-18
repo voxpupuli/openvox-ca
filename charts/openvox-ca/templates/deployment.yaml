@@ -115,6 +115,16 @@ spec:
         A constraint with no labelSelector matches every pod in the namespace,
         which is never what you want here — default it to this release's own
         pods.
+
+        That selector spans the old and new ReplicaSets, and a rollout is when
+        both exist: with as many replicas as nodes, DoNotSchedule and
+        maxUnavailable 0, the surge pod finds an outgoing pod on every node and
+        cannot be placed, and the rollout stops without an event saying why.
+        matchLabelKeys on pod-template-hash narrows the count to the incoming
+        pod's own ReplicaSet, which leaves steady state unchanged. Only on a
+        selector defaulted here: an operator's own labelSelector may spread
+        against other workloads, whose pods carry a different hash. A
+        constraint that sets matchLabelKeys itself, even to [], keeps it.
       */}}
       {{- $selector := dict "matchLabels" (include "openvox-ca.selectorLabels" . | fromYaml) }}
       {{- $constraints := list }}
@@ -122,6 +132,9 @@ spec:
       {{- $c := deepCopy . }}
       {{- if not $c.labelSelector }}
       {{- $_ := set $c "labelSelector" $selector }}
+      {{- if not (hasKey $c "matchLabelKeys") }}
+      {{- $_ := set $c "matchLabelKeys" (list "pod-template-hash") }}
+      {{- end }}
       {{- end }}
       {{- $constraints = append $constraints $c }}
       {{- end }}

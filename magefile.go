@@ -4545,16 +4545,15 @@ const chartDir = "charts/openvox-ca"
 
 // kubeconformVersion is the Kubernetes API version the rendered manifests are
 // validated against. Bumping it is how the chart picks up newly-GA fields.
-const kubeconformVersion = "1.31.0"
+const kubeconformVersion = "1.37.0"
 
 // kubeconformFloorVersion is the chart's declared kubeVersion floor
-// (charts/openvox-ca/Chart.yaml). The minimal fixture — the chart's defaults —
-// is validated against it as well, so the floor is a checked promise rather
-// than a claim. Fixtures that opt into newer fields
-// (unhealthyPodEvictionPolicy is 1.27+, trafficDistribution 1.31+) are only
-// checked at kubeconformVersion; both values carry that note, as does the
-// chart README's requirements section.
-const kubeconformFloorVersion = "1.26.0"
+// (charts/openvox-ca/Chart.yaml). Every fixture is validated against it as
+// well as against kubeconformVersion, so the chart README's claim that every
+// value works at the floor is checked rather than asserted. A value that needs
+// more than the floor fails here until it is either dropped from the fixtures
+// or the floor is raised.
+const kubeconformFloorVersion = "1.34.0"
 
 // kubeconformCacheDir is where chart:validate keeps kubeconform's downloaded
 // schemas, and what dev:clean removes. Named once because sh.Rm treats a
@@ -4563,9 +4562,10 @@ const kubeconformFloorVersion = "1.26.0"
 // for a stale local copy passing what CI fails.
 var kubeconformCacheDir = filepath.Join(".test-output", "kubeconform-cache")
 
-// chartFloorFixture is the fixture that stands in for the chart's defaults and
-// is therefore the one held to the floor. Named here rather than inline so
-// that renaming it fails loudly instead of quietly skipping the check.
+// chartFloorFixture is the fixture that stands in for the chart's defaults,
+// which chart:validate refuses to run without: the defaults are the one render
+// every install shares. Named here rather than inline so that renaming it
+// fails loudly instead of quietly dropping it.
 const chartFloorFixture = "minimal-values"
 
 // crdSchemaLocation points kubeconform at community-maintained JSON schemas
@@ -4719,7 +4719,7 @@ func verifyChartPins() error {
 	return verifyCIHelmAnnotationsIn(ciSrc, renovateSrc)
 }
 
-// kubeVersion: ">=1.26.0-0" — capture the bare version. Chart.yaml is parsed
+// kubeVersion: ">=1.34.0-0" — capture the bare version. Chart.yaml is parsed
 // textually rather than as YAML, matching chartVersions: the file's exact
 // line shapes are load-bearing for four other parsers, so reading it the same
 // way keeps this guard sensitive to the same reformatting they are.
@@ -5169,12 +5169,10 @@ func (Chart) Validate() error {
 		}
 		rendered = append(rendered, path)
 
-		// The minimal fixture is the chart's defaults, so it must also hold at
-		// the kubeVersion floor Chart.yaml advertises. The others opt into
-		// fields newer than that on purpose.
-		targets := []string{kubeconformVersion}
+		// Every fixture is held to the kubeVersion floor as well as the newest
+		// schemas: the chart README says every value works at the floor.
+		targets := []string{kubeconformVersion, kubeconformFloorVersion}
 		if name == chartFloorFixture {
-			targets = append(targets, kubeconformFloorVersion)
 			floorChecked = true
 		}
 		for _, kubeVersion := range targets {
@@ -5183,7 +5181,7 @@ func (Chart) Validate() error {
 				"-strict",
 				"-summary",
 				// Both schema locations are remote, and this runs once per
-				// fixture — seven times per invocation. Without a cache each
+				// fixture per schema version. Without a cache each
 				// one re-downloads the same documents from
 				// raw.githubusercontent.com, so a rate limit there blocks every
 				// merge. (Each CI matrix leg still fetches once: the cache is
@@ -5204,9 +5202,9 @@ func (Chart) Validate() error {
 		}
 	}
 	if !floorChecked {
-		return fmt.Errorf("no %s.yaml fixture found, so nothing was validated against the "+
-			"kubeVersion floor (%s) that %s/Chart.yaml advertises; renaming that fixture "+
-			"silently drops the check",
+		return fmt.Errorf("no %s.yaml fixture found, so the chart's defaults were not validated "+
+			"against the kubeVersion floor (%s) that %s/Chart.yaml advertises; renaming that "+
+			"fixture silently drops the check",
 			chartFloorFixture, kubeconformFloorVersion, chartDir)
 	}
 	// Its own program, so that this file does not import internal/config and
@@ -5586,6 +5584,59 @@ func (Chart) Test() error {
 			sets:     []string{tls, "persistence.enabled=false"},
 			wants:    []string{"type: RollingUpdate", "maxUnavailable: 0", "maxSurge: 1"},
 			notWants: []string{"type: Recreate"},
+		},
+		{
+			// #297: the chart's own HA shape. Two replicas spread one per node
+			// with DoNotSchedule, rolling with maxSurge 1 and maxUnavailable 0,
+			// wedges unless the spread counts only the incoming ReplicaSet.
+			name: "a defaulted spread selector counts only the incoming ReplicaSet",
+			sets: []string{tls, "persistence.enabled=false", "replicaCount=2", "config.storage_backend=postgres"},
+			valuesYAML: `topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+`,
+			wants: []string{
+				"maxUnavailable: 0", "maxSurge: 1", "whenUnsatisfiable: DoNotSchedule",
+				"app.kubernetes.io/name: openvox-ca\n          matchLabelKeys:\n          - pod-template-hash\n",
+			},
+		},
+		{
+			name: "the default constraint counts only the incoming ReplicaSet",
+			sets: []string{tls},
+			wants: []string{
+				"matchLabelKeys:\n          - pod-template-hash\n          maxSkew: 1\n          topologyKey: kubernetes.io/hostname\n          whenUnsatisfiable: ScheduleAnyway",
+			},
+		},
+		{
+			// Other workloads' pods carry a different pod-template-hash, so the
+			// key would silently stop counting every one of them.
+			name: "an operator's own spread selector gets no matchLabelKeys",
+			sets: []string{tls},
+			valuesYAML: `topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app: other
+`,
+			// Positive control first: a constraint that stopped rendering
+			// would satisfy the absence assertion on its own.
+			wants:    []string{"app: other"},
+			notWants: []string{"matchLabelKeys", "pod-template-hash"},
+		},
+		{
+			name: "a constraint's own matchLabelKeys is kept, even when empty",
+			sets: []string{tls},
+			valuesYAML: `topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    matchLabelKeys: []
+`,
+			wants:    []string{"matchLabelKeys: []"},
+			notWants: []string{"pod-template-hash"},
 		},
 		{
 			name:     "an explicit strategy is honoured either way",
@@ -7371,7 +7422,7 @@ networkPolicy:
 		{
 			name:  "topology constraints default to this release's own pods",
 			sets:  []string{tls},
-			wants: []string{"app.kubernetes.io/name: openvox-ca\n          maxSkew: 1"},
+			wants: []string{"app.kubernetes.io/name: openvox-ca\n          matchLabelKeys:"},
 		},
 		{
 			// The credential refusal keys on a password, not on sql_dsn being

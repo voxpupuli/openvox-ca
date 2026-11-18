@@ -1234,16 +1234,6 @@ interval.
 In Kubernetes the fix is a **native sidecar** — an `initContainer` with
 `restartPolicy: Always` whose `startupProbe` gates the containers after it.
 
-> **This shape needs Kubernetes 1.29 or newer.** `restartPolicy` on an init
-> container enters the API in 1.28, behind the `SidecarContainers` feature gate,
-> and is on by default from 1.29. Older clusters do not have it: the field is
-> not part of their pod schema, so the container is an ordinary init container
-> that this example's `while true` loop never lets finish. The chart's own
-> `kubeVersion` floor is `>=1.26.0-0`, which is deliberately wider than this
-> one recipe — check your cluster rather than the chart. On 1.26 or 1.27, order
-> the writer with a one-shot init container that fetches once and exits instead,
-> and accept that nothing keeps the file fresh between restarts.
-
 ```yaml
 extraVolumes:
   - name: upstream-crls
@@ -1257,7 +1247,7 @@ extraVolumeMounts:
 initContainers:
   - name: fetch-upstream-crls
     image: curlimages/curl:8.11.1
-    restartPolicy: Always          # native sidecar (Kubernetes 1.29+): starts before, runs alongside
+    restartPolicy: Always          # native sidecar: starts before, runs alongside
     command: ["/bin/sh", "-c"]
     args:
       - |
