@@ -136,8 +136,8 @@ var _ = Describe("import-cert output escaping", func() {
 	// rather than merely that something went wrong.
 	Describe("error paths", func() {
 		// SECURITY: checkHTTP renders the server's error body, and cobra
-		// prints a returned error to stderr because the subcommands set
-		// SilenceUsage but not SilenceErrors. The body has less provenance
+		// prints a returned error to stderr because nothing here sets
+		// SilenceErrors. The body has less provenance
 		// than anything else the CLI prints -- it is chosen entirely by the
 		// server -- so it is quoted, and this is what would notice it
 		// reverting to %s. TrimSpace would not save it: it strips only

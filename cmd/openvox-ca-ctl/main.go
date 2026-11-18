@@ -43,6 +43,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/cliusage"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 	"github.com/voxpupuli/openvox-ca/internal/version"
 )
@@ -72,8 +73,20 @@ type Client struct {
 //
 // --ca-cert takes precedence over --insecure: an explicitly supplied trust
 // anchor is never downgraded to "verify nothing".
+//
+// Against a plain http:// server URL it writes no notice at all. No handshake
+// happens there -- newClient refuses redirects, so the server cannot move the
+// request onto TLS -- and neither --ca-cert nor --insecure changes anything. A
+// line advising one of them would be false on every invocation, which trains
+// an operator to skip the advisory lines that do matter. The configuration is
+// still built and its errors still returned, so a broken ctl.yaml fails the
+// same way whichever scheme it is used with.
 func newTLSConfig(notices io.Writer) (*tls.Config, error) {
 	tlsCfg := &tls.Config{}
+	plainHTTP := isPlainHTTP(globalServerURL)
+	if plainHTTP {
+		notices = io.Discard
+	}
 
 	if globalCACert != "" {
 		caCertPEM, err := os.ReadFile(globalCACert)
@@ -108,7 +121,9 @@ func newTLSConfig(notices io.Writer) (*tls.Config, error) {
 		// The notice is advisory; a failed write to stderr must not stop the
 		// command, and the slog line below carries the same warning.
 		_, _ = fmt.Fprintln(notices, "WARNING: --insecure specified; TLS server certificate will NOT be verified (vulnerable to MITM)")
-		slog.Warn("TLS server verification disabled", "server", globalServerURL)
+		if !plainHTTP {
+			slog.Warn("TLS server verification disabled", "server", globalServerURL)
+		}
 		tlsCfg.InsecureSkipVerify = true
 	} else {
 		// SECURITY: Neither --ca-cert nor --insecure provided. Use the system
@@ -153,6 +168,14 @@ func newTLSConfig(notices io.Writer) (*tls.Config, error) {
 	return tlsCfg, nil
 }
 
+// isPlainHTTP reports whether serverURL names a plain-HTTP server, to which no
+// TLS configuration applies. An unparseable URL counts as not plain, so its
+// notices are kept; the request then fails on the URL itself.
+func isPlainHTTP(serverURL string) bool {
+	u, err := url.Parse(serverURL)
+	return err == nil && u.Scheme == "http"
+}
+
 func newClient() (*Client, error) {
 	tlsCfg, err := newTLSConfig(os.Stderr)
 	if err != nil {
@@ -162,10 +185,24 @@ func newClient() (*Client, error) {
 	return &Client{
 		BaseURL: strings.TrimRight(globalServerURL, "/"),
 		HTTPClient: &http.Client{
-			Transport: &http.Transport{TLSClientConfig: tlsCfg},
-			Timeout:   30 * time.Second,
+			Transport:     &http.Transport{TLSClientConfig: tlsCfg},
+			Timeout:       30 * time.Second,
+			CheckRedirect: refuseRedirect,
 		},
 	}, nil
+}
+
+// refuseRedirect stops the client following any redirect. Nothing the CLI
+// asks for should answer with one, and following it would carry the request
+// -- its body, the TLS settings and the client certificate -- to whatever host
+// the server named, under the trust the operator chose for --server-url. That
+// includes an http:// URL upgraded to https, where --insecure would then skip
+// verification with no warning, since none is written for plain HTTP.
+//
+// The target is quoted, because the server chose it.
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("the server redirected to %q, and openvox-ca-ctl does not follow redirects; "+
+		"set --server-url to the server itself", req.URL.Redacted())
 }
 
 func (c *Client) do(method, path string, body []byte) (int, []byte, error) {
@@ -208,11 +245,42 @@ func (c *Client) post(path string, body []byte) (int, []byte, error) {
 
 // ---------- helpers ----------
 
+// Exit statuses. They follow puppetserver ca (openvoxserver-ca), where 1 means
+// the command failed and 24 means there was nothing for it to act on, so that a
+// script ported from it keeps telling "did nothing" apart from both "did it"
+// and "failed". docs/operator-cli.md publishes the table.
+const (
+	exitFailure     = 1
+	exitNothingToDo = 24
+)
+
+// exitError carries an exit status other than exitFailure out of Execute,
+// alongside the error cobra prints.
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e *exitError) Error() string { return e.err.Error() }
+func (e *exitError) Unwrap() error { return e.err }
+
+// exitStatus maps the error Execute returned to the process exit status.
+func exitStatus(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exitError
+	if errors.As(err, &ee) {
+		return ee.code
+	}
+	return exitFailure
+}
+
 // checkHTTP turns a non-2xx response into an error naming the request.
 //
 // %q on the body, for the same reason as the import summary below: it is
 // chosen entirely by the server, and cobra prints a returned error straight to
-// stderr (the subcommands set SilenceUsage but not SilenceErrors), so it
+// stderr (nothing here sets SilenceErrors), so it
 // reaches an operator's terminal unescaped. TrimSpace removes only leading and
 // trailing whitespace, so an embedded CR or LF would survive it and could
 // fabricate a reassuring second line after a failed operation -- against a
@@ -247,6 +315,47 @@ func certnamePath(route, certname string) (string, error) {
 	return route + url.PathEscape(certname), nil
 }
 
+// quoteNames renders a list of names the server returned, each quoted, for the
+// same reason as the import summary: the list is decoded from the response
+// body, so the server chooses its contents rather than the operator. Quoting
+// per element rather than the joined string keeps the separator meaningful --
+// "a", "b" rather than "a, b", which would read as a single name containing a
+// comma. Printing is all that happens to them: none reaches a request path or
+// a file name, so none needs certnamePath.
+func quoteNames(names []string) string {
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = strconv.Quote(name)
+	}
+	return strings.Join(quoted, ", ")
+}
+
+// onlyRequested reports whether the server holds nothing for certname but a
+// request waiting to be signed, which is what makes a refused revocation
+// "nothing to do" rather than a failure.
+//
+// It asks rather than reading it off the 409 that prompted the question. Puppet
+// Server answers a revocation 409 for this case alone, so puppetserver ca maps
+// every 409 to 24; openvox-ca answers 409 as well when the stored CRL was not
+// signed by its CA certificate, and there no revocation can be recorded at all.
+// Telling the two apart by the body would bind the CLI to the server's wording.
+// Anything short of a clean "requested" -- a failed request, another state, a
+// body that does not parse -- leaves the revocation a failure.
+func onlyRequested(c *Client, certname string) bool {
+	path, err := certnamePath("/puppet-ca/v1/certificate_status/", certname)
+	if err != nil {
+		return false
+	}
+	code, body, err := c.get(path)
+	if err != nil || code != http.StatusOK {
+		return false
+	}
+	var status struct {
+		State string `json:"state"`
+	}
+	return json.Unmarshal(body, &status) == nil && status.State == "requested"
+}
+
 func printTable(rows [][2]string) {
 	w := 0
 	for _, r := range rows {
@@ -264,9 +373,9 @@ func printTable(rows [][2]string) {
 func newListCmd() *cobra.Command {
 	var all bool
 	cmd := &cobra.Command{
-		Use:          "list",
-		Short:        "List pending (or all) certificate requests",
-		SilenceUsage: true,
+		Use:   "list",
+		Short: "List pending (or all) certificate requests",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -320,9 +429,9 @@ func newSignCmd() *cobra.Command {
 	var certname string
 	var all bool
 	cmd := &cobra.Command{
-		Use:          "sign",
-		Short:        "Sign a pending CSR (or --all)",
-		SilenceUsage: true,
+		Use:   "sign",
+		Short: "Sign a pending CSR (or --all)",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -338,34 +447,37 @@ func newSignCmd() *cobra.Command {
 					return err
 				}
 				var result struct {
-					Signed []string `json:"signed"`
+					Signed        []string `json:"signed"`
+					NoCSR         []string `json:"no-csr"`
+					SigningErrors []string `json:"signing-errors"`
 				}
 				if err := json.Unmarshal(body, &result); err != nil {
 					return fmt.Errorf("parse error: %w", err)
 				}
-				if len(result.Signed) == 0 {
-					fmt.Println("Signed: (none)")
-				} else {
-					// Each name quoted, for the same reason as the import
-					// summary: this list is decoded from the server's response
-					// body, so it is the one confirmation line here whose
-					// contents the server chooses rather than the operator.
-					// Quoting per element rather than the joined string keeps
-					// the separator meaningful -- "a", "b" rather than "a, b",
-					// which would read as a single name containing a comma.
-					// Printing is all that happens to them: none reaches a
-					// request path or a file name, so none needs certnamePath.
-					quoted := make([]string, len(result.Signed))
-					for i, name := range result.Signed {
-						quoted[i] = strconv.Quote(name)
-					}
-					fmt.Printf("Signed: %s\n", strings.Join(quoted, ", "))
+				if len(result.Signed) > 0 {
+					fmt.Printf("Signed: %s\n", quoteNames(result.Signed))
+				}
+				// As puppetserver ca decides it: any request left unsigned is a
+				// failure, even beside some that were signed, and only a run
+				// that found nothing at all to sign is "nothing to do". Both
+				// lists used to be ignored, so a run in which policy refused
+				// every request printed "Signed: (none)" and exited 0.
+				var problems []string
+				if len(result.SigningErrors) > 0 {
+					problems = append(problems, "could not sign "+quoteNames(result.SigningErrors)+
+						" (the server log has the reason)")
+				}
+				if len(result.NoCSR) > 0 {
+					problems = append(problems, "no certificate request found for "+quoteNames(result.NoCSR))
+				}
+				switch {
+				case len(problems) > 0:
+					return errors.New(strings.Join(problems, "; "))
+				case len(result.Signed) == 0:
+					return &exitError{code: exitNothingToDo,
+						err: errors.New("no certificate requests are waiting to be signed")}
 				}
 				return nil
-			}
-
-			if certname == "" {
-				return fmt.Errorf("--certname or --all is required")
 			}
 
 			path, err := certnamePath("/puppet-ca/v1/certificate_status/", certname)
@@ -386,6 +498,10 @@ func newSignCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&certname, "certname", "", "Subject name to sign")
 	cmd.Flags().BoolVar(&all, "all", false, "Sign all pending CSRs")
+	// Exclusive as well as one-required: with both, --all used to win and
+	// --certname was dropped without a word. puppetserver ca refuses the pair.
+	cmd.MarkFlagsOneRequired("certname", "all")
+	cmd.MarkFlagsMutuallyExclusive("certname", "all")
 	return cmd
 }
 
@@ -410,7 +526,7 @@ A serial that is still the certificate stored for its subject is refused, since
 --certname already covers that case and a mistyped digit should not take a
 working node offline. Pass --force when retiring a live certificate by serial is
 what you meant.`,
-		SilenceUsage: true,
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -453,6 +569,11 @@ what you meant.`,
 				return err
 			}
 			if err := checkHTTP(code, respBody, "PUT", path); err != nil {
+				// On the by-serial path certname is empty, and onlyRequested
+				// refuses it before sending anything, so a 409 there stays 1.
+				if code == http.StatusConflict && onlyRequested(c, certname) {
+					return &exitError{code: exitNothingToDo, err: err}
+				}
 				return err
 			}
 			fmt.Printf("Revoked %s\n", subject)
@@ -472,9 +593,9 @@ what you meant.`,
 
 func newReissueCRLCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:          "reissue-crl",
-		Short:        "Re-sign the CRL with a fresh validity window (preserves all revocations)",
-		SilenceUsage: true,
+		Use:   "reissue-crl",
+		Short: "Re-sign the CRL with a fresh validity window (preserves all revocations)",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -499,9 +620,9 @@ func newReissueCRLCmd() *cobra.Command {
 func newCleanCmd() *cobra.Command {
 	var certname string
 	cmd := &cobra.Command{
-		Use:          "clean",
-		Short:        "Revoke and delete a certificate/CSR",
-		SilenceUsage: true,
+		Use:   "clean",
+		Short: "Revoke and delete a certificate/CSR",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -532,9 +653,9 @@ func newGenerateCmd() *cobra.Command {
 	var certname, outDir string
 	var dnsNames []string
 	cmd := &cobra.Command{
-		Use:          "generate",
-		Short:        "Generate a server-side key+cert pair",
-		SilenceUsage: true,
+		Use:   "generate",
+		Short: "Generate a server-side key+cert pair",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newClient()
 			if err != nil {
@@ -702,9 +823,9 @@ func writeKeyFile(path, keyPEM string) error {
 func newImportCertCmd() *cobra.Command {
 	var certname, certFile string
 	cmd := &cobra.Command{
-		Use:          "import-cert",
-		Short:        "Import an externally-issued certificate into the inventory",
-		SilenceUsage: true,
+		Use:   "import-cert",
+		Short: "Import an externally-issued certificate into the inventory",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			certPEM, err := os.ReadFile(certFile)
 			if err != nil {
@@ -770,9 +891,9 @@ func newSetupCmd() *cobra.Command {
 	var encryptKey bool
 	var passphraseFile string
 	cmd := &cobra.Command{
-		Use:          "setup",
-		Short:        "Initialise a new CA (offline)",
-		SilenceUsage: true,
+		Use:   "setup",
+		Short: "Initialise a new CA (offline)",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			absDir, err := filepath.Abs(caDir)
 			if err != nil {
@@ -850,9 +971,9 @@ func newImportCmd() *cobra.Command {
 	var caDir, certBundle, privateKey, crlChain, passphraseFile string
 	var encryptKey, allowPlaintext bool
 	cmd := &cobra.Command{
-		Use:          "import",
-		Short:        "Import an external CA cert/key (offline)",
-		SilenceUsage: true,
+		Use:   "import",
+		Short: "Import an external CA cert/key (offline)",
+		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			absDir, err := filepath.Abs(caDir)
 			if err != nil {
@@ -927,9 +1048,7 @@ func newImportCmd() *cobra.Command {
 // ---------- main ----------
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
-		os.Exit(1)
-	}
+	os.Exit(exitStatus(newRootCmd().Execute()))
 }
 
 // newRootCmd builds and returns the fully-configured root command, including
@@ -943,11 +1062,13 @@ func newRootCmd() *cobra.Command {
 		Long: `openvox-ca-ctl manages certificates on a running openvox-ca server.
 
 Global flags may be placed before or after the subcommand name.`,
-		SilenceUsage: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			resolved := resolveConfigFile(globalConfigFile, "OPENVOX_CA_CTL_CONFIG", defaultCtlConfigFile)
 			cfg, err := loadCtlConfig(resolved)
 			if err != nil {
+				// A configuration fault, not a command-line one: see
+				// silenceUsageOnceRunning.
+				cmd.SilenceUsage = true
 				return err
 			}
 
@@ -1013,6 +1134,53 @@ Global flags may be placed before or after the subcommand name.`,
 		newImportCmd(),
 		newMigrateCmd(),
 	)
+	silenceUsageOnceRunning(rootCmd)
+	cliusage.MarkRequired(rootCmd)
 
 	return rootCmd
+}
+
+// silenceUsageOnceRunning makes every command under root print its usage only
+// for the errors cobra raises before the command runs: an unknown flag, a
+// stray argument, a required flag missing. Those are mistakes on the command
+// line, and the usage shows what the command takes, as puppetserver ca prints
+// it. Once a command is running, a failure is about the server or the store,
+// and a screenful of usage would bury it.
+//
+// SilenceUsage cannot be set up front for that, because cobra checks required
+// flags after PersistentPreRunE, so it is set as each RunE starts instead.
+// The root's PersistentPreRunE sets it for itself when loading the
+// configuration fails.
+func silenceUsageOnceRunning(cmd *cobra.Command) {
+	for _, sub := range cmd.Commands() {
+		silenceUsageOnceRunning(sub)
+	}
+	if run := cmd.RunE; run != nil {
+		cmd.RunE = func(c *cobra.Command, args []string) error {
+			c.SilenceUsage = true
+			return run(c, args)
+		}
+	}
+}
+
+// noArgs refuses positional arguments, which no subcommand takes. cobra would
+// otherwise accept and discard them, so a typo after a well-formed command
+// went unreported; puppetserver ca refuses them too ("Unknown input").
+//
+// `sign node1.example.com` is what a `puppet cert sign` user types first, so a
+// lone argument that would be a valid --certname, on a command that has that
+// flag and was not given it, gets the flag suggested. Only a valid name is
+// echoed into the suggestion, since anything else would not work if pasted.
+func noArgs(cmd *cobra.Command, args []string) error {
+	switch {
+	case len(args) == 0:
+		return nil
+	case len(args) == 1:
+		if f := cmd.Flags().Lookup("certname"); f != nil && !f.Changed && ca.ValidateSubject(args[0]) == nil {
+			return fmt.Errorf("unexpected argument %q; did you mean --certname %s?", args[0], args[0])
+		}
+		return fmt.Errorf("unexpected argument %q", args[0])
+	default:
+		return fmt.Errorf("unexpected arguments %q", args)
+	}
 }

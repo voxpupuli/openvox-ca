@@ -70,8 +70,7 @@ certificate valid for relying parties, not the old key on disk. --csr renews
 onto the key in a CSR its holder made instead, and --keep-key reissues over the
 current key without needing it. A certificate carrying pp_cli_auth can only be
 renewed with --keep-key, and an expired certificate cannot be renewed at all.`,
-		Args:         cobra.NoArgs,
-		SilenceUsage: true,
+		Args: noArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path, err := certnamePath("/puppet-ca/v1/renew/", certname)
 			if err != nil {

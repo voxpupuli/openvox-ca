@@ -52,9 +52,45 @@ both are, and nothing at all when only `--ca-cert` is. These are expected output
 not failures. `setup`, `import` and `migrate` build no client, so they write no
 advisory line and never check `--ca-cert`.
 
+With a plain `http://` `--server-url` none of these lines is written. There is
+no TLS on that connection, so `--ca-cert`, `--insecure` and the client
+certificate change nothing about it, and nothing in it is encrypted or
+authenticated. The files they name are still checked, though: an unreadable
+`--ca-cert`, or a client pair that does not load or is half-supplied, is still
+refused.
+
+`openvox-ca-ctl` follows no redirects. A server that answers with one is
+reported as an error naming where it pointed, so `--server-url` has to name the
+server itself rather than a proxy that redirects to it. Following a redirect
+would carry the request, the TLS settings and the client certificate to
+whatever host it named, and would put a plain-HTTP URL onto TLS without any of
+the lines above.
+
 `openvox-ca-ctl --version` prints the version (including commit metadata when
 built from a git checkout) and exits. Unlike the global flags above,
 `--version` is accepted only on the root command, not after a subcommand.
+
+## Exit status
+
+| Status | Meaning |
+| --- | --- |
+| `0` | The command did what it was asked. |
+| `1` | It failed, or the command line was wrong (see [Subcommands](#subcommands)). |
+| `24` | There was nothing for it to act on: `sign --all` found no request waiting, or `revoke --certname` named a subject that holds only an unsigned request. |
+
+These follow `puppetserver ca`, so a script ported from it keeps telling "did
+nothing" apart from both "did it" and "failed", with one exception: `clean` of a
+subject that holds only a request exits `0`, because the request is deleted.
+`puppetserver ca clean` exits `24` for it.
+
+Two cases that might look like `24` are `1`. `sign --all` exits `1` whenever
+the server left a request it found waiting unsigned, refused by policy or gone
+by the time it was signed, even if it signed none at all, and still lists on
+stdout any it did sign. `revoke` refused for any other reason exits `1`, including the
+`409 Conflict` the server returns when its stored CRL was not signed by its CA
+certificate (see [docs/api.md](api.md#certificate-status)), because then nothing
+can be revoked at all. A `409` from `revoke --certname` is `24` only when the
+subject's status, read back from the server, is `requested`.
 
 ## Configuration
 
@@ -95,6 +131,18 @@ key and its line, and so is a boolean variable set to anything other than `1`,
 
 ## Subcommands
 
+No subcommand takes positional arguments: every value goes in a flag, and a
+stray word is refused rather than ignored. `sign node1.example.com` is refused
+with a pointer to `--certname node1.example.com`. A mistake on the command line
+(a stray argument, an unknown flag, a required flag left out, other than
+`import --private-key`, which is checked once the command runs so that it can
+point at `openvox-ca import-ca-cert`) prints the
+subcommand's usage on stderr after the error, as `puppetserver ca` does. A
+failure once the subcommand is running prints the error alone. In `--help`, on
+this binary and on `openvox-ca`, the flags a subcommand cannot run without are
+marked `(required)`, or `(required unless --other is given)` when either of two
+will do.
+
 ```bash
 # List pending CSRs
 openvox-ca-ctl list
@@ -108,7 +156,9 @@ openvox-ca-ctl list --all
 # reason, rather than reaching the server as a different request.
 openvox-ca-ctl sign --certname agent.example.com
 
-# Sign all pending CSRs
+# Sign all pending CSRs. Exits 24 when none is waiting, and 1 when the server
+# could not sign one of them (see "Exit status" above). --all and --certname
+# cannot be combined.
 openvox-ca-ctl sign --all
 
 # Revoke a certificate (the most recent one issued for that name). The revoked

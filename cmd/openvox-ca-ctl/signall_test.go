@@ -83,8 +83,25 @@ var _ = Describe("sign --all output escaping", func() {
 			"the second name must be separately quoted, not folded into the first")
 	})
 
-	It("still reports an empty result plainly", func() {
-		respBody = `{"signed":[]}`
-		Expect(runCapturingStdout()).To(Equal("Signed: (none)\n"))
-	})
+	// The refusals are operator-facing too, and their names come out of the
+	// same body. cobra prints a returned error verbatim, so the quoting has to
+	// be in the error itself.
+	DescribeTable("quotes each server-returned name in a refusal",
+		func(key string) {
+			respBody = fmt.Sprintf(`{%q:[%s,"web02"]}`, key, strconv.Quote(forged))
+			_, execErr := captureStdout([]string{
+				"sign", "--config", cfg, "--server-url", srv.URL, "--all",
+			})
+			Expect(execErr).To(HaveOccurred())
+			msg := execErr.Error()
+			Expect(msg).NotTo(ContainSubstring("\n"),
+				"a name's newline reached the error unescaped: %q", msg)
+			Expect(msg).NotTo(ContainSubstring("\r"),
+				"a bare carriage return reached the error unescaped: %q", msg)
+			Expect(msg).To(ContainSubstring(strconv.Quote(forged)))
+			Expect(msg).To(ContainSubstring(`"web02"`))
+		},
+		Entry("signing-errors", "signing-errors"),
+		Entry("no-csr", "no-csr"),
+	)
 })

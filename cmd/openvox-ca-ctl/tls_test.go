@@ -26,8 +26,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -68,6 +70,9 @@ var _ = Describe("newTLSConfig", func() {
 		globalInsecure = false
 		globalClientCert = ""
 		globalClientKey = ""
+		// Every spec but the plain-HTTP ones below describes a TLS connection,
+		// and the notices are written only for one.
+		globalServerURL = "https://ca.example.com:8140"
 
 		var err error
 		caKeyPEM, caCertPEM, _, err = testutil.GenerateTestCAECDSA()
@@ -243,6 +248,62 @@ var _ = Describe("newTLSConfig", func() {
 				"InsecureSkipVerify = true; want verification on by default")
 			Expect(notices.String()).To(ContainSubstring("system trust store"))
 		})
+
+		// Only a URL that parses as http:// is plain. One that does not parse
+		// keeps its notices: the request then fails on the URL itself.
+		It("keeps the notice for a server URL that does not parse", func() {
+			globalServerURL = "http://[::1"
+			_, err := newTLSConfig(notices)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(notices.String()).To(ContainSubstring("system trust store"))
+		})
+	})
+
+	// No handshake happens over plain HTTP, so every one of the three notices
+	// would advise a flag that changes nothing there (#363). The https specs
+	// above are the other half: the same branches do write them for TLS.
+	Context("with a plain http:// server URL", func() {
+		BeforeEach(func() { globalServerURL = "http://127.0.0.1:8140" })
+
+		DescribeTable("writes no notice",
+			func(prepare func()) {
+				prepare()
+				_, err := newTLSConfig(notices)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(notices.String()).To(BeEmpty(),
+					"notices = %q; want nothing for a connection with no TLS", notices.String())
+			},
+			Entry("with neither --ca-cert nor --insecure", func() {}),
+			Entry("with --insecure", func() { globalInsecure = true }),
+			Entry("with --ca-cert and --insecure", func() {
+				globalCACert = caCertPath
+				globalInsecure = true
+			}),
+			// url.Parse lowercases the scheme, so this is the same URL.
+			Entry("with the scheme in capitals", func() { globalServerURL = "HTTP://127.0.0.1:8140" }),
+		)
+
+		It("does not log disabled verification for --insecure", func() {
+			globalInsecure = true
+			var logged bytes.Buffer
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+			DeferCleanup(func() { slog.SetDefault(orig) })
+
+			_, err := newTLSConfig(notices)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(logged.String()).To(BeEmpty(),
+				"log = %q; want no TLS warning when no TLS is used", logged.String())
+		})
+
+		// Silence is about the advisories only: a half-supplied mTLS pair is
+		// still a broken configuration, whichever scheme it meets.
+		It("still rejects a half-supplied client pair", func() {
+			globalClientCert = writeTempPEM("client.pem", caCertPEM)
+
+			_, err := newTLSConfig(notices)
+			Expect(err).To(MatchError(ContainSubstring("without --client-key")))
+		})
 	})
 
 	// TLS 1.3 is the floor in every branch, not just the verified ones.
@@ -379,4 +440,46 @@ var _ = Describe("newClient", func() {
 		_, err := newClient()
 		Expect(err).To(MatchError(ContainSubstring("reading --ca-cert")))
 	})
+})
+
+// A redirect would carry the request, the TLS settings and the client
+// certificate to a host the operator never named, and would put an http://
+// --server-url onto TLS that newTLSConfig has said nothing about (#363). The
+// target here is a TLS server, the upgrade case, reached with --insecure so
+// that a followed redirect would complete rather than fail on trust.
+var _ = Describe("Redirects", func() {
+	var (
+		cfg    string
+		target *httptest.Server
+		hits   atomic.Int32
+		origin *httptest.Server
+	)
+
+	BeforeEach(func() {
+		saveCtlGlobals()
+		clearCtlEnv()
+		cfg = writeTempCtlConfig("")
+		hits.Store(0)
+		target = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		DeferCleanup(target.Close)
+		origin = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+		}))
+		DeferCleanup(origin.Close)
+	})
+
+	DescribeTable("are refused, naming the target, with nothing sent to it",
+		func(args ...string) {
+			_, err := captureStdout(append(args, "--config", cfg, "--server-url", origin.URL, "--insecure"))
+			Expect(err).To(MatchError(ContainSubstring(`redirected to "` + target.URL)))
+			Expect(err).To(MatchError(ContainSubstring("does not follow redirects")))
+			Expect(hits.Load()).To(BeZero(), "the redirect target was sent a request")
+		},
+		Entry("a GET", "list"),
+		// A 307 replays a PUT's body, so the revocation itself would arrive.
+		Entry("a PUT with a body", "revoke", "--certname", "node1"),
+	)
 })

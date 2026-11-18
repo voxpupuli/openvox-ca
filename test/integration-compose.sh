@@ -1525,6 +1525,24 @@ echo "$_rv_out" | grep -qiE 'error|fail|not found|HTTP [45]' \
     && pass "openvox-ca-ctl revoke non-existent cert reports error message" \
     || fail "openvox-ca-ctl revoke non-existent cert reports error message" "output: $_rv_out"
 
+# --- 19a2: revoke of a subject holding only a pending CSR exits 24 ---
+# As puppetserver ca does. The CLI tells this 409 from a fatal one by reading
+# the subject's status back, so it needs a real server's answer to be pinned.
+_RVP="pending-revoke-${RUN_ID}.example.com"
+submit_csr "$_RVP"
+_rvp_out=$($CTL revoke --certname "$_RVP" 2>&1) && _rvp_rc=$? || _rvp_rc=$?
+[ "$_rvp_rc" -eq 24 ] \
+    && pass "openvox-ca-ctl revoke of a pending-only subject exits 24" \
+    || fail "openvox-ca-ctl revoke of a pending-only subject exits 24" "exit=$_rvp_rc output: $_rvp_out"
+# clean of the same subject deletes the request and exits 0, unlike
+# puppetserver ca's 24.
+_clp_out=$($CTL clean --certname "$_RVP" 2>&1) && _clp_rc=$? || _clp_rc=$?
+[ "$_clp_rc" -eq 0 ] \
+    && pass "openvox-ca-ctl clean of a pending-only subject exits 0" \
+    || fail "openvox-ca-ctl clean of a pending-only subject exits 0" "exit=$_clp_rc output: $_clp_out"
+assert_http 404 "After ctl clean of a pending-only subject its status returns 404" \
+    "${CA_URL}/puppet-ca/v1/certificate_status/${_RVP}"
+
 # --- 19b: clean non-existent subject must fail with non-zero exit ---
 _cl_out=$($CTL clean --certname "ghost-clean-${RUN_ID}" 2>&1) && _cl_rc=$? || _cl_rc=$?
 [ "$_cl_rc" -ne 0 ] \

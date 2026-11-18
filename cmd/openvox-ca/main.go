@@ -45,6 +45,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/cliusage"
 	"github.com/voxpupuli/openvox-ca/internal/config"
 	"github.com/voxpupuli/openvox-ca/internal/constants"
 	"github.com/voxpupuli/openvox-ca/internal/fileexport"
@@ -1815,6 +1816,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(newGenerateCmd())
 	cmd.AddCommand(newRebuildInventoryHMACCmd())
 
+	cliusage.MarkRequired(cmd)
 	return cmd
 }
 
