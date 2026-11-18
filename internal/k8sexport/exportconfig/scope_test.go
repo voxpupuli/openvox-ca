@@ -93,3 +93,25 @@ var _ = Describe("Scoped's fallback when nothing matches the block type", func()
 		}
 	})
 })
+
+// An unset scope must mean the whole chain, as validation's default does. Both
+// exporters fill the scope in through validation, so this branch is reached
+// only by a target built in code -- the k8sexport spec "publishes the whole
+// chain for a target whose scopes were never validated" drives it that way.
+// It is pinned here as well because this is where the default lives, and the
+// fixtures carry two blocks so that a narrowing to block 0 would show.
+var _ = Describe("Scoped with no scope set", func() {
+	DescribeTable("returns the stored chain untouched",
+		func(chain, blockType string) {
+			Expect(string(exportconfig.Scoped([]byte(chain), blockType, ""))).To(Equal(chain))
+		},
+		Entry("a certificate bundle",
+			"-----BEGIN CERTIFICATE-----\nSVNTVUlORw==\n-----END CERTIFICATE-----\n"+
+				"-----BEGIN CERTIFICATE-----\nUk9PVA==\n-----END CERTIFICATE-----\n",
+			"CERTIFICATE"),
+		Entry("a CRL chain",
+			"-----BEGIN X509 CRL-----\nT1dO\n-----END X509 CRL-----\n"+
+				"-----BEGIN X509 CRL-----\nVVBTVFJFQU0=\n-----END X509 CRL-----\n",
+			"X509 CRL"),
+	)
+})
