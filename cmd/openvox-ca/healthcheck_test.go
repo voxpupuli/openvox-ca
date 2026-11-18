@@ -296,8 +296,9 @@ var _ = Describe("healthcheck subcommand", func() {
 	It("gives up before the images' HEALTHCHECK --timeout does", func() {
 		// So that a hung server is reported by the check, with a reason,
 		// rather than by the runtime killing it with none.
-		// Every image at the top of the tree that declares one, so an image
-		// added later is held to it without anyone extending a list.
+		// Every image at the top of the tree, so an image added later is held
+		// to it without anyone extending a list -- and must declare one: an
+		// image without it reports no health at all, which is #366 again.
 		declares := regexp.MustCompile(`(?m)^HEALTHCHECK\b`)
 		timeout := regexp.MustCompile(`(?m)^HEALTHCHECK [^\n]*--timeout=(\d+)s`)
 		paths, err := filepath.Glob(filepath.Join("..", "..", "Dockerfile*"))
@@ -306,9 +307,7 @@ var _ = Describe("healthcheck subcommand", func() {
 		for _, path := range paths {
 			src, err := os.ReadFile(path)
 			Expect(err).NotTo(HaveOccurred())
-			if !declares.Match(src) {
-				continue
-			}
+			Expect(declares.Match(src)).To(BeTrue(), "%s declares no HEALTHCHECK", path)
 			m := timeout.FindSubmatch(src)
 			Expect(m).NotTo(BeNil(), "%s declares a HEALTHCHECK with no --timeout", path)
 			secs, err := strconv.Atoi(string(m[1]))
