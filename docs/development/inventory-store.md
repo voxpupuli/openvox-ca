@@ -290,7 +290,8 @@ Design rules that keep the index honest:
   holds fingerprints in other digests than SHA-256, and only the ones the CA
   was configured to report when it wrote the row, so its absence means "none
   of those", not "written before the field". The startup repair pass adds
-  every configured digest a row lacks.
+  every configured digest a row lacks. Until it does, a reader that needs a
+  digest the row lacks takes it from the PEM.
 - **Statuses is gated on blob existence.** Historical rows survive cleaning
   (that is the inventory's job), so the index reports only subjects whose
   `cert/<subject>` blob still exists, and only their latest issuance —

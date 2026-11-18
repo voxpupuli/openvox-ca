@@ -585,6 +585,9 @@ func applyServerEnv(cfg *serverConfig) error {
 	if v := os.Getenv("OPENVOX_CA_SERIAL_NUMBER_FORMAT"); v != "" {
 		cfg.SerialNumberFormat = v
 	}
+	if v := os.Getenv("OPENVOX_CA_STATUS_FINGERPRINT_ALGORITHMS"); v != "" {
+		cfg.StatusFingerprintAlgorithms = splitAndTrim(v, ",")
+	}
 	errs = append(errs, config.EnvBool("OPENVOX_CA_REVOKE_ON_AUTO_RENEW", &cfg.RevokeOnAutoRenew))
 	// n >= 0, unlike every interval setting around it. Those treat 0 as "unset,
 	// use the built-in default", so refusing it costs nothing. Here 0 is the

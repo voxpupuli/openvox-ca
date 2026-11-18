@@ -79,6 +79,7 @@ func certProjectionFor(cert *x509.Certificate, algs []FingerprintAlgorithm) stor
 // LacksFingerprints reports whether proj is missing any of the fingerprints
 // in algs. A projection written while the CA reported fewer digests than it
 // does now is one, and the startup repair pass rewrites it from the PEM.
+// Until it does, the status API answers that row from the PEM as well.
 func LacksFingerprints(proj storage.CertProjection, algs []FingerprintAlgorithm) bool {
 	for _, alg := range algs {
 		if _, ok := proj.Fingerprints[string(alg)]; !ok {
@@ -116,7 +117,8 @@ func (c *CA) needsProjection(rec storage.CertRecord) bool {
 // Statuses, so their staleness is harmless. Failures are logged and skipped
 // rather than propagated: a partially repaired index still degrades
 // gracefully, because readers fall back to the PEM for any record left
-// without a projection. c.mu must be held by the caller (for cachedCRL).
+// without a projection or lacking a configured fingerprint. c.mu must be held
+// by the caller (for cachedCRL).
 func (c *CA) rebuildCertIndex(ctx context.Context) {
 	records, ok, err := c.Storage.CertStatuses(ctx, "")
 	if !ok {

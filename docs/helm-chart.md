@@ -501,11 +501,13 @@ env:
 The launcher and signer take fixed shares (`config.memory_reserve_launcher`,
 `config.memory_reserve_signer`) and the frontend takes the remainder. The
 signer's share is the one you can outgrow: its startup peak is
-fleet-proportional at roughly 420 bytes per certificate, and **raising
-`resources.limits.memory` does not reach it**. The share also carries the Go
-runtime's own footprint, so the usable headroom in the 24MiB default is nearer
-16MiB: past roughly 40,000 certificates raise `config.memory_reserve_signer` as
-well. `go_memstats_heap_inuse_bytes{role="signer"}` against
+fleet-proportional at roughly 420 bytes per certificate, or about 1,000 with
+`config.status_fingerprint_algorithms` listing `SHA1` and `SHA512`, and
+**raising `resources.limits.memory` does not reach it**. The share also carries
+the Go runtime's own footprint, so the usable headroom in the 24MiB default is
+nearer 16MiB: past roughly 40,000 certificates, or 16,000 with both those
+digests, raise `config.memory_reserve_signer` as well.
+`go_memstats_heap_inuse_bytes{role="signer"}` against
 `go_gc_gomemlimit_bytes{role="signer"}` shows how close it runs (see
 [one series per process](metrics.md#one-series-per-process)):
 

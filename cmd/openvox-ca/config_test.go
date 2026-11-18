@@ -1192,6 +1192,7 @@ func serverEnvBindings() []serverEnvBinding {
 		{"OPENVOX_CA_ALLOW_DUPLICATE_CERTS", "true", func(c *serverConfig) any { return &c.AllowDuplicateCerts }, true},
 		{"OPENVOX_CA_PUPPET_DATETIME_FORMAT", "true", func(c *serverConfig) any { return &c.PuppetDateTimeFormat }, true},
 		{"OPENVOX_CA_SERIAL_NUMBER_FORMAT", "hex", func(c *serverConfig) any { return &c.SerialNumberFormat }, "hex"},
+		{"OPENVOX_CA_STATUS_FINGERPRINT_ALGORITHMS", "SHA1, sha512,", func(c *serverConfig) any { return &c.StatusFingerprintAlgorithms }, []string{"SHA1", "sha512"}},
 		// Defaults to true, so false is the value that tells.
 		{"OPENVOX_CA_REVOKE_ON_AUTO_RENEW", "false", func(c *serverConfig) any { return &c.RevokeOnAutoRenew }, false},
 		// Distinct values, because these two are adjacent ints with adjacent
@@ -1940,5 +1941,79 @@ var _ = Describe("applyResponseFormats", func() {
 		srv := &api.Server{}
 		Expect(applyResponseFormats(srv, &serverConfig{SerialNumberFormat: "hexx"})).To(
 			MatchError(ContainSubstring("invalid serial_number_format")))
+	})
+
+	It("hands the server the fingerprint digests besides SHA-256", func() {
+		srv := &api.Server{}
+		cfg := serverConfig{StatusFingerprintAlgorithms: []string{"sha512", "SHA256", "SHA1"}}
+		Expect(applyResponseFormats(srv, &cfg)).To(Succeed())
+		Expect(srv.StatusFingerprintAlgorithms).To(Equal([]ca.FingerprintAlgorithm{ca.FingerprintSHA1, ca.FingerprintSHA512}))
+	})
+
+	It("refuses an unknown status_fingerprint_algorithms entry rather than dropping it", func() {
+		srv := &api.Server{}
+		Expect(applyResponseFormats(srv, &serverConfig{StatusFingerprintAlgorithms: []string{"MD5"}})).To(
+			MatchError(ContainSubstring(`invalid status_fingerprint_algorithms: unknown fingerprint algorithm "MD5"`)))
+	})
+})
+
+var _ = Describe("status_fingerprint_algorithms", func() {
+	It("reaches the CA, which projects the fingerprints into the index wherever it signs", func() {
+		cfg, err := loadServerConfig(writeTempConfig("status_fingerprint_algorithms: [SHA512]\n"))
+		Expect(err).NotTo(HaveOccurred())
+
+		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(applyCAConfig(myCA, cfg)).To(Succeed())
+		Expect(myCA.StatusFingerprintAlgorithms).To(Equal([]ca.FingerprintAlgorithm{ca.FingerprintSHA512}))
+	})
+
+	It("refuses an unknown name in applyCAConfig too, the only check generate, csr and import-ca-cert reach", func() {
+		cfg, err := loadServerConfig(writeTempConfig("status_fingerprint_algorithms: [MD5]\n"))
+		Expect(err).NotTo(HaveOccurred())
+
+		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(applyCAConfig(myCA, cfg)).To(
+			MatchError(ContainSubstring(`invalid status_fingerprint_algorithms: unknown fingerprint algorithm "MD5"`)))
+	})
+
+	It("leaves both at SHA-256 only by default", func() {
+		cfg, err := loadServerConfig(writeTempConfig(""))
+		Expect(err).NotTo(HaveOccurred())
+
+		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(applyCAConfig(myCA, cfg)).To(Succeed())
+		Expect(myCA.StatusFingerprintAlgorithms).To(BeEmpty())
+		srv := &api.Server{}
+		Expect(applyResponseFormats(srv, cfg)).To(Succeed())
+		Expect(srv.StatusFingerprintAlgorithms).To(BeEmpty())
+	})
+
+	Context("at startup", func() {
+		var caDir string
+
+		BeforeEach(func() {
+			setEnv(configEnvVar, writeTempConfig(""))
+			clearServerEnv()
+			setEnv("OPENVOX_CA_STATUS_FINGERPRINT_ALGORITHMS", "SHA1,MD5")
+			caDir = GinkgoT().TempDir()
+		})
+
+		// As for serial_number_format above, and for the same reasons: the
+		// empty cadir shows nothing started, and --single-process keeps a
+		// regression from forking this binary.
+		It("refuses an unknown name through the command an operator runs, before anything starts", func() {
+			cmd := newRootCmd()
+			cmd.SetOut(GinkgoWriter)
+			cmd.SetErr(GinkgoWriter)
+			cmd.SetArgs([]string{"--cadir", caDir, "--host", "127.0.0.1", "--port", "0", "--single-process"})
+
+			done := make(chan error, 1)
+			go func() { done <- cmd.Execute() }()
+
+			var err error
+			Eventually(done, "30s").Should(Receive(&err), "the refusal must come before the server starts")
+			Expect(err).To(MatchError(ContainSubstring(`invalid status_fingerprint_algorithms: unknown fingerprint algorithm "MD5"`)))
+			Expect(os.ReadDir(caDir)).To(BeEmpty(), "nothing may be initialised before the refusal")
+		})
 	})
 })

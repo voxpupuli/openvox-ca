@@ -579,6 +579,13 @@ func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
 	myCA.AllowSubjectAltNames = cfg.AllowSubjectAltNames
 	myCA.AllowDuplicateCerts = cfg.AllowDuplicateCerts
 	warnDuplicateCertsWithAutosign(myCA.AutosignConfig, cfg.AllowDuplicateCerts)
+	// The status API reports these; the CA projects them into the certificate
+	// index, wherever it signs, so the frontend can answer from the index.
+	algs, err := statusFingerprintAlgorithms(cfg)
+	if err != nil {
+		return err
+	}
+	myCA.StatusFingerprintAlgorithms = algs
 	myCA.RevokeOnAutoRenew = cfg.RevokeOnAutoRenew
 	myCA.SupersedeAfter = cfg.supersededCertRevokeAfter()
 	myCA.LeafBackdate = cfg.leafBackdate()
@@ -784,6 +791,16 @@ func serialNumberFormat(cfg *serverConfig) (api.SerialNumberFormat, error) {
 	return f, nil
 }
 
+// statusFingerprintAlgorithms parses cfg's status_fingerprint_algorithms,
+// naming the key in the error an operator sees.
+func statusFingerprintAlgorithms(cfg *serverConfig) ([]ca.FingerprintAlgorithm, error) {
+	algs, err := ca.ParseFingerprintAlgorithms(cfg.StatusFingerprintAlgorithms)
+	if err != nil {
+		return nil, fmt.Errorf("invalid status_fingerprint_algorithms: %w", err)
+	}
+	return algs, nil
+}
+
 // newCSRRateLimitedCounter registers openvoxca_csr_rate_limited_total on reg.
 // Registered whatever csr_rate_limit says, since PUT /certificate_request is
 // always served: with the limit off it stays at 0.
@@ -806,15 +823,20 @@ func newCSRRateLimitedCounter(reg prometheus.Registerer) prometheus.Counter {
 // bodies. It is a function of its own so that a spec can pin the whole join
 // from configuration to server, which would otherwise sit inline in the
 // server start-up where nothing can reach it. The start-up validation has
-// already refused a bad serial_number_format, so its error here is a
-// backstop.
+// already refused a bad serial_number_format or
+// status_fingerprint_algorithms, so its error here is a backstop.
 func applyResponseFormats(srv *api.Server, cfg *serverConfig) error {
 	serialFmt, err := serialNumberFormat(cfg)
 	if err != nil {
 		return err
 	}
+	algs, err := statusFingerprintAlgorithms(cfg)
+	if err != nil {
+		return err
+	}
 	srv.PuppetDateTimeFormat = cfg.PuppetDateTimeFormat
 	srv.SerialNumberFormat = serialFmt
+	srv.StatusFingerprintAlgorithms = algs
 	return nil
 }
 
@@ -1114,6 +1136,11 @@ func newRootCmd() *cobra.Command {
 			// dispatch and the --daemon fork, so that a typo refuses where the
 			// operator sees it and before the signer initialises the CA.
 			if _, err := serialNumberFormat(cfg); err != nil {
+				return err
+			}
+			// Checked here for the same reason, and because the CA uses it
+			// too: the signer projects these fingerprints into the index.
+			if _, err := statusFingerprintAlgorithms(cfg); err != nil {
 				return err
 			}
 
