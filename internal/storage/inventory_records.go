@@ -70,6 +70,9 @@ type inventoryRecordJSON struct {
 	// and its absence beside a fingerprint marks a record written before the
 	// field existed.
 	IPAltNames *[]string `json:"ip_alt_names,omitempty"`
+	// Fingerprints needs no such marker: a record without it reads as one
+	// holding no other digests, not as a missing projection.
+	Fingerprints map[string]string `json:"fingerprints,omitempty"`
 }
 
 func encodeInventoryRecord(rec CertRecord) ([]byte, error) {
@@ -95,6 +98,7 @@ func encodeInventoryRecord(rec CertRecord) ([]byte, error) {
 		State:          rec.State,
 		RevokedAt:      rec.RevokedAt,
 		IPAltNames:     ipNames,
+		Fingerprints:   rec.Fingerprints,
 	})
 }
 
@@ -124,6 +128,7 @@ func decodeInventoryRecord(data []byte) (CertRecord, error) {
 			Fingerprint:    r.Fingerprint,
 			DNSAltNames:    r.DNSAltNames,
 			AuthExtensions: r.AuthExtensions,
+			Fingerprints:   r.Fingerprints,
 		},
 		State:     r.State,
 		RevokedAt: r.RevokedAt,

@@ -328,6 +328,13 @@ type CertProjection struct {
 	// AuthExtensions holds Puppet auth-arc extension values keyed by short
 	// name (e.g. "pp_auth_role") or dotted OID when no short name is known.
 	AuthExtensions map[string]string
+	// Fingerprints holds the certificate's fingerprints in digests other than
+	// SHA-256, keyed by the status API's name for the digest ("SHA1",
+	// "SHA512") and rendered as Fingerprint is. Which digests it holds is up
+	// to whoever wrote the projection, so a projection that lacks the field, or
+	// some digest, is still a projection: nil means no other digests, not none
+	// written.
+	Fingerprints map[string]string
 }
 
 // CertRecord is one issued certificate as the certificate index sees it: the
@@ -397,8 +404,10 @@ type CertIndex interface {
 	ClearRevoked(ctx context.Context, serial string) error
 
 	// SetProjection fills the denormalised display fields for every index row
-	// bearing serial. Used to backfill rows created from projection-less
-	// sources (legacy inventory blobs, direct AppendLine writes).
+	// bearing serial. Used by index repair to backfill rows created from
+	// projection-less sources (legacy inventory blobs, direct AppendLine
+	// writes), and to rewrite a projection lacking a fingerprint the CA now
+	// reports.
 	SetProjection(ctx context.Context, serial string, proj CertProjection) error
 }
 

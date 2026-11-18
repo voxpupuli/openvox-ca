@@ -475,8 +475,9 @@ var _ = Describe("dividing the memory budget across the process tree", func() {
 
 		It("honours configured reservations, which is how a large fleet reaches the signer", func() {
 			// The signer's share does not scale with the tree total, so this key
-			// is the only way an operator past ~40,000 certificates can give it
-			// more. If this stops working the documented remedy has no effect.
+			// is the only way an operator past ~40,000 certificates (~16,000 with
+			// SHA1 and SHA512 status fingerprints) can give it more. If this
+			// stops working the documented remedy has no effect.
 			cfg := &serverConfig{MemoryReserveSigner: "64MiB", MemoryReserveLauncher: "16MiB"}
 			budget, kind, reason := resolveMemoryBudget(cfg, memLimitEnv("512MiB"), missingPath())
 

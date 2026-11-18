@@ -1232,6 +1232,7 @@ var _ = Describe("RedisCertIndex", func() {
 			DNSAltNames:    []string{"node1", "node1.example.com"},
 			IPAltNames:     []string{"192.0.2.10", "2001:db8::1"},
 			AuthExtensions: map[string]string{"pp_auth_role": "webserver"},
+			Fingerprints:   map[string]string{"SHA1": "01:02"},
 		}
 		Expect(svc.SetCertProjection(ctx, "0003", proj)).To(Succeed())
 
@@ -1241,6 +1242,7 @@ var _ = Describe("RedisCertIndex", func() {
 		Expect(recs[0].DNSAltNames).To(Equal(proj.DNSAltNames))
 		Expect(recs[0].IPAltNames).To(Equal(proj.IPAltNames))
 		Expect(recs[0].AuthExtensions).To(Equal(proj.AuthExtensions))
+		Expect(recs[0].Fingerprints).To(Equal(proj.Fingerprints))
 	})
 
 	It("keeps the integrity chain untouched by index writes", func() {

@@ -118,8 +118,9 @@ func (b *RedisBackend) ClearRevoked(ctx context.Context, serial string) error {
 }
 
 // SetProjection fills the denormalised display fields for the entry bearing
-// serial. Used to backfill records created from projection-less sources
-// (legacy blob imports, direct AppendLine writes).
+// serial. Used by index repair to backfill records created from
+// projection-less sources (legacy blob imports, direct AppendLine writes), and
+// to rewrite a projection lacking a fingerprint the CA now reports.
 func (b *RedisBackend) SetProjection(ctx context.Context, serial string, proj CertProjection) error {
 	return b.mutateRecordBySerial(ctx, serial, func(rec *CertRecord) bool {
 		rec.CertProjection = proj

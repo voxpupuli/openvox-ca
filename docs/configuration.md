@@ -202,6 +202,8 @@ ca_key_passphrase_file: ""      # path to passphrase file; required with encrypt
 puppet_datetime_format: false   # use Puppet CA style "2006-01-02T15:04:05MST" instead of RFC 3339
 # serial_number in certificate status responses. See "Serial number format" below.
 serial_number_format: number    # "hex" = colon-separated hex string; departs from OpenVox Server's API
+# Fingerprint digests in certificate status responses. See "Status fingerprints" below.
+status_fingerprint_algorithms: [SHA256]  # [SHA1, SHA256, SHA512] matches OpenVox Server
 # Certificate auto-renewal (empty-body POST /certificate_renewal).
 revoke_on_auto_renew: true      # false matches OpenVox Server's Clojure CA (no revocation on auto-renewal); also covers an empty-body POST /renew
 # Delayed supersession. A renewal records the certificate it replaced and a sweep
@@ -355,6 +357,7 @@ A database password needs the same care. Give it in `--sql-dsn-file`,
 | `etcd_tls_key_file` | `OPENVOX_CA_ETCD_TLS_KEY_FILE` |
 | `puppet_datetime_format` | `OPENVOX_CA_PUPPET_DATETIME_FORMAT` |
 | `serial_number_format` | `OPENVOX_CA_SERIAL_NUMBER_FORMAT` |
+| `status_fingerprint_algorithms` | `OPENVOX_CA_STATUS_FINGERPRINT_ALGORITHMS` (comma-separated) |
 | `revoke_on_auto_renew` | `OPENVOX_CA_REVOKE_ON_AUTO_RENEW` |
 | `superseded_cert_revoke_after_sec` | `OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC` |
 | `superseded_cert_sweep_interval_sec` | `OPENVOX_CA_SUPERSEDED_CERT_SWEEP_INTERVAL_SEC` |
@@ -2686,6 +2689,51 @@ Server that reads `serial_number` as a number breaks. Set it only when every
 client of the status endpoints is yours. Any other value refuses at startup.
 See [the status response](api.md#certificate-status) for the exact rendering.
 
+## Status fingerprints
+
+`status_fingerprint_algorithms` names the digests that `GET
+/certificate_status/{subject}` and `GET /certificate_statuses/*` report
+fingerprints in, under `fingerprints`. The accepted names are `SHA1`, `SHA256`
+and `SHA512`, in any case. `SHA256` is always reported, because it is also
+`fingerprint` and `fingerprints.default`, so the default reports `SHA256`
+alone.
+
+OpenVox Server reports all three. Set the list to match it when a client reads
+`fingerprints.SHA1` or `fingerprints.SHA512`:
+
+```yaml
+status_fingerprint_algorithms: [SHA1, SHA256, SHA512]
+```
+
+A name not in the list above refuses at startup, and so does `SHA1` in a
+process running under `GODEBUG=fips140=only`, where Go's SHA-1 refuses to
+hash. A fingerprint names a certificate and signs nothing, so the FIPS release
+builds compute a SHA-1 fingerprint like any other.
+
+On a backend with a certificate index (SQL, etcd, Redis), each fingerprint is
+stored with the certificate when it is signed, so listing statuses does not
+read every certificate. Turning on a digest after certificates exist is not
+free. The start that turns it on adds it to every stored certificate before it
+serves, as part of the index repair it already runs at startup: one
+certificate read and one index write per certificate, with progress logged
+(`Certificate index repair: backfill progress`). On a large fleet that start
+can take minutes, as the backfill after [a backend
+migration](storage-backends.md) does. Under the Helm chart, raise
+`startupProbe.failureThreshold` for that start, or the kubelet restarts the pod
+before it finishes; the rows it has written are kept, so it still completes,
+but only across restarts. The systemd unit allows 300 seconds.
+
+Each digest also stays in the signer's memory while it starts: with `SHA1` and
+`SHA512` both listed, its startup peak grows from about 420 to about 1,000
+bytes per certificate, so a fleet past roughly 16,000 certificates should raise
+[`memory_reserve_signer`](#memory-budget) (40,000 without them).
+
+A status is never missing a digest: one for a certificate stored without it is
+read from the certificate itself until the repair reaches it. That leaves only
+rows the repair has not yet seen, such as a certificate a replica still running
+the old setting signed during a rolling change, and the next start fills them
+in.
+
 ## Directory layout (filesystem backend)
 
 ```text
@@ -2787,11 +2835,13 @@ The launcher and signer take fixed shares (`memory_reserve_launcher`,
 grammar is below) and the frontend takes the remainder, because in steady state
 the frontend is the process whose footprint grows with the fleet. The signer's share
 is the one an operator can outgrow: its startup peak is fleet-proportional at
-roughly 420 bytes per certificate, and **raising the container limit does not
-reach it**. The share also has to carry the Go runtime's own footprint, a few
-MiB before any inventory, so the usable headroom in the 24MiB default is nearer
-16MiB: raise `memory_reserve_signer` beyond roughly 40,000 certificates. To
-see how close the signer runs to its share, compare
+roughly 420 bytes per certificate, or about 1,000 with
+[`status_fingerprint_algorithms`](#status-fingerprints) listing `SHA1` and
+`SHA512`, and **raising the container limit does not reach it**. The share
+also has to carry the Go runtime's own footprint, a few MiB before any
+inventory, so the usable headroom in the 24MiB default is nearer 16MiB: raise
+`memory_reserve_signer` beyond roughly 40,000 certificates, or 16,000 with both
+those digests. To see how close the signer runs to its share, compare
 `go_memstats_heap_inuse_bytes{role="signer"}` and
 `process_resident_memory_bytes{role="signer"}` with
 `go_gc_gomemlimit_bytes{role="signer"}`; see

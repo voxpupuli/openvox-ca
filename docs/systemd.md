@@ -209,7 +209,8 @@ unlimited, which is the right default for a host that is not memory-constrained.
 The launcher and signer take fixed shares (`memory_reserve_launcher`,
 `memory_reserve_signer`) and the frontend takes the remainder. The signer's share
 does not grow with the ceiling, and it carries the Go runtime's own footprint
-before any inventory, so a fleet beyond roughly 40,000 certificates should raise
+before any inventory, so a fleet beyond roughly 40,000 certificates (16,000 with
+`status_fingerprint_algorithms` listing `SHA1` and `SHA512`) should raise
 `memory_reserve_signer` — raising `MemoryMax=` alone will not reach it. A
 `MemoryMax=` set on a parent slice rather than on this unit is not derived
 either, and `MemoryHigh=` is not read at all — only `memory.max` is consulted.

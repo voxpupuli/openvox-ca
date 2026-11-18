@@ -61,11 +61,11 @@ var _ = DescribeTable("certStatusFromRecord rejects a record it cannot describe"
 		}
 		// The fixture itself must be acceptable, or every entry below passes for
 		// the wrong reason.
-		_, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
+		_, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber, nil)
 		Expect(ok).To(BeTrue(), "the unmutated fixture must be answerable")
 
 		mutate(&rec)
-		_, ok = certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
+		_, ok = certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber, nil)
 		Expect(ok).To(BeFalse())
 	},
 	Entry("no projection at all", func(r *storage.CertRecord) { r.Fingerprint = "" }),
@@ -91,7 +91,7 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 			},
 			State: storage.CertStateRevoked,
 		}
-		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber, nil)
 		Expect(ok).To(BeTrue())
 		Expect(got.Name).To(Equal("node1.example.com"))
 		Expect(got.State).To(Equal(storage.CertStateRevoked))
@@ -119,7 +119,7 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 			},
 			State: storage.CertStateSigned,
 		}
-		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber, nil)
 		Expect(ok).To(BeTrue())
 		Expect(got.AuthorizationExtensions).To(Equal(map[string]string{
 			"1.3.6.1.4.1.34380.1.3.2": "true",
@@ -140,7 +140,7 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 			},
 			State: storage.CertStateSigned,
 		}
-		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber, nil)
 		Expect(ok).To(BeTrue())
 		Expect(got.AuthorizationExtensions).To(Equal(map[string]string{"1.3.6.1.4.1.34380.1.3.99": "custom"}))
 	})
@@ -187,7 +187,7 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 				CertProjection: storage.CertProjection{Fingerprint: "SHA256:AA"},
 				State:          storage.CertStateSigned,
 			}
-			got, ok := certStatusFromRecord(rec, time.RFC3339, format)
+			got, ok := certStatusFromRecord(rec, time.RFC3339, format, nil)
 			Expect(ok).To(BeTrue())
 			out, err := json.Marshal(got.SerialNumber)
 			Expect(err).NotTo(HaveOccurred())
@@ -208,7 +208,7 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 			CertProjection: storage.CertProjection{Fingerprint: "SHA256:AA"},
 			State:          storage.CertStateSigned,
 		}
-		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber, nil)
 		Expect(ok).To(BeTrue())
 		Expect(got.DNSAltNames).NotTo(BeNil())
 		Expect(got.SubjectAltNames).NotTo(BeNil())
@@ -228,7 +228,7 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 			},
 			State: storage.CertStateSigned,
 		}
-		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber, nil)
 		Expect(ok).To(BeTrue())
 		Expect(got.SubjectAltNames).To(Equal([]string{
 			"IP:192.0.2.10", "IP:2001:db8::1", "DNS:node1", "DNS:node1.example.com",
@@ -266,11 +266,17 @@ var _ = Describe("subject_alt_names from a parsed certificate or CSR", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		got := certStatusFromCert("node1", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-			storage.CertStateSigned, time.RFC3339, SerialNumberAsNumber)
+			storage.CertStateSigned, time.RFC3339, SerialNumberAsNumber, nil)
 		Expect(got.SubjectAltNames).To(Equal([]string{
 			"IP:192.0.2.10", "IP:2001:db8::1", "DNS:node1", "DNS:node1.example.com",
 		}))
 		Expect(got.DNSAltNames).To(Equal([]string{"DNS:node1", "DNS:node1.example.com"}))
+	})
+
+	It("keeps every configured fingerprint key for a stored blob that is not PEM", func() {
+		got := certStatusFromCert("node1", []byte("not a certificate"), storage.CertStateSigned,
+			time.RFC3339, SerialNumberAsNumber, []ca.FingerprintAlgorithm{ca.FingerprintSHA1, ca.FingerprintSHA512})
+		Expect(got.Fingerprints).To(Equal(map[string]string{"SHA256": "", "default": "", "SHA1": "", "SHA512": ""}))
 	})
 
 	It("lists a CSR's IP SANs ahead of its DNS SANs", func() {
@@ -281,7 +287,7 @@ var _ = Describe("subject_alt_names from a parsed certificate or CSR", func() {
 		der, err := x509.CreateCertificateRequest(rand.Reader, template, key)
 		Expect(err).NotTo(HaveOccurred())
 
-		got := certStatusFromCSR("node1", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+		got := certStatusFromCSR("node1", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}), nil)
 		Expect(got.SubjectAltNames).To(Equal([]string{
 			"IP:192.0.2.10", "IP:2001:db8::1", "DNS:node1", "DNS:node1.example.com",
 		}))

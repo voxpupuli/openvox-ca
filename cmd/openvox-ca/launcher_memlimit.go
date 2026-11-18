@@ -99,10 +99,13 @@ const (
 	// defaultSignerReservation must cover the signer's *peak*, which falls
 	// during ca.Init and is fleet-proportional at roughly 420 bytes per
 	// certificate: buildSerialIndex plus the []CertRecord that rebuildCertIndex
-	// materialises. The share must also carry the runtime's own mapped
-	// footprint -- the same few MiB minProcessReservation exists to protect --
-	// so the usable headroom in 24MiB is nearer 16MiB, covering on the order of
-	// 40,000 certificates rather than the 60,000 the raw division suggests.
+	// materialises. With status_fingerprint_algorithms listing SHA1 and SHA512,
+	// each record also holds those fingerprints, and the figure is nearer 1,000
+	// (measured on SQLite: 424 and 1,017 bytes per retained record). The share
+	// must also carry the runtime's own mapped footprint -- the same few MiB
+	// minProcessReservation exists to protect -- so the usable headroom in 24MiB
+	// is nearer 16MiB, covering on the order of 40,000 certificates rather than
+	// the 60,000 the raw division suggests, or 16,000 with both those digests.
 	//
 	// This share does NOT scale with the tree total, so raising the container
 	// limit does not reach the signer. Above roughly that fleet size, raise

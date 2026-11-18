@@ -194,6 +194,13 @@ type CA struct {
 	// replaced this way stays valid until it is revoked or expires.
 	AllowDuplicateCerts bool
 
+	// StatusFingerprintAlgorithms are the digests, besides SHA-256, that the
+	// status API reports fingerprints in: status_fingerprint_algorithms, as
+	// ParseFingerprintAlgorithms returns it. The certificate index projection
+	// stores a fingerprint in each, and the startup repair pass adds any a
+	// stored projection lacks. Empty (the default) means SHA-256 only.
+	StatusFingerprintAlgorithms []FingerprintAlgorithm
+
 	// NoBootstrap makes Init refuse to create a new CA when none is found,
 	// rather than bootstrapping one. For tools that operate on an existing CA
 	// and have nothing sensible to do without it: minting a fresh root because

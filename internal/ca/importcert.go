@@ -199,7 +199,7 @@ func (c *CA) importCertificateLocked(ctx context.Context, subject, serialStr str
 		return nil, fmt.Errorf("failed to save imported cert for %s: %w", subject, err)
 	}
 
-	proj := certProjectionFor(cert)
+	proj := certProjectionFor(cert, c.StatusFingerprintAlgorithms)
 	inventoryEntry := storage.FormatInventoryLine(serialStr, cert.NotBefore, cert.NotAfter, subject)
 	if err := c.Storage.AppendInventoryRecord(ctx, inventoryEntry, &proj); err != nil {
 		// Roll back the cert so storage and inventory stay in sync, same as

@@ -43,6 +43,9 @@ var certIndexColumns = []string{
 // ipAltNamesColumnName is the column the ip_alt_names migration adds.
 const ipAltNamesColumnName = "ip_alt_names"
 
+// fingerprintsColumnName is the column the fingerprints migration adds.
+const fingerprintsColumnName = "fingerprints"
+
 var certIndexIndices = []string{
 	"idx_puppet_ca_inventory_state", "idx_puppet_ca_inventory_not_after",
 }

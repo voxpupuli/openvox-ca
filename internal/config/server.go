@@ -96,11 +96,13 @@ type ServerConfig struct {
 	// see parseConfiguredByteCount. The frontend takes the remainder,
 	// because in steady state it is the process whose footprint grows with the
 	// fleet. The signer's share is the one an operator can outgrow: its startup
-	// peak is fleet-proportional at roughly 420 bytes per certificate, and
+	// peak is fleet-proportional at roughly 420 bytes per certificate (about
+	// 1,000 with status_fingerprint_algorithms listing SHA1 and SHA512), and
 	// raising the container limit does not reach it. The share also carries the
 	// runtime's own footprint, so the usable headroom in the 24MiB default is
 	// nearer 16MiB: raise memory_reserve_signer beyond roughly 40,000
-	// certificates. Empty selects the built-in defaults.
+	// certificates, or 16,000 with both those digests. Empty selects the
+	// built-in defaults.
 	MemoryReserveLauncher string `yaml:"memory_reserve_launcher"`
 	MemoryReserveSigner   string `yaml:"memory_reserve_signer"`
 
@@ -251,6 +253,11 @@ type ServerConfig struct {
 	// "hex" (an uppercase colon-separated string, as openssl prints it).
 	// "hex" changes the field's JSON type, so it departs from OpenVox Server.
 	SerialNumberFormat string `yaml:"serial_number_format"`
+	// StatusFingerprintAlgorithms names the digests certificate status
+	// responses report fingerprints in, from SHA1, SHA256 and SHA512. SHA256
+	// is always reported, so the default (empty) reports SHA256 only, where
+	// OpenVox Server reports all three.
+	StatusFingerprintAlgorithms []string `yaml:"status_fingerprint_algorithms"`
 	// RevokeOnAutoRenew revokes the certificate replaced by a same-key renewal
 	// -- the empty-body (no-CSR) /certificate_renewal auto-renewal path, or an
 	// operator's empty-body POST /renew -- once its successor is signed and

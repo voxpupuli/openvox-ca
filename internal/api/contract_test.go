@@ -128,26 +128,20 @@ type contractException struct {
 }
 
 var contractExceptions = map[string][]contractException{
-	"status-signed-dns":   missingFingerprints("$"),
-	"status-signed-nosan": missingFingerprints("$"),
-	"status-revoked":      missingFingerprints("$"),
-	"status-requested":    missingFingerprints("$"),
-	"status-cert-and-csr": missingFingerprints("$"),
-	"status-signed-ip":    append(missingFingerprints("$"), compressedIPv6("$")),
-	"status-signed-ext":   append(missingFingerprints("$"), cornerExtExtensions("$")...),
+	"status-signed-ip":  {compressedIPv6("$")},
+	"status-signed-ext": cornerExtExtensions("$"),
 	"status-unknown": {{`media type: "text/plain", upstream "application/json"`,
 		"kept: the 404 body is plain text, as upstream's is, and says so where upstream's header claims JSON"}},
-	"status-signed-mapped": append(missingFingerprints("$"), degradedMapped("$")...),
-	"statuses-all": append(append(append(missingFingerprints("$[*]"),
-		compressedIPv6("$[name=corner-ip,state=signed]"), hiddenCSR),
+	"status-signed-mapped": degradedMapped("$"),
+	"statuses-all": append(append([]contractException{
+		compressedIPv6("$[name=corner-ip,state=signed]"), hiddenCSR},
 		cornerExtExtensions("$[name=corner-ext,state=signed]")...),
 		degradedMapped("$[name=corner-mapped,state=signed]")...),
-	"statuses-requested": append(missingFingerprints("$[*]"), hiddenCSR),
-	"statuses-signed": append(append(append(missingFingerprints("$[*]"),
-		compressedIPv6("$[name=corner-ip,state=signed]")),
+	"statuses-requested": {hiddenCSR},
+	"statuses-signed": append(append([]contractException{
+		compressedIPv6("$[name=corner-ip,state=signed]")},
 		cornerExtExtensions("$[name=corner-ext,state=signed]")...),
 		degradedMapped("$[name=corner-mapped,state=signed]")...),
-	"statuses-revoked": missingFingerprints("$[*]"),
 	"statuses-unknown-state": {{"$: 0 entries, upstream 18",
 		"kept: an unknown ?state= matches no subject, where upstream ignores the filter and lists them all"}},
 	"statuses-empty-segment": {{"status: 404, upstream 400",
@@ -193,14 +187,6 @@ func degradedMapped(at string) []contractException {
 // hiddenCSR is corner-both's CSR, filed behind its live certificate.
 var hiddenCSR = contractException{"$[name=corner-both,state=requested]: missing",
 	"kept: a CSR for a subject with a live certificate is not listed"}
-
-func missingFingerprints(at string) []contractException {
-	const reason = "#406: fingerprints has SHA256 and default only"
-	return []contractException{
-		{at + ".fingerprints.SHA1: missing", reason},
-		{at + ".fingerprints.SHA512: missing", reason},
-	}
-}
 
 // compressedIPv6 is corner-ip's IPv6 SAN, which openvox-ca writes in Go's
 // compressed form and OpenVox Server in Java's uncompressed one.
@@ -591,6 +577,9 @@ func seedContractStore(store *storage.StorageService) *api.Server {
 	// Upstream's date layout is openvox-ca's opt-in; see docs/api.md's
 	// "Differences from OpenVox Server".
 	srv.PuppetDateTimeFormat = true
+	// So are the SHA1 and SHA512 fingerprints, which status_fingerprint_algorithms
+	// adds to the SHA-256 one reported by default.
+	srv.StatusFingerprintAlgorithms = []ca.FingerprintAlgorithm{ca.FingerprintSHA1, ca.FingerprintSHA512}
 	return srv
 }
 

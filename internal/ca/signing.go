@@ -958,7 +958,7 @@ func (c *CA) issueLeafLocked(ctx context.Context, subject string, subjectName pk
 	// issuance.
 	var proj *storage.CertProjection
 	if signedCert, perr := x509.ParseCertificate(certBytes); perr == nil {
-		p := certProjectionFor(signedCert)
+		p := certProjectionFor(signedCert, c.StatusFingerprintAlgorithms)
 		proj = &p
 	} else {
 		slog.Warn("Failed to parse just-signed certificate for index projection",

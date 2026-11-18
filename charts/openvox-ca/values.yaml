@@ -76,6 +76,7 @@ commonAnnotations: {}
 #     leaf_backdate_sec: 300   # clock-skew tolerance on every leaf; assumes synchronised clocks
 #     managed_cert_interval_sec: 900   # reconcile period; dormant until a managed certificate exists
 #     serial_number_format: number   # OpenVox Server's JSON number; "hex" sends a colon-separated string instead
+#     status_fingerprint_algorithms: [SHA256]   # [SHA1, SHA256, SHA512] reports what OpenVox Server does
 #     insecure_allow_world_readable_keys: false  # true starts anyway on world-readable keys
 #     insecure_allow_unsafe_autosign_path: false  # true runs an autosign plugin others could replace
 #     insecure_allow_plain_http_generate: false  # true lets POST /generate return keys without TLS
@@ -602,6 +603,12 @@ readinessProbe:
 # packaging/systemd/openvox-ca.service quantifies at 210s of bounded waits
 # plus key generation, and the CA's default RSA-4096 key is generated inside
 # that window on a first start.
+#
+# Init also repairs the certificate index, and on a large fleet two starts make
+# that slow: the first after a backend migration, and the first after adding a
+# digest to config.status_fingerprint_algorithms. Each rewrites every stored
+# certificate's index row before serving; raise failureThreshold for that start.
+# See docs/configuration.md#status-fingerprints.
 startupProbe:
   enabled: true
   failureThreshold: 30

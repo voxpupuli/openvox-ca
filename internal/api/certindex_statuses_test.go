@@ -176,6 +176,134 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 		Expect(*got.NotAfter).To(Equal(cert.NotAfter.UTC().Format(time.RFC3339)))
 	})
 
+	Context("with status_fingerprint_algorithms set", func() {
+		both := []ca.FingerprintAlgorithm{ca.FingerprintSHA1, ca.FingerprintSHA512}
+
+		// serveWith rebuilds the routes with the server reporting algs.
+		serveWith := func(algs []ca.FingerprintAlgorithm) {
+			srv := api.New(myCA)
+			srv.StatusFingerprintAlgorithms = algs
+			mux = srv.Routes()
+		}
+
+		storedDER := func(subject string) []byte {
+			certPEM, err := store.GetCert(ctx, subject)
+			Expect(err).NotTo(HaveOccurred())
+			block, _ := pem.Decode(certPEM)
+			Expect(block).NotTo(BeNil())
+			return block.Bytes
+		}
+
+		upper := func(alg ca.FingerprintAlgorithm, der []byte) string {
+			return strings.ToUpper(ca.ColonFingerprint(alg, der))
+		}
+
+		It("answers from the index row's fingerprints", func() {
+			myCA.StatusFingerprintAlgorithms = both
+			serveWith(both)
+			submitAndSign("fp-node", generateCSRWithSANs("fp-node", []string{"fp-node.example.com"}))
+
+			// Overwrite the row's SHA-1 with a value no certificate has, so the
+			// response can only carry it if it was read from the index.
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			proj := recs[0].CertProjection
+			proj.Fingerprints = map[string]string{"SHA1": "0a:0b", "SHA512": proj.Fingerprints["SHA512"]}
+			Expect(store.SetCertProjection(ctx, recs[0].Serial, proj)).To(Succeed())
+
+			statuses := getStatuses("")
+			Expect(statuses).To(HaveLen(1))
+			fp := strings.ToUpper(ca.SHA256ColonFingerprint(storedDER("fp-node")))
+			Expect(statuses[0].Fingerprints).To(Equal(map[string]string{
+				"SHA256": fp, "default": fp,
+				"SHA1":   "0A:0B",
+				"SHA512": upper(ca.FingerprintSHA512, storedDER("fp-node")),
+			}))
+		})
+
+		It("falls back to the stored PEM for a row projected before a digest was configured", func() {
+			// The CA projects SHA-256 only, as every row is before the setting is
+			// first turned on; the repair pass that adds the rest runs at startup.
+			serveWith(both)
+			submitAndSign("old-node", generateCSRWithSANs("old-node", []string{"old-node.example.com"}))
+
+			statuses := getStatuses("")
+			Expect(statuses).To(HaveLen(1))
+			der := storedDER("old-node")
+			fp := strings.ToUpper(ca.SHA256ColonFingerprint(der))
+			Expect(statuses[0].Fingerprints).To(Equal(map[string]string{
+				"SHA256": fp, "default": fp,
+				"SHA1":   upper(ca.FingerprintSHA1, der),
+				"SHA512": upper(ca.FingerprintSHA512, der),
+			}))
+
+			// A status read never writes: filling the row is the startup
+			// repair pass's job.
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			Expect(recs[0].Fingerprints).To(BeNil(), "the read must leave the row as it was")
+		})
+
+		It("falls back to the stored PEM for a row holding some of the configured digests", func() {
+			myCA.StatusFingerprintAlgorithms = []ca.FingerprintAlgorithm{ca.FingerprintSHA1}
+			serveWith(both)
+			submitAndSign("part-node", generateCSRWithSANs("part-node", []string{"part-node.example.com"}))
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			Expect(recs[0].Fingerprints).To(HaveKey("SHA1"), "the row must hold some of the configured digests")
+			Expect(recs[0].Fingerprints).NotTo(HaveKey("SHA512"), "and lack the rest")
+
+			statuses := getStatuses("")
+			Expect(statuses).To(HaveLen(1))
+			der := storedDER("part-node")
+			fp := strings.ToUpper(ca.SHA256ColonFingerprint(der))
+			Expect(statuses[0].Fingerprints).To(Equal(map[string]string{
+				"SHA256": fp, "default": fp,
+				"SHA1":   upper(ca.FingerprintSHA1, der),
+				"SHA512": upper(ca.FingerprintSHA512, der),
+			}), "SHA512 must come from the PEM, not as an empty string from the row")
+		})
+
+		It("reports them for a stored certificate with no index row", func() {
+			// The crash-window shape of "lists a certificate that has no index
+			// row at all", below: answered from the stored PEM, with every
+			// configured digest.
+			serveWith(both)
+			submitAndSign("rowless-node", generateCSRWithSANs("rowless-node", []string{"rowless-node.example.com"}))
+			_, err := store.PruneInventory(ctx, func(storage.InventoryEntry) bool { return false })
+			Expect(err).NotTo(HaveOccurred())
+
+			statuses := getStatuses("")
+			Expect(statuses).To(HaveLen(1))
+			der := storedDER("rowless-node")
+			fp := strings.ToUpper(ca.SHA256ColonFingerprint(der))
+			Expect(statuses[0].Fingerprints).To(Equal(map[string]string{
+				"SHA256": fp, "default": fp,
+				"SHA1":   upper(ca.FingerprintSHA1, der),
+				"SHA512": upper(ca.FingerprintSHA512, der),
+			}))
+		})
+
+		It("reports only the configured digests, whatever the row holds", func() {
+			myCA.StatusFingerprintAlgorithms = both
+			serveWith(nil)
+			submitAndSign("was-node", generateCSRWithSANs("was-node", []string{"was-node.example.com"}))
+			recs, _, err := store.CertStatuses(ctx, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recs).To(HaveLen(1))
+			Expect(recs[0].Fingerprints).To(HaveKey("SHA1"), "the row must hold digests the server does not report")
+			Expect(recs[0].Fingerprints).To(HaveKey("SHA512"))
+
+			statuses := getStatuses("")
+			Expect(statuses).To(HaveLen(1))
+			fp := strings.ToUpper(ca.SHA256ColonFingerprint(storedDER("was-node")))
+			Expect(statuses[0].Fingerprints).To(Equal(map[string]string{"SHA256": fp, "default": fp}))
+		})
+	})
+
 	It("lists an imported certificate's IP SANs from the index exactly as from the stored PEM", func() {
 		// The signing path copies DNS SANs only, so a certificate carrying IP
 		// SANs reaches the index by import (or a migrated cadir).

@@ -62,6 +62,10 @@ type sqlInventoryRow struct {
 	DNSAltNames string `bun:"dns_alt_names,nullzero,type:text"`
 	IPAltNames  string `bun:"ip_alt_names,nullzero,type:text"`
 	AuthExts    string `bun:"auth_extensions,nullzero,type:text"`
+	// Fingerprints is a JSON object, NULL when empty. Unlike ip_alt_names it
+	// needs no marker for rows written before the column: NULL reads as no
+	// other digests, not as a missing projection.
+	Fingerprints string `bun:"fingerprints,nullzero,type:text"`
 
 	// The one mutable fact, projected from the signed CRL.
 	State     string     `bun:"state,notnull,type:varchar(16)"`
@@ -103,6 +107,13 @@ func inventoryRowFromRecord(rec CertRecord) (*sqlInventoryRow, error) {
 			return nil, fmt.Errorf("encoding auth_extensions: %w", err)
 		}
 		row.AuthExts = string(data)
+	}
+	if len(rec.Fingerprints) > 0 {
+		data, err := json.Marshal(rec.Fingerprints)
+		if err != nil {
+			return nil, fmt.Errorf("encoding fingerprints: %w", err)
+		}
+		row.Fingerprints = string(data)
 	}
 	return row, nil
 }
@@ -180,6 +191,12 @@ func (r sqlInventoryRow) record() CertRecord {
 	}
 	if r.AuthExts != "" {
 		if err := json.Unmarshal([]byte(r.AuthExts), &rec.AuthExtensions); err != nil {
+			rec.CertProjection = CertProjection{}
+			return rec
+		}
+	}
+	if r.Fingerprints != "" {
+		if err := json.Unmarshal([]byte(r.Fingerprints), &rec.Fingerprints); err != nil {
 			rec.CertProjection = CertProjection{}
 			return rec
 		}
@@ -540,11 +557,11 @@ func (b *SQLBackend) ClearRevoked(ctx context.Context, serial string) error {
 }
 
 // SetProjection fills the denormalised display columns for every row bearing
-// serial. Empty DNS names / auth extensions are stored as NULL, and IP SANs as
-// ipAltNamesColumn encodes them, matching what AppendEntry writes for a fresh
-// issuance.
+// serial. Empty DNS names / auth extensions / fingerprints are stored as NULL,
+// and IP SANs as ipAltNamesColumn encodes them, matching what AppendEntry
+// writes for a fresh issuance.
 func (b *SQLBackend) SetProjection(ctx context.Context, serial string, proj CertProjection) error {
-	var dnsNames, ipNames, authExts any
+	var dnsNames, ipNames, authExts, fingerprints any
 	if len(proj.DNSAltNames) > 0 {
 		data, err := json.Marshal(proj.DNSAltNames)
 		if err != nil {
@@ -566,6 +583,13 @@ func (b *SQLBackend) SetProjection(ctx context.Context, serial string, proj Cert
 		}
 		authExts = string(data)
 	}
+	if len(proj.Fingerprints) > 0 {
+		data, err := json.Marshal(proj.Fingerprints)
+		if err != nil {
+			return fmt.Errorf("encoding fingerprints: %w", err)
+		}
+		fingerprints = string(data)
+	}
 
 	ctx, cancel := b.callCtx(ctx)
 	defer cancel()
@@ -576,6 +600,7 @@ func (b *SQLBackend) SetProjection(ctx context.Context, serial string, proj Cert
 		Set("dns_alt_names = ?", dnsNames).
 		Set("ip_alt_names = ?", ipNames).
 		Set("auth_extensions = ?", authExts).
+		Set("fingerprints = ?", fingerprints).
 		Where("serial = ?", serial).
 		Exec(ctx)
 	return err

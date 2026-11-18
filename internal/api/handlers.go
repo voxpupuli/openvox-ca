@@ -196,6 +196,12 @@ type Server struct {
 	// The zero value is OpenVox Server's JSON number; SerialNumberAsHex trades
 	// that compatibility for a colon-separated hex string.
 	SerialNumberFormat SerialNumberFormat
+	// StatusFingerprintAlgorithms are the digests, besides SHA-256, that
+	// status responses report fingerprints in (status_fingerprint_algorithms).
+	// Empty reports SHA-256 only. The CA's own copy decides what the
+	// certificate index stores; a row lacking one of these is answered from
+	// the stored PEM instead.
+	StatusFingerprintAlgorithms []ca.FingerprintAlgorithm
 
 	csrLimiter     *ipRateLimiter
 	csrLimitedWarn logThrottle
@@ -308,7 +314,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 			state = "revoked"
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat)); err != nil {
+		if err := json.NewEncoder(w).Encode(certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat, s.StatusFingerprintAlgorithms)); err != nil {
 			slog.Warn("encode response failed", "error", err)
 		}
 		return
@@ -318,7 +324,7 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, r *http.Request) {
 	csrPEM, err := s.CA.Storage.GetCSR(r.Context(), subject)
 	if err == nil {
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(certStatusFromCSR(subject, csrPEM)); err != nil {
+		if err := json.NewEncoder(w).Encode(certStatusFromCSR(subject, csrPEM, s.StatusFingerprintAlgorithms)); err != nil {
 			slog.Warn("encode response failed", "error", err)
 		}
 		return
@@ -1233,17 +1239,33 @@ func responseAuthExtensions(exts map[string]string) map[string]string {
 	return out
 }
 
-// fingerprint renders the SHA-256 fingerprint of a PEM-encoded certificate or
-// CSR as Puppet's colon-separated hex pairs, or "" when data is not PEM. The
-// digest formatting is shared with the certificate index projection (see
-// ca.SHA256ColonFingerprint); the case is the response's, see
+// statusFingerprints renders the fingerprints of a PEM-encoded certificate or
+// CSR as a status response carries them: the SHA-256 fingerprint, and the
+// fingerprints object holding it and one in each of algs. Both are Puppet's
+// colon-separated hex pairs, and every one of them is "" when data is not
+// PEM, so the object's keys do not depend on whether it decodes. The digest
+// formatting is shared with the certificate index
+// projection (see ca.ColonFingerprint); the case is the response's, see
 // responseFingerprint.
-func fingerprint(data []byte) string {
+func statusFingerprints(data []byte, algs []ca.FingerprintAlgorithm) (string, map[string]string) {
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return ""
+		return "", responseFingerprints("", nil, algs)
 	}
-	return responseFingerprint(ca.SHA256ColonFingerprint(block.Bytes))
+	fp := responseFingerprint(ca.SHA256ColonFingerprint(block.Bytes))
+	return fp, responseFingerprints(fp, ca.OtherFingerprints(algs, block.Bytes), algs)
+}
+
+// responseFingerprints builds a status response's fingerprints object:
+// SHA256 and default, both fp, as OpenVox Server sends them, and each of algs
+// from others. A stored projection can hold a digest no longer configured,
+// so only algs are reported, never everything others holds.
+func responseFingerprints(fp string, others map[string]string, algs []ca.FingerprintAlgorithm) map[string]string {
+	out := map[string]string{"SHA256": fp, "default": fp}
+	for _, alg := range algs {
+		out[string(alg)] = responseFingerprint(others[string(alg)])
+	}
+	return out
 }
 
 // responseFingerprint renders a colon-separated fingerprint in upper case, as
@@ -1285,29 +1307,28 @@ func (s *Server) timeFormat() string {
 }
 
 // certStatusFromCert builds a CertStatusResponse from a signed or revoked certificate.
-func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt string, serialFmt SerialNumberFormat) CertStatusResponse {
+func certStatusFromCert(subject string, certPEM []byte, state string, timeFmt string, serialFmt SerialNumberFormat, algs []ca.FingerprintAlgorithm) CertStatusResponse {
+	fp, fps := statusFingerprints(certPEM, algs)
 	cert, err := parseCert(certPEM)
 	if err != nil {
 		slog.Warn("Failed to parse cert for status response", "subject", subject, "error", err)
-		fp := fingerprint(certPEM)
 		return CertStatusResponse{
 			Name:                    subject,
 			State:                   state,
 			Fingerprint:             fp,
-			Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
+			Fingerprints:            fps,
 			DNSAltNames:             []string{},
 			SubjectAltNames:         []string{},
 			AuthorizationExtensions: map[string]string{},
 		}
 	}
-	fp := fingerprint(certPEM)
 	nb := cert.NotBefore.UTC().Format(timeFmt)
 	na := cert.NotAfter.UTC().Format(timeFmt)
 	return CertStatusResponse{
 		Name:                    subject,
 		State:                   state,
 		Fingerprint:             fp,
-		Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
+		Fingerprints:            fps,
 		DNSAltNames:             dnsAltNames(cert.DNSNames),
 		SubjectAltNames:         subjectAltNames(ca.IPAddressStrings(cert.IPAddresses), cert.DNSNames),
 		AuthorizationExtensions: authExtensions(cert.Extensions),
@@ -1342,10 +1363,11 @@ func certSerialIs(cert *x509.Certificate, serial string) bool {
 // certStatusFromRecord builds a CertStatusResponse from a certificate-index
 // record without touching the stored PEM. ok=false means the record cannot
 // stand alone — its display projection was never populated (legacy inventory
-// import) or a canonical field does not parse — and the caller should fall
-// back to the PEM path for that subject.
-func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt SerialNumberFormat) (CertStatusResponse, bool) {
-	if rec.Fingerprint == "" {
+// import), it lacks a fingerprint in one of algs (projected before that
+// digest was configured), or a canonical field does not parse — and the
+// caller should fall back to the PEM path for that subject.
+func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt SerialNumberFormat, algs []ca.FingerprintAlgorithm) (CertStatusResponse, bool) {
+	if rec.Fingerprint == "" || ca.LacksFingerprints(rec.CertProjection, algs) {
 		return CertStatusResponse{}, false
 	}
 	serialInt := new(big.Int)
@@ -1368,7 +1390,7 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt Seri
 		Name:                    rec.Subject,
 		State:                   rec.State,
 		Fingerprint:             fp,
-		Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
+		Fingerprints:            responseFingerprints(fp, rec.Fingerprints, algs),
 		DNSAltNames:             dnsAltNames(rec.DNSAltNames),
 		SubjectAltNames:         subjectAltNames(rec.IPAltNames, rec.DNSAltNames),
 		AuthorizationExtensions: responseAuthExtensions(rec.AuthExtensions),
@@ -1379,8 +1401,8 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt Seri
 }
 
 // certStatusFromCSR builds a CertStatusResponse for a pending (requested) CSR.
-func certStatusFromCSR(subject string, csrPEM []byte) CertStatusResponse {
-	fp := fingerprint(csrPEM)
+func certStatusFromCSR(subject string, csrPEM []byte, algs []ca.FingerprintAlgorithm) CertStatusResponse {
+	fp, fps := statusFingerprints(csrPEM, algs)
 	csr, err := parseCSR(csrPEM)
 	if err != nil {
 		slog.Warn("Failed to parse CSR for status response", "subject", subject, "error", err)
@@ -1388,7 +1410,7 @@ func certStatusFromCSR(subject string, csrPEM []byte) CertStatusResponse {
 			Name:                    subject,
 			State:                   "requested",
 			Fingerprint:             fp,
-			Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
+			Fingerprints:            fps,
 			DNSAltNames:             []string{},
 			SubjectAltNames:         []string{},
 			AuthorizationExtensions: map[string]string{},
@@ -1398,7 +1420,7 @@ func certStatusFromCSR(subject string, csrPEM []byte) CertStatusResponse {
 		Name:                    subject,
 		State:                   "requested",
 		Fingerprint:             fp,
-		Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
+		Fingerprints:            fps,
 		DNSAltNames:             dnsAltNames(csr.DNSNames),
 		SubjectAltNames:         subjectAltNames(ca.IPAddressStrings(csr.IPAddresses), csr.DNSNames),
 		AuthorizationExtensions: authExtensions(csr.Extensions),
@@ -1475,12 +1497,13 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 					state = storage.CertStateRevoked
 				}
 			}
-			resp, ok := certStatusFromRecord(rec, s.timeFormat(), s.SerialNumberFormat)
+			resp, ok := certStatusFromRecord(rec, s.timeFormat(), s.SerialNumberFormat, s.StatusFingerprintAlgorithms)
 			if ok {
 				resp.State = state
 			} else {
-				// Projection not (yet) populated for this record — fall back to
-				// the stored PEM for this one subject.
+				// Projection not (yet) populated for this record, or lacking a
+				// configured fingerprint — fall back to the stored PEM for this
+				// one subject.
 				certPEM, err := s.CA.Storage.GetCert(r.Context(), rec.Subject)
 				if err != nil {
 					slog.Warn("statuses: reading stored certificate failed, omitting subject",
@@ -1508,7 +1531,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 						"answering from the stored certificate",
 						"subject", rec.Subject, "index_serial", rec.Serial)
 				}
-				resp = certStatusFromCert(rec.Subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat)
+				resp = certStatusFromCert(rec.Subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat, s.StatusFingerprintAlgorithms)
 			}
 			// The filter runs against the state the response actually carries,
 			// which the fallback above may have re-derived — filtering on the
@@ -1557,7 +1580,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 			if stateFilter != "" && state != stateFilter {
 				continue
 			}
-			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat))
+			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat, s.StatusFingerprintAlgorithms))
 		}
 	} else {
 		certs, err := s.CA.Storage.ListCerts(r.Context())
@@ -1581,7 +1604,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 			if stateFilter != "" && state != stateFilter {
 				continue
 			}
-			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat))
+			statuses = append(statuses, certStatusFromCert(subject, certPEM, state, s.timeFormat(), s.SerialNumberFormat, s.StatusFingerprintAlgorithms))
 		}
 	}
 
@@ -1602,7 +1625,7 @@ func (s *Server) handleGetStatuses(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
-		statuses = append(statuses, certStatusFromCSR(subject, csrPEM))
+		statuses = append(statuses, certStatusFromCSR(subject, csrPEM, s.StatusFingerprintAlgorithms))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
