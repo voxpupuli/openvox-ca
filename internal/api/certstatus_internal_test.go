@@ -28,11 +28,13 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
@@ -99,6 +101,77 @@ var _ = Describe("certStatusFromRecord on a complete record", func() {
 		Expect(got.AuthorizationExtensions).To(Equal(map[string]string{"pp_auth_role": "webserver"}))
 		Expect(got.Fingerprint).To(Equal("AA:BB"), "upper-cased on the way out")
 		Expect(got.Fingerprints).To(Equal(map[string]string{"SHA256": "AA:BB", "default": "AA:BB"}))
+	})
+
+	// The contract suite replays over the filesystem backend, which has no
+	// certificate index, so this is the only spec that sees an index row's
+	// stored keys re-keyed for the response.
+	It("keys pp_auth_auto_renew by OID, as OpenVox Server does", func() {
+		rec := storage.CertRecord{
+			InventoryEntry: storage.InventoryEntry{
+				Subject: "node1", Serial: "01",
+				NotBefore: "2026-01-01T00:00:00UTC", NotAfter: "2036-01-01T00:00:00UTC",
+			},
+			CertProjection: storage.CertProjection{
+				Fingerprint: "SHA256:AA",
+				// Keyed as ca.AuthExtensionMap stores it.
+				AuthExtensions: map[string]string{"pp_auth_auto_renew": "true", "pp_auth_role": "webserver"},
+			},
+			State: storage.CertStateSigned,
+		}
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
+		Expect(ok).To(BeTrue())
+		Expect(got.AuthorizationExtensions).To(Equal(map[string]string{
+			"1.3.6.1.4.1.34380.1.3.2": "true",
+			"pp_auth_role":            "webserver",
+		}))
+	})
+
+	It("leaves out an extension whose OID is the authorisation arc itself", func() {
+		rec := storage.CertRecord{
+			InventoryEntry: storage.InventoryEntry{
+				Subject: "node1", Serial: "01",
+				NotBefore: "2026-01-01T00:00:00UTC", NotAfter: "2036-01-01T00:00:00UTC",
+			},
+			CertProjection: storage.CertProjection{
+				Fingerprint: "SHA256:AA",
+				// Keyed as ca.AuthExtensionMap stores it; .3.99 is below the arc.
+				AuthExtensions: map[string]string{"1.3.6.1.4.1.34380.1.3": "arc", "1.3.6.1.4.1.34380.1.3.99": "custom"},
+			},
+			State: storage.CertStateSigned,
+		}
+		got, ok := certStatusFromRecord(rec, time.RFC3339, SerialNumberAsNumber)
+		Expect(ok).To(BeTrue())
+		Expect(got.AuthorizationExtensions).To(Equal(map[string]string{"1.3.6.1.4.1.34380.1.3.99": "custom"}))
+	})
+
+	// responseOIDKeys is kept by hand against OpenVox Server's
+	// puppet-short-names, and the contract suite notices a gap only for an OID
+	// some fixture happens to record. This compares the two tables instead.
+	It("re-keys exactly the authorisation short names OpenVox Server lacks", func() {
+		// The authorisation-arc entries of puppet-short-names in OpenVox
+		// Server's certificate_authority.clj at 8.14.1.
+		upstream := []string{"pp_authorization", "pp_auth_role", "pp_cli_auth"}
+
+		var ours []string
+		for oid, name := range ca.PuppetShortNames {
+			if strings.HasPrefix(oid, asn1.ObjectIdentifier(ca.PuppetAuthOIDArc).String()+".") {
+				ours = append(ours, name)
+			}
+		}
+		var unknown []string
+		for _, name := range ours {
+			if _, ok := responseOIDKeys[name]; !ok {
+				unknown = append(unknown, name)
+			}
+		}
+		Expect(unknown).To(ConsistOf(upstream),
+			"an authorisation short name OpenVox Server lacks needs an entry in responseOIDKeys")
+
+		for name, oid := range responseOIDKeys {
+			Expect(ca.PuppetShortNames).To(HaveKeyWithValue(oid, name),
+				"each responseOIDKeys entry must name the OID ca.PuppetShortNames gives it")
+		}
 	})
 
 	// Driven here rather than through the handler, which falls back to the

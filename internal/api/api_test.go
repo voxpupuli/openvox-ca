@@ -928,6 +928,39 @@ var _ = Describe("API Workflow", func() {
 			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
 			Expect(resp.AuthorizationExtensions).To(HaveKeyWithValue("pp_auth_role", "my-role"))
 		})
+
+		// The contract suite pins the certificate path and certstatus_internal_test
+		// the index path; no recorded CSR carries these extensions.
+		It("keys a pending CSR's extensions as OpenVox Server does", func() {
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			Expect(err).NotTo(HaveOccurred())
+			val, err := asn1.Marshal("true")
+			Expect(err).NotTo(HaveOccurred())
+
+			csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+				Subject: pkix.Name{CommonName: "auth-keying-node"},
+				ExtraExtensions: []pkix.Extension{
+					// pp_auth_auto_renew, which OpenVox Server keys by OID.
+					{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 2}, Value: val},
+					// The arc itself, which OpenVox Server does not list.
+					{Id: asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3}, Value: val},
+				},
+			}, key)
+			Expect(err).NotTo(HaveOccurred())
+
+			csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrBytes})
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_request/auth-keying-node", bytes.NewReader(csrPEM)))
+
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("GET", "/certificate_status/auth-keying-node", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+
+			var resp api.CertStatusResponse
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+			Expect(resp.State).To(Equal("requested"))
+			Expect(resp.AuthorizationExtensions).To(Equal(map[string]string{"1.3.6.1.4.1.34380.1.3.2": "true"}))
+		})
 	})
 
 	Context("DELETE /certificate_status/{subject}", func() {
@@ -1280,13 +1313,75 @@ var _ = Describe("API Workflow", func() {
 			Expect(result.SigningErrors).To(BeEmpty())
 		})
 
-		It("should return 400 for an empty certnames list", func() {
-			body, _ := json.Marshal(map[string][]string{"certnames": {}})
-			req := httptest.NewRequest("POST", "/sign", bytes.NewReader(body))
+		// OpenVox Server's answers, as the contract suite records them for the
+		// first three (#412).
+		DescribeTable("signs nothing, and says so, when certnames names nobody",
+			func(body string) {
+				req := httptest.NewRequest("POST", "/sign", strings.NewReader(body))
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, req)
+				Expect(rr.Code).To(Equal(http.StatusOK))
+				Expect(rr.Header().Get("Content-Type")).To(Equal("application/json"))
+				Expect(rr.Body.String()).To(MatchJSON(`{"signed":[],"no-csr":[],"signing-errors":[]}`))
+			},
+			Entry("an empty list", `{"certnames":[]}`),
+			Entry("no certnames key", `{}`),
+			Entry("a null certnames", `{"certnames":null}`),
+		)
+
+		DescribeTable("answers 422 with the value as submitted when certnames is not a list of strings",
+			func(body, submitted string) {
+				req := httptest.NewRequest("POST", "/sign", strings.NewReader(body))
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, req)
+				Expect(rr.Code).To(Equal(http.StatusUnprocessableEntity))
+				Expect(rr.Header().Get("Content-Type")).To(Equal("application/json"))
+				// Against the wire form rather than api.SchemaViolation, so the key
+				// names and the error text docs/api.md publishes are pinned too.
+				Expect(rr.Body.String()).To(MatchJSON(`{"kind":"schema-violation","submitted":` + submitted +
+					`,"error":"certnames must be a list of strings"}`))
+			},
+			Entry("a string", `{"certnames":"sign-node"}`, `"sign-node"`),
+			Entry("an object", `{"certnames":{"a":1}}`, `{"a":1}`),
+			Entry("a list holding a number", `{"certnames":["a",1]}`, `["a",1]`),
+			// Decoding into []string would read this null as "".
+			Entry("a list holding a null", `{"certnames":["a",null]}`, `["a",null]`),
+		)
+
+		It("signs none of a list it refuses, even the names that are valid", func() {
+			csrPEM, err := testutil.GenerateCSR("sign-refused-node")
+			Expect(err).NotTo(HaveOccurred())
+			mux.ServeHTTP(httptest.NewRecorder(),
+				httptest.NewRequest("PUT", "/certificate_request/sign-refused-node", bytes.NewReader(csrPEM)))
+
+			req := httptest.NewRequest("POST", "/sign", strings.NewReader(`{"certnames":["sign-refused-node",1]}`))
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)
-			Expect(rr.Code).To(Equal(http.StatusBadRequest))
+			Expect(rr.Code).To(Equal(http.StatusUnprocessableEntity))
+
+			statusRR := httptest.NewRecorder()
+			mux.ServeHTTP(statusRR, httptest.NewRequest("GET", "/certificate_status/sign-refused-node", nil))
+			Expect(statusRR.Code).To(Equal(http.StatusOK))
+			var status api.CertStatusResponse
+			Expect(json.Unmarshal(statusRR.Body.Bytes(), &status)).To(Succeed())
+			Expect(status.State).To(Equal("requested"))
 		})
+
+		// Kept: OpenVox Server swallows the parse failure and answers 200 with
+		// nothing signed.
+		DescribeTable("answers 400 for a body that is not a JSON object",
+			func(body string) {
+				req := httptest.NewRequest("POST", "/sign", strings.NewReader(body))
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, req)
+				Expect(rr.Code).To(Equal(http.StatusBadRequest))
+			},
+			Entry("not JSON", `certnames=a`),
+			Entry("a JSON list", `["a"]`),
+			Entry("a JSON string", `"a"`),
+			// Decoding into a struct reads this as a body with no certnames.
+			Entry("a JSON null", `null`),
+		)
 	})
 
 	Context("POST /sign/all", func() {

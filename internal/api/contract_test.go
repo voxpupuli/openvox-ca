@@ -168,12 +168,6 @@ var contractExceptions = map[string][]contractException{
 		"kept: an If-Modified-Since that is not an HTTP date, which names the weekday, is ignored and the CRL served in full"}},
 	"crl-put-rejected": {{"status: 404, upstream 400",
 		"#413: PUT /certificate_revocation_list (CRL upload) is not implemented"}},
-	"sign-empty": {{"status: 400, upstream 200",
-		"#412: POST /sign with an empty certnames answers 400"}},
-	"sign-missing-certnames": {{"status: 400, upstream 200",
-		"#412: POST /sign without certnames answers 400"}},
-	"sign-non-list": {{"status: 400, upstream 422",
-		"#412: POST /sign with a certnames that is not a list answers 400"}},
 	"clean": {{`media type: "application/json", upstream "text/plain"`,
 		"kept: PUT /clean reports what it did to each subject, as JSON"}},
 	"status-get-pson": {{`media type: "application/json", upstream "text/pson"`,
@@ -218,12 +212,7 @@ func compressedIPv6(at string) contractException {
 // cornerExtExtensions are the differences in corner-ext's authorisation
 // extensions.
 func cornerExtExtensions(at string) []contractException {
-	const autoRenew = "#408: pp_auth_auto_renew is keyed by name, where upstream keys it by OID"
 	return []contractException{
-		{at + `.authorization_extensions["1.3.6.1.4.1.34380.1.3.2"]: missing`, autoRenew},
-		{at + ".authorization_extensions.pp_auth_auto_renew: not in upstream", autoRenew},
-		{at + `.authorization_extensions["1.3.6.1.4.1.34380.1.3"]: not in upstream`,
-			"#409: an extension with the authorisation arc's own OID is listed"},
 		{at + `.authorization_extensions["1.3.6.1.4.1.34380.1.3.98"]: value 6c6567616379, upstream legacy`,
 			"kept: a value that is not a DER string renders as hex"},
 	}

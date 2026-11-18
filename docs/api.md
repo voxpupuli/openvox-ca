@@ -95,7 +95,7 @@ Nor is either status code a statement about [`openvoxca_crl_update_failures_tota
 }
 ```
 
-Fingerprints are uppercase hex pairs and each SAN carries its `DNS:` or `IP:` prefix, as OpenVox Server renders them. `subject_alt_names` lists the IP SANs first and then the DNS SANs; `dns_alt_names` lists the DNS SANs alone. The response is checked against OpenVox Server's own: see [Differences from OpenVox Server](#differences-from-openvox-server).
+Fingerprints are uppercase hex pairs and each SAN carries its `DNS:` or `IP:` prefix, as OpenVox Server renders them. `authorization_extensions` keys each extension by the short name OpenVox Server gives it, or by its dotted OID where OpenVox Server has none: `1.3.6.1.4.1.34380.1.3.2`, which Puppet calls `pp_auth_auto_renew`, is keyed by OID. Only extensions below the authorisation arc are listed, so an extension whose OID is `1.3.6.1.4.1.34380.1.3`, the arc itself, is not. `subject_alt_names` lists the IP SANs first and then the DNS SANs; `dns_alt_names` lists the DNS SANs alone. The response is checked against OpenVox Server's own: see [Differences from OpenVox Server](#differences-from-openvox-server).
 
 > **Note:** `serial_number` is the certificate's full serial, a random 128-bit value, as a bare JSON number. That is how OpenVox Server sends it. It is omitted for certificates in the `requested` state. The number is exact in the response, but a parser that reads every JSON number as a double — JavaScript's `JSON.parse`, or `jq` before 1.7 — rounds a value this large. Where you need the exact serial, use a parser that keeps the digits (`jq` 1.7 or later does), or read it from the certificate itself.
 >
@@ -392,6 +392,20 @@ Either way the new certificate recreates the stored one exactly as an agent rene
 | --- | --- | --- |
 | `POST` | `/sign` | Sign one or more CSRs; body: `{"certnames":["a","b"]}` |
 | `POST` | `/sign/all` | Sign every pending CSR |
+
+Response:
+
+```json
+{ "signed": ["a"], "no-csr": ["b"], "signing-errors": [] }
+```
+
+An empty, absent or `null` `certnames` signs nothing and answers `200` with three empty lists. A `certnames` that is not a list of strings answers `422` with a JSON body that hands back the value as submitted, and signs none of the names in it:
+
+```json
+{ "kind": "schema-violation", "submitted": "a", "error": "certnames must be a list of strings" }
+```
+
+Both are OpenVox Server's answers. A body that is not a JSON object answers `400`.
 
 ## Bulk clean
 
@@ -717,8 +731,6 @@ Where openvox-ca still differs, the spec carries an exception for each differenc
 Tracked as defects, each with an issue:
 
 - `fingerprints` lacks `SHA1` and `SHA512` ([#406](https://github.com/voxpupuli/openvox-ca/issues/406)).
-- The authorisation extension `1.3.6.1.4.1.34380.1.3.2` is keyed `pp_auth_auto_renew` rather than by OID ([#408](https://github.com/voxpupuli/openvox-ca/issues/408)), and an extension whose OID is exactly the authorisation arc is listed ([#409](https://github.com/voxpupuli/openvox-ca/issues/409)).
-- `POST /sign` answers `400` for an empty or missing `certnames` (OpenVox Server: `200`) and for a non-list one (OpenVox Server: `422` with a JSON body) ([#412](https://github.com/voxpupuli/openvox-ca/issues/412)).
 - `PUT /certificate_revocation_list` (CRL upload) is not implemented ([#413](https://github.com/voxpupuli/openvox-ca/issues/413)).
 - `GET /certificate/{subject}` ignores `If-Modified-Since` ([#414](https://github.com/voxpupuli/openvox-ca/issues/414)).
 
@@ -736,4 +748,4 @@ Deliberate, and kept. Each has a fixture that records it, except where marked *n
 - `POST /certificate_renewal` without a client certificate answers `403` rather than `400`.
 - The CRL is served at `/certificate_revocation_list/ca` only. An empty `certificate_statuses` segment answers `404` and an invalid subject `400`, where OpenVox Server answers `400` and `404`. A method a route does not serve answers `405`. An `If-Modified-Since` that is not an HTTP date, which names the day of the week, is ignored.
 - Dates are RFC 3339 by default; `puppet_datetime_format: true` gives OpenVox Server's layout, and the contract is checked under that setting.
-- *Not recorded:* a missing CRL answers `404` and a storage failure `503`, where OpenVox Server answers `500`; `POST /certificate_renewal` is always served (OpenVox Server's default is off) and a CSR body re-keys; `DELETE /certificate_status/{subject}` revokes before it deletes; `cert_ttl` of zero or less means the default validity.
+- *Not recorded:* a missing CRL answers `404` and a storage failure `503`, where OpenVox Server answers `500`; a `POST /sign` body that is not a JSON object answers `400`, where OpenVox Server answers `200` with nothing signed; `POST /certificate_renewal` is always served (OpenVox Server's default is off) and a CSR body re-keys; `DELETE /certificate_status/{subject}` revokes before it deletes; `cert_ttl` of zero or less means the default validity.

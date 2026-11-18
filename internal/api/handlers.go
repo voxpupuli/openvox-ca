@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -280,8 +281,8 @@ type CertStatusResponse struct {
 	DNSAltNames     []string          `json:"dns_alt_names"`
 	SubjectAltNames []string          `json:"subject_alt_names"`
 	// AuthorizationExtensions contains Puppet auth-arc OID values keyed by short
-	// name (e.g. "pp_auth_role") or raw OID string when no short name is known.
-	// Always present, empty map when none exist.
+	// name (e.g. "pp_auth_role") or raw OID string when OpenVox Server knows no
+	// short name. Always present, empty map when none exist.
 	AuthorizationExtensions map[string]string `json:"authorization_extensions"`
 	// Populated when signed or revoked.
 	// SerialNumber is the full serial, a JSON number as OpenVox Server sends
@@ -1187,11 +1188,49 @@ func parseCSR(pemData []byte) (*x509.CertificateRequest, error) {
 }
 
 // authExtensions extracts Puppet authorization extensions (OID arc 1.3.6.1.4.1.34380.1.3)
-// from a certificate or CSR extension list and returns them as a name→value map.
-// See ca.AuthExtensionMap, which is shared with the certificate index
-// projection so the two can never disagree on the display form.
+// from a certificate or CSR extension list and returns them as a name→value map,
+// keyed as the response keys them. See ca.AuthExtensionMap, which is shared with
+// the certificate index projection so the two can never disagree on the
+// display form, and responseAuthExtensions.
 func authExtensions(exts []pkix.Extension) map[string]string {
-	return ca.AuthExtensionMap(exts)
+	return responseAuthExtensions(ca.AuthExtensionMap(exts))
+}
+
+// responseOIDKeys are the short names ca.PuppetShortNames knows that OpenVox
+// Server's puppet-short-names does not, mapped to the dotted OID it keys the
+// extension by instead. pp_auth_auto_renew is in Puppet's oids.rb, which is
+// why the CA logs it by name, but OpenVox Server has it only as a CSR
+// attribute constant (#408).
+var responseOIDKeys = map[string]string{
+	"pp_auth_auto_renew": "1.3.6.1.4.1.34380.1.3.2",
+}
+
+// authArcKey is how ca.AuthExtensionMap keys an extension whose OID is the
+// authorisation arc itself rather than something below it.
+var authArcKey = asn1.ObjectIdentifier(ca.PuppetAuthOIDArc).String()
+
+// responseAuthExtensions keys an authorisation-extension map as OpenVox
+// Server's authorization_extensions does. Like responseFingerprint, it is
+// applied when a response is built, so index rows that store the CA's own
+// keys need no rewrite. Always returns a non-nil map.
+//
+// It also leaves out an extension whose OID is exactly the arc, which OpenVox
+// Server does not list: its subtree test requires an OID longer than the arc
+// (#409). ca.IsAuthOID stays inclusive, because it is also what strips the
+// arc from a CSR when signing, and a strict test there would copy such an
+// extension into the certificate.
+func responseAuthExtensions(exts map[string]string) map[string]string {
+	out := make(map[string]string, len(exts))
+	for k, v := range exts {
+		if k == authArcKey {
+			continue
+		}
+		if oid, ok := responseOIDKeys[k]; ok {
+			k = oid
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // fingerprint renders the SHA-256 fingerprint of a PEM-encoded certificate or
@@ -1324,10 +1363,6 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt Seri
 
 	nbs := nb.UTC().Format(timeFmt)
 	nas := na.UTC().Format(timeFmt)
-	authExts := rec.AuthExtensions
-	if authExts == nil {
-		authExts = map[string]string{}
-	}
 	fp := responseFingerprint(rec.Fingerprint)
 	return CertStatusResponse{
 		Name:                    rec.Subject,
@@ -1336,7 +1371,7 @@ func certStatusFromRecord(rec storage.CertRecord, timeFmt string, serialFmt Seri
 		Fingerprints:            map[string]string{"SHA256": fp, "default": fp},
 		DNSAltNames:             dnsAltNames(rec.DNSAltNames),
 		SubjectAltNames:         subjectAltNames(rec.IPAltNames, rec.DNSAltNames),
-		AuthorizationExtensions: authExts,
+		AuthorizationExtensions: responseAuthExtensions(rec.AuthExtensions),
 		SerialNumber:            newCertSerial(serialInt, serialFmt),
 		NotBefore:               &nbs,
 		NotAfter:                &nas,
@@ -1658,26 +1693,82 @@ func (s *Server) handleGetExpirations(w http.ResponseWriter, r *http.Request) {
 
 // --- Bulk sign ---
 
-type SignRequestBody struct {
-	Certnames []string `json:"certnames"`
+// postSignBody is POST /sign's body. certnames is kept raw so that a value
+// that is not a list of strings can be handed back as submitted.
+type postSignBody struct {
+	Certnames json.RawMessage `json:"certnames"`
+}
+
+// SchemaViolation is the 422 body OpenVox Server answers POST /sign with when
+// certnames is not a list of strings. Submitted is the certnames value as
+// given, not the whole body.
+type SchemaViolation struct {
+	Kind      string          `json:"kind"`
+	Submitted json.RawMessage `json:"submitted"`
+	Error     string          `json:"error"`
+}
+
+// signCertnames reads certnames from a POST /sign body as OpenVox Server's
+// schema does: absent or null is no names at all, and anything other than a
+// list of strings is refused. An element that is null is refused rather than
+// read as "", which is what decoding into []string would make of it.
+func signCertnames(raw json.RawMessage) ([]string, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, true
+	}
+	var items []any
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, false
+	}
+	names := make([]string, len(items))
+	for i, item := range items {
+		name, ok := item.(string)
+		if !ok {
+			return nil, false
+		}
+		names[i] = name
+	}
+	return names, true
 }
 
 func (s *Server) handlePostSign(w http.ResponseWriter, r *http.Request) {
 	client := clientOf(r)
 	slog.Debug("POST sign", "client", client)
 
-	var body SignRequestBody
+	// A body that is not a JSON object still answers 400. OpenVox Server
+	// swallows the parse failure and answers 200 with nothing signed, which
+	// would hide a client's bug behind a success. Decoded through a pointer,
+	// because a top-level null decodes into a struct as a no-op and would
+	// otherwise read as a body with no certnames.
+	var body *postSignBody
 	if !decodeJSONBody(w, r, &body) {
 		return
 	}
-	if len(body.Certnames) == 0 {
-		http.Error(w, "certnames must not be empty", http.StatusBadRequest)
+	if body == nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	// An empty or absent certnames answers 200 with three empty lists, and a
+	// certnames that is not a list of strings answers 422 with the value as
+	// submitted, both as OpenVox Server does (#412).
+	certnames, ok := signCertnames(body.Certnames)
+	if !ok {
+		slog.Debug("POST sign refused: certnames is not a list of strings", "client", client)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		if err := json.NewEncoder(w).Encode(SchemaViolation{
+			Kind:      "schema-violation",
+			Submitted: body.Certnames,
+			Error:     "certnames must be a list of strings",
+		}); err != nil {
+			slog.Warn("encode response failed", "error", err)
+		}
 		return
 	}
 
-	slog.Debug("Signing certificates", "count", len(body.Certnames),
-		"subjects", sanitiseAllForLog(body.Certnames), "client", client)
-	result := s.signInBatches(r.Context(), body.Certnames)
+	slog.Debug("Signing certificates", "count", len(certnames),
+		"subjects", sanitiseAllForLog(certnames), "client", client)
+	result := s.signInBatches(r.Context(), certnames)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		slog.Warn("encode response failed", "error", err)
@@ -1950,6 +2041,12 @@ func (s *Server) handlePostSignAll(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Bulk clean ---
+
+// SignRequestBody is PUT /clean's body. It was POST /sign's too until that
+// route took postSignBody, which keeps certnames raw.
+type SignRequestBody struct {
+	Certnames []string `json:"certnames"`
+}
 
 func (s *Server) handlePutClean(w http.ResponseWriter, r *http.Request) {
 	client := clientOf(r)

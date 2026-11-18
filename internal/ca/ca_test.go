@@ -1271,11 +1271,16 @@ var _ = Describe("Issued certificate properties (issue #8)", func() {
 
 		oidPpCliAuth := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39}
 		oidPpRegCert := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 1, 1} // non-auth Puppet OID
+		// The arc itself, which the status API does not list (#409) but which
+		// is still in the authorisation arc as far as signing is concerned:
+		// it is in the Puppet arc too, so only the strip keeps it out.
+		oidAuthArc := asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3}
 
 		csrBytes, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
 			Subject: pkix.Name{CommonName: "auth-strip-node"},
 			ExtraExtensions: []pkix.Extension{
 				{Id: oidPpCliAuth, Value: ppCliAuthVal},
+				{Id: oidAuthArc, Value: ppCliAuthVal},
 				{Id: oidPpRegCert, Value: ppRegVal},
 			},
 		}, key)
@@ -1293,10 +1298,12 @@ var _ = Describe("Issued certificate properties (issue #8)", func() {
 		cert, err := x509.ParseCertificate(block.Bytes)
 		Expect(err).NotTo(HaveOccurred())
 
-		// The auth OID must be stripped.
+		// The auth OIDs must be stripped.
 		for _, ext := range cert.Extensions {
 			Expect(ext.Id.Equal(oidPpCliAuth)).To(BeFalse(),
 				"signed cert must not carry the pp_cli_auth extension")
+			Expect(ext.Id.Equal(oidAuthArc)).To(BeFalse(),
+				"signed cert must not carry an extension with the authorisation arc's own OID")
 		}
 		// The non-auth Puppet OID must be preserved.
 		found := false
