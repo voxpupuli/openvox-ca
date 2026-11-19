@@ -2438,7 +2438,9 @@ Allowlist example:
 compile-*.internal
 ```
 
-Executable plugin example:
+Executable plugin example. A script needs its interpreter where the CA runs: the
+distroless container image has none, and the `-alpine` image has `sh` but not
+`bash`.
 
 ```bash
 #!/bin/bash

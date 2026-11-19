@@ -62,11 +62,11 @@ app.kubernetes.io/part-of: openvox
 Container image reference.
 
 A digest wins over a tag. An explicit tag is used verbatim — that is how you
-select the CentOS Stream variant, whose tags carry no suffix, or the
--distroless one. With neither set,
-the default is the Alpine variant of the chart's appVersion; a -dev appVersion
-means the chart was built from an unreleased tree, whose published image is the
-rolling "edge" tag rather than a version that exists in the registry.
+select the Alpine variant, whose tags carry an -alpine suffix. With neither set,
+the default is the chart's appVersion, the unsuffixed tag, which is the
+distroless image; a -dev appVersion means the chart was built from an
+unreleased tree, whose published image is the rolling "edge" tag rather than a
+version that exists in the registry.
 */}}
 {{- define "openvox-ca.image" -}}
 {{- $ref := .Values.image.repository -}}
@@ -82,7 +82,7 @@ rolling "edge" tag rather than a version that exists in the registry.
 {{- if hasSuffix "-dev" $base -}}
 {{- $base = "edge" -}}
 {{- end -}}
-{{- $tag = printf "%s-alpine" $base -}}
+{{- $tag = $base -}}
 {{- end -}}
 {{- printf "%s:%s" $ref $tag -}}
 {{- end -}}

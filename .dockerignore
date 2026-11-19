@@ -1,4 +1,4 @@
-# Build context for every image built from the repository root: Dockerfile,
+# Build context for every image built from the repository root:
 # Dockerfile.alpine and Dockerfile.distroless, whose `COPY . .` takes
 # everything not excluded here, and
 # test/Dockerfile.run, which the test/compose*.yml suites build with

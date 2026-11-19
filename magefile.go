@@ -1923,7 +1923,6 @@ func verifyChartBackendAliasesIn(tpl, spec []byte) error {
 // The places the uid the CA runs as is written down: the Alpine and
 // distroless images, the chart's podSecurityContext, and the integration
 // fixture, which stands in for the published images in the compose suites.
-// The CentOS Stream image is left out: it runs as 1000 until #319 retires it.
 const (
 	alpineDockerfilePath     = "Dockerfile.alpine"
 	distrolessDockerfilePath = "Dockerfile.distroless"
@@ -5627,7 +5626,6 @@ func (Chart) Test() error {
 	if strings.HasSuffix(appVersion, "-dev") {
 		defaultTag = "edge"
 	}
-	defaultTag += "-alpine"
 
 	// The checksum a *different* config produces, so the change-detection case
 	// can assert the annotation moved rather than that it exists. Computed here
@@ -5640,16 +5638,23 @@ func (Chart) Test() error {
 
 	renders := []chartRenderCase{
 		{
-			name:  "an unset tag resolves to the Alpine variant of the appVersion",
+			name:  "an unset tag resolves to the unsuffixed (distroless) tag of the appVersion",
 			sets:  []string{tls, "image.tag=", "image.digest="},
 			wants: []string{"image: \"ghcr.io/voxpupuli/openvox-ca:" + defaultTag + "\""},
 		},
 		{
-			name: "an explicit tag is used verbatim, selecting the CentOS variant",
-			sets: []string{tls, "image.tag=0.9.0"},
-			// The whole point of the rule: no suffix is appended.
-			wants:    []string{"image: \"ghcr.io/voxpupuli/openvox-ca:0.9.0\""},
-			notWants: []string{"0.9.0-alpine"},
+			name: "an explicit tag is used verbatim, selecting the Alpine variant",
+			sets: []string{tls, "image.tag=0.9.0-alpine"},
+			// The whole point of the rule: the tag is not rewritten, and the
+			// closing quote shows nothing is appended to it.
+			wants: []string{"image: \"ghcr.io/voxpupuli/openvox-ca:0.9.0-alpine\""},
+		},
+		{
+			// How an operator pins the default image: an unsuffixed tag stays
+			// unsuffixed.
+			name:  "an explicit unsuffixed tag is used verbatim, pinning the default image",
+			sets:  []string{tls, "image.tag=0.9.0"},
+			wants: []string{"image: \"ghcr.io/voxpupuli/openvox-ca:0.9.0\""},
 		},
 		{
 			name:     "a digest wins over a tag",
@@ -8685,9 +8690,9 @@ config:
 	// the chart with a substituted appVersion, so this asserts the rule rather
 	// than whichever side of a release this tree currently sits on.
 	for _, tc := range []struct{ appVersion, wantTag string }{
-		{"9.9.9-dev", "edge-alpine"},
-		{"9.9.9", "9.9.9-alpine"},
-		{"9.9.9-rc1", "9.9.9-rc1-alpine"},
+		{"9.9.9-dev", "edge"},
+		{"9.9.9", "9.9.9"},
+		{"9.9.9-rc1", "9.9.9-rc1"},
 	} {
 		name := fmt.Sprintf("appVersion %s resolves to %s", tc.appVersion, tc.wantTag)
 		out, err := renderWithAppVersion(tc.appVersion, []string{tls})

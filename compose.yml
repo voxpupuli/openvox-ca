@@ -36,10 +36,10 @@ services:
     # newest release, but a floating tag carries no supply-chain integrity
     # guarantee: two pulls at different times can yield different images.
     # Pin a release tag (e.g. :1.2.3) or a digest for production
-    # deployments. `-alpine` and `-distroless` variants of every tag are also
-    # published. Those two run as uid 65532 and this one as 1000, so re-own an
-    # existing ca-data volume to the new uid before switching between them
-    # (docs/container-images.md, "Runtime user").
+    # deployments. This is the distroless image; an `-alpine` variant of
+    # every tag, with a shell, is also published. Both run as uid 65532, so
+    # data written by a container that ran as another uid has to be re-owned
+    # to 65532:65532 first (docs/container-images.md, "Runtime user").
     image: ghcr.io/voxpupuli/openvox-ca:latest
     command:
       - --cadir=/data

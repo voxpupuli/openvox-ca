@@ -1,14 +1,13 @@
 # Container images
 
 Prebuilt, multi-arch container images are published to the GitHub Container
-Registry (GHCR) for every release and every push to `main`. Three variants are
-built, differing in base image and in the user they run as:
+Registry (GHCR) for every release and every push to `main`. Two variants are
+built, differing in base image:
 
 | Variant | Base image | Tag suffix | Runs as |
 | --- | --- | --- | --- |
-| CentOS Stream | `quay.io/centos/centos` | *(none)* | `1000:1000` |
+| Distroless (the default) | `gcr.io/distroless/static-debian13:nonroot` | *(none)*, or `-distroless` | `65532:65532` |
 | Alpine | `alpine` | `-alpine` | `65532:65532` |
-| Distroless | `gcr.io/distroless/static-debian13:nonroot` | `-distroless` | `65532:65532` |
 
 Every variant is built for `linux/amd64` and `linux/arm64` and published as a
 single multi-arch manifest per variant, so `docker`/`podman` pulls the right
@@ -18,26 +17,26 @@ architecture automatically. The images are published as
 The distroless variant holds the two binaries, a CA trust store and little
 else: no shell, no package manager, no `curl` or `kill`. It has the least in it
 to patch or to exploit, and what that costs is listed under [the distroless
-variant](#the-distroless-variant). The CentOS Stream variant runs as a
-**different uid** from the other two, so switching an existing deployment to or
-from it means re-owning its data; see [runtime user](#runtime-user).
+variant](#the-distroless-variant). Its tags carry no suffix, and each is
+published again with `-distroless` appended, for anyone who wants to name the
+variant. The Alpine variant adds a shell and busybox. Both run as the same uid,
+so either can take over data the other wrote.
 
 ## Pulling
 
 ```console
-$ docker pull ghcr.io/voxpupuli/openvox-ca:latest              # CentOS Stream
-$ docker pull ghcr.io/voxpupuli/openvox-ca:latest-alpine       # Alpine
-$ docker pull ghcr.io/voxpupuli/openvox-ca:latest-distroless   # distroless
+$ docker pull ghcr.io/voxpupuli/openvox-ca:latest          # distroless
+$ docker pull ghcr.io/voxpupuli/openvox-ca:latest-alpine   # Alpine
 ```
 
 ## Available tags
 
 | Tag | Points at |
 | --- | --- |
-| `latest` / `latest-alpine` / `latest-distroless` | The most recent release |
-| `1.2.3`, `1.2`, `1` (+ `-alpine`, `-distroless`) | A specific release and its semver aliases; the major-only tag (`1`) is published for v1+ releases only, so `0.x` releases have no `0` tag |
-| `edge` / `edge-alpine` / `edge-distroless` | The latest build from the default branch (`main`) |
-| `main` / `main-alpine` / `main-distroless` | Same as `edge`; the head of `main` |
+| `latest` / `latest-distroless` / `latest-alpine` | The most recent release |
+| `1.2.3`, `1.2`, `1` (+ `-distroless`, `-alpine`) | A specific release and its semver aliases; the major-only tag (`1`) is published for v1+ releases only, so `0.x` releases have no `0` tag |
+| `edge` / `edge-distroless` / `edge-alpine` | The latest build from the default branch (`main`) |
+| `main` / `main-distroless` / `main-alpine` | Same as `edge`; the head of `main` |
 
 Pin to a specific semver tag (e.g. `1.2.3`) for reproducible deployments;
 `edge` tracks unreleased changes and can break at any time.
@@ -113,9 +112,8 @@ process. See [memory budget](configuration.md#memory-budget).
 
 ### Runtime user
 
-The Alpine and distroless variants run as uid/gid **65532**: the distroless
-base image's own `nonroot` user, and a `puppet` user created with that uid in
-the Alpine image. The CentOS Stream variant runs as `puppet`, uid/gid **1000**.
+Both variants run as uid/gid **65532**: the distroless base image's own
+`nonroot` user, and a `puppet` user created with that uid in the Alpine image.
 Each declares its user numerically, so that a host
 which cannot read the image's `/etc/passwd` can still tell who the process runs
 as. Under Kubernetes, a container whose image only names its user fails to
@@ -124,27 +122,26 @@ kubelet cannot verify that a name is non-root, and the container stops at
 `CreateContainerConfigError`.
 
 A named volume like the one above is created with the right ownership
-automatically. A bind mount is not, so `chown` the host directory to the
-variant's uid and gid (`65532:65532`, or `1000:1000` for CentOS Stream) before
-starting the container, or the CA cannot write its state. Under rootless Podman
+automatically. A bind mount is not, so `chown` the host directory to
+`65532:65532` before starting the container, or the CA cannot write its state. Under rootless Podman
 the container's uid maps to a subordinate uid on the host, so a plain `chown`
 leaves the directory unwritable — use `podman unshare chown <uid>:<gid> <dir>`,
 or mount with the `:U` suffix. Under Kubernetes, `fsGroup` on the pod covers
 PersistentVolumeClaims and `emptyDir`, but the kubelet does not apply it to a
 `hostPath`, which needs the same treatment as a bind mount.
 
-**Switching between CentOS Stream and either other variant changes the uid**, and
-the CA's state does not follow by itself. The private keys are written `0600`,
-readable by their owner alone, so the new variant cannot read a key the old one
-wrote, and openvox-ca never changes the owner or mode of an existing file.
-Re-own a Docker or Podman volume or bind mount to the new uid and gid before
-starting the new variant. Under Kubernetes the Helm chart runs every variant as
-`65532:65532` through `podSecurityContext`, whatever the image's own user, so
-switching images there changes no uid. Where the kubelet applies `fsGroup` to
-the volume, as it does to most PersistentVolumeClaims and to `emptyDir`, it also
-re-groups data another uid wrote and adds group read and write; a `hostPath`, or
-a driver without `fsGroup` support, needs re-owning like a bind mount. See
-[choosing an image](helm-chart.md#choosing-an-image).
+**Data written by a container that ran as another uid** does not follow by
+itself. The private keys are written `0600`, readable by their owner alone, and
+openvox-ca never changes the owner or mode of an existing file. Re-own a Docker
+or Podman volume or bind mount to `65532:65532` before starting the container,
+and do it for every volume the CA reads, not only its `--cadir`: a
+`crl_chain_file` kept on another volume and left unreadable fails every chain
+refresh. Under Kubernetes the Helm chart runs the pod as `65532:65532` through
+`podSecurityContext`. Where the kubelet applies `fsGroup` to the volume, as it
+does to most PersistentVolumeClaims and to `emptyDir`, it re-groups data another
+uid wrote and adds group read and write, so the pod can take it over; a
+`hostPath`, or a driver without `fsGroup` support, needs re-owning like a bind
+mount. See [choosing an image](helm-chart.md#choosing-an-image).
 
 ### The distroless variant
 

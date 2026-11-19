@@ -6,7 +6,7 @@
 replicaCount: 3
 
 image:
-  tag: "0.9.0"       # the CentOS Stream variant: an explicit, unsuffixed tag
+  tag: "0.9.0-alpine"   # the Alpine variant: an explicit, suffixed tag
 
 nameOverride: ca
 namespaceOverride: pki

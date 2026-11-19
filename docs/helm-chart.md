@@ -43,7 +43,7 @@ images, because one package cannot hold both:
 Alongside each release, every push to `main` republishes a **rolling
 development chart** at the in-development version (e.g. `0.9.0-dev`). That tag
 is mutable — each push overwrites it — and its `appVersion` resolves to the
-rolling `edge-alpine` image, so the two stay consistent. Use it to try
+rolling `edge` image, so the two stay consistent. Use it to try
 unreleased changes; never pin production to it.
 
 ## Verifying the chart
@@ -237,33 +237,35 @@ render that passes proves only that `config` holds no credential.
 
 ## Choosing an image
 
-The chart defaults to the **Alpine** image variant. With `image.tag` empty it
-resolves to `<appVersion>-alpine`, e.g. `ghcr.io/voxpupuli/openvox-ca:0.9.0-alpine`.
+The chart defaults to the **distroless** image. With `image.tag` empty it
+resolves to `<appVersion>`, the unsuffixed tag, e.g.
+`ghcr.io/voxpupuli/openvox-ca:0.9.0`. That image has no shell, which the chart
+does not need: its probes are `httpGet`, made by the kubelet from outside the
+container. What it does change is anything run inside the container. `kubectl
+exec <pod> -- kill -HUP 1` has no `kill` to run, and an
+[autosign plugin](#autosigning) written as a script has no interpreter to run
+it; see [the distroless variant](container-images.md#the-distroless-variant) for
+other ways to signal it, and use the `-alpine` image (which has `sh` but not
+`bash`) or a statically linked plugin.
 
 An explicit tag is used verbatim — the chart never appends a suffix to it — so
-the CentOS Stream variant, whose tags carry no suffix, is simply:
+the Alpine variant, which has a shell and busybox, is simply:
 
 ```yaml
 image:
-  tag: "0.9.0"
+  tag: "0.9.0-alpine"
 ```
 
-and the distroless variant is `tag: "0.9.0-distroless"`. That image has no
-shell, which the chart does not need: its probes are `httpGet`, made by the
-kubelet from outside the container. What it does change is signalling: `kubectl
-exec <pod> -- kill -HUP 1` has no `kill` to run; see [the distroless
-variant](container-images.md#the-distroless-variant) for other ways to signal
-it.
-
-`podSecurityContext` runs the pod as `65532:65532`, the user the Alpine and
-distroless images run as, whichever image you choose. Data another uid wrote
-stays readable where the kubelet applies `fsGroup` to the volume, as it does to
-most PersistentVolumeClaims and to `emptyDir`: it re-groups the files to 65532
-and adds group read and write (see [server-side key generation and the
-uid](storage-backends.md#server-side-key-generation-and-the-uid)). Where it does not — a `hostPath`, or a volume
-driver without `fsGroup` support — re-own the data to `65532:65532` before the
-pod starts, because the CA's private keys are readable by their owner alone and
-openvox-ca never changes the owner of an existing file.
+`podSecurityContext` runs the pod as `65532:65532`, the user both images run as.
+Data another uid wrote stays readable where the kubelet applies `fsGroup` to the
+volume, as it does to most PersistentVolumeClaims and to `emptyDir`: it
+re-groups the files to 65532 and adds group read and write (see [server-side key
+generation and the
+uid](storage-backends.md#server-side-key-generation-and-the-uid)). Where it does
+not — a `hostPath`, or a volume driver without `fsGroup` support — re-own the
+data on every volume the CA reads to `65532:65532` before the pod starts,
+because the CA's private keys are readable by their owner alone and openvox-ca
+never changes the owner of an existing file.
 
 To pin by digest (which is what you want if you are reconciling with Flux or
 Argo CD and letting an image automation update it):
@@ -334,13 +336,14 @@ once.
 
 Three ways to act, cheapest first:
 
-- `kubectl exec <pod> -- kill -HUP 1` — PID 1 is the supervisor, which forwards
-  the signal to the frontend. No restart, no dropped connections. The
-  distroless image has no `kill`; `kubectl debug -it <pod> --profile=restricted
-  --image=docker.io/library/busybox:1.37@sha256:<digest> --target=openvox-ca --
-  kill -HUP 1` does the same from an ephemeral container. That container can
-  read the CA's private keys, so pin its image by digest; see [the distroless
-  variant](container-images.md#the-distroless-variant).
+- Signal it: PID 1 is the supervisor, which forwards `SIGHUP` to the frontend.
+  No restart, no dropped connections. The default distroless image has no
+  `kill`, so send it from an ephemeral container: `kubectl debug -it <pod>
+  --profile=restricted --image=docker.io/library/busybox:1.37@sha256:<digest>
+  --target=openvox-ca -- kill -HUP 1`. That container can read the CA's private
+  keys, so pin its image by digest; see [the distroless
+  variant](container-images.md#the-distroless-variant). On the `-alpine` image,
+  `kubectl exec <pod> -- kill -HUP 1` does the same.
 - `kubectl rollout restart deployment/<release>-openvox-ca`.
 - Let a controller restart it: `ci/postgres-ha-values.yaml` sets
   `reloader.stakater.com/auto: "true"` under `podAnnotations`, which has
@@ -722,7 +725,9 @@ autosign:
 
 `autosign.mode` takes the raw setting instead — `"true"` (sign everything;
 development only, and the chart warns), or a path to an executable policy
-plugin you have mounted via `extraVolumes`.
+plugin you have mounted via `extraVolumes`. The default image has no shell, so
+a plugin written as a script needs the `-alpine` image (see [choosing an
+image](#choosing-an-image)); a statically linked plugin runs in either.
 
 The CA refuses to run a plugin that anyone but root or its own user could
 replace (see [the autosign executable's path](configuration.md#the-autosign-executables-path)).

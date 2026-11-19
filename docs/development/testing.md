@@ -228,8 +228,6 @@ identical to one that worked.
 # 1. Pinned uid (context `.`). On Dockerfile.alpine and test/Dockerfile.run
 #    -- expect "puppet is 65533:65532, not 65532:65532".
 sed 's/-u 65532/-u 65533/' Dockerfile.alpine > /tmp/mut && docker build -f /tmp/mut .
-#    On Dockerfile, whose uid is 1000 -- expect "puppet is 1001:1000, not 1000:1000".
-sed 's/-u 1000/-u 1001/' Dockerfile > /tmp/mut && docker build -f /tmp/mut .
 
 # 2. The same, for docker/puppet/Dockerfile.client. Note the build context, and
 #    that this image's account is puppet-agent, so the message differs:
@@ -237,11 +235,10 @@ sed 's/-u 1000/-u 1001/' Dockerfile > /tmp/mut && docker build -f /tmp/mut .
 sed 's/-u 1000/-u 1001/' docker/puppet/Dockerfile.client > /tmp/mut && \
     docker build -f /tmp/mut docker/puppet
 
-# 3. Ownership of the directories the CA writes (Dockerfile, Dockerfile.alpine).
+# 3. Ownership of the directories the CA writes (Dockerfile.alpine).
 #    Drop either argument of the chown; the loop asserts both, so either is
 #    caught. The first is the image's default --cadir, the second is what
-#    compose.yml and the docs mount. Shown for Dockerfile.alpine; on Dockerfile
-#    the messages name 1000:1000 instead.
+#    compose.yml and the docs mount.
 #    -- expect "/etc/puppetlabs/puppet/ssl/ca is owned by 0:0, not 65532:65532"
 sed 's|chown -R puppet:puppet /etc/puppetlabs/puppet /data|chown -R puppet:puppet /data|' \
     Dockerfile.alpine > /tmp/mut && docker build -f /tmp/mut .
@@ -277,10 +274,11 @@ sed 's|chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet /rootfs/data
     Dockerfile.distroless > /tmp/mut && docker build -f /tmp/mut .
 
 # 7-17. The image check. Build the mutant with the label CI gives it, then run
-#    the check against it:
-#    docker build --label org.opencontainers.image.version=edge-distroless \
-#        -f /tmp/mut -t mut . && PUSH=false LOADED=mut SUFFIX=-distroless \
-#        SUFFIXES='-alpine -distroless' bash /tmp/check.sh
+#    the check against it. Distroless is the unsuffixed variant, so its label
+#    is the plain tag and its SUFFIX is empty:
+#    docker build --label org.opencontainers.image.version=edge \
+#        -f /tmp/mut -t mut . && PUSH=false LOADED=mut SUFFIX= \
+#        SUFFIXES=-alpine bash /tmp/check.sh
 # 7. Copy per directory, which the builder-stage guard cannot see.
 #    -- expect "/data is owned by 0:0, but the image runs as 65532:65532"
 sed 's|^COPY --from=builder /rootfs/ /$|COPY --from=builder /rootfs/etc/puppetlabs /etc/puppetlabs\nCOPY --from=builder /rootfs/data /data|' \
@@ -306,23 +304,54 @@ sed 's|^CMD \["--cadir=/etc/puppetlabs/puppet/ssl/ca", \\$|CMD ["--cadir=/srv/ca
 # 14. Drop the default cadir from CMD.
 #    -- expect "CMD is ["--verbosity=1"]; it must name the default cadir once, as --cadir=<absolute path>"
 sed 's|^CMD \["--cadir=/etc/puppetlabs/puppet/ssl/ca", \\$|CMD [\\|' Dockerfile.distroless > /tmp/mut
-# 15. Label it as another variant: build the unmodified Dockerfile.distroless
-#    with --label org.opencontainers.image.version=edge instead.
-#    -- expect "the version label is 'edge'; it must end with this variant's tag suffix '-distroless'"
+# 15. Label a suffixed variant without its suffix: build Dockerfile.alpine with
+#    --label org.opencontainers.image.version=edge and run the check with
+#    SUFFIX=-alpine.
+#    -- expect "the version label is 'edge'; it must end with this variant's tag suffix '-alpine'"
 # 16. An entrypoint that does not serve.
 #    -- expect "the server did not answer /healthz/ready: it exited, or 60 seconds
 #    passed", followed by the server's own "unknown flag: --cadir"
 sed 's|^ENTRYPOINT \["/usr/local/bin/openvox-ca"\]$|ENTRYPOINT ["/usr/local/bin/openvox-ca-ctl"]|' \
     Dockerfile.distroless > /tmp/mut
-# 17. Label the unsuffixed variant as another: build Dockerfile with
-#    --label org.opencontainers.image.version=edge-alpine and run the check
-#    with SUFFIX= (empty).
+# 17. Label the unsuffixed variant as another: build the unmodified
+#    Dockerfile.distroless with --label org.opencontainers.image.version=edge-alpine.
 #    -- expect "the version label is 'edge-alpine', another variant's; this variant's tags carry no suffix"
 ```
 
 These are deliberately not a CI job: each mutation is a full image build, and
 the failure they guard against is introduced by editing the assertion itself —
 which is exactly when this procedure is required.
+
+The workflow's variant list, in its setup job, is guarded the same way: it
+must hold unique names, exactly one unsuffixed variant, every other suffix
+`-<name>`, and an alias `-<name>` on the unsuffixed variant and on no other.
+CI only ever takes the passing branch, so check each refusal by running the
+step's script with a mutated list. Every mutation below should print the
+step's `::error::` line and exit 1:
+
+```bash
+yq -r '.jobs.setup.steps[] | select(.name == "Define the image variants") | .run' \
+    .github/workflows/container-images.yml > /tmp/variants.sh
+mut() { sed "$1" /tmp/variants.sh > /tmp/mut.sh && GITHUB_OUTPUT=/dev/null bash /tmp/mut.sh; }
+mut 's/, "alias": "-distroless"//'                                   # no alias
+mut 's/"alias": "-distroless"/"alias": "-dl"/'                       # not "-<name>"
+mut 's/"suffix": "-alpine"}/"suffix": "-alpine", "alias": "-alpine"}/' # on a suffixed variant
+mut 's/"suffix": "-alpine"/"suffix": ""/'                            # two unsuffixed
+```
+
+The merge job's check that every tag got its alias copy is the same: CI never
+fails it. Run the tag-list part of its *Create multi-arch manifest* step with
+the alias line writing over the file instead of appending to it, and it should
+print `::error::expected 6 tags with the -distroless alias copies, but the list
+holds 3` and exit 1:
+
+```bash
+yq -r '.jobs.merge.steps[] | select(.name == "Create multi-arch manifest") | .run' \
+    .github/workflows/container-images.yml | sed -n '1,/publishing:/p' > /tmp/tags.sh
+sed "/+ \$alias/s/>> \/tmp\/tags.txt/> \/tmp\/tags.txt/" /tmp/tags.sh > /tmp/tags-mut.sh
+DOCKER_METADATA_OUTPUT_JSON='{"tags":["r/i:1.0.0","r/i:1.0","r/i:latest"]}' \
+    ALIAS=-distroless bash /tmp/tags-mut.sh
+```
 
 ## Image build context check
 

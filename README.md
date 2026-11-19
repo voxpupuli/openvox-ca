@@ -97,8 +97,8 @@ every release:
 $ docker pull ghcr.io/voxpupuli/openvox-ca:latest
 ```
 
-Every tag comes in three variants: CentOS Stream (the unsuffixed tags), Alpine
-(`-alpine`) and distroless (`-distroless`). See [container
+Every tag comes in two variants: distroless (the unsuffixed tags, also
+published with a `-distroless` suffix) and Alpine (`-alpine`). See [container
 images](docs/container-images.md) for how they differ, the available tags and
 a `docker run` example, or use the [compose.yml](https://github.com/voxpupuli/openvox-ca/blob/main/compose.yml) at the repository
 root for a Docker/Podman Compose deployment.
