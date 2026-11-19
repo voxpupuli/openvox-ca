@@ -1920,6 +1920,130 @@ func verifyChartBackendAliasesIn(tpl, spec []byte) error {
 	return nil
 }
 
+// The places the uid the CA runs as is written down: the Alpine and
+// distroless images, the chart's podSecurityContext, and the integration
+// fixture, which stands in for the published images in the compose suites.
+// The CentOS Stream image is left out: it runs as 1000 until #319 retires it.
+const (
+	alpineDockerfilePath     = "Dockerfile.alpine"
+	distrolessDockerfilePath = "Dockerfile.distroless"
+	chartValuesPath          = chartDir + "/values.yaml"
+	fixtureDockerfilePath    = "test/Dockerfile.run"
+)
+
+var (
+	dockerfileNumericUserRE = regexp.MustCompile(`(?m)^USER (\d+):(\d+)[ \t]*$`)
+	distrolessCAUIDRE       = regexp.MustCompile(`(?m)^ARG CA_UID=(\d+)[ \t]*$`)
+	distrolessUserRE        = regexp.MustCompile(`(?m)^USER \$\{CA_UID\}:\$\{CA_UID\}[ \t]*$`)
+)
+
+// verifyImageUIDs asserts that the Alpine image, the distroless image, the
+// Helm chart's podSecurityContext and the integration fixture all name one uid
+// and gid.
+//
+// The CA's private keys are written 0600 and openvox-ca never changes the owner
+// of an existing file, so where the kubelet does not re-group a volume through
+// fsGroup, data one of them wrote is unreadable to another running as a
+// different uid. Each Dockerfile's build guards pin its value against itself
+// only, so an edit that moves one site and not the others passes all of them.
+// The fixture shares no data with a published image, but it is what the
+// compose suites run, so a fixture left on an old uid stops them exercising the
+// one shipped. The values are compared with each other rather than with a
+// literal, so moving the uid means editing the sites and not this check. Wired
+// into dev:check.
+func verifyImageUIDs() error {
+	alpine, err := os.ReadFile(alpineDockerfilePath)
+	if err != nil {
+		return err
+	}
+	distroless, err := os.ReadFile(distrolessDockerfilePath)
+	if err != nil {
+		return err
+	}
+	values, err := os.ReadFile(chartValuesPath)
+	if err != nil {
+		return err
+	}
+	fixture, err := os.ReadFile(fixtureDockerfilePath)
+	if err != nil {
+		return err
+	}
+	return verifyImageUIDsIn(alpine, distroless, values, fixture)
+}
+
+// verifyImageUIDsIn is verifyImageUIDs over caller-supplied content, split out
+// so the refusal branches are testable without touching the real files.
+func verifyImageUIDsIn(alpine, distroless, values, fixture []byte) error {
+	type site struct{ name, value string }
+	var sites []site
+
+	for _, f := range []struct {
+		path string
+		src  []byte
+	}{{alpineDockerfilePath, alpine}, {fixtureDockerfilePath, fixture}} {
+		users := dockerfileNumericUserRE.FindAllSubmatch(f.src, -1)
+		if len(users) != 1 {
+			return fmt.Errorf("%s: found %d numeric `USER <uid>:<gid>` lines, not one, so the uid "+
+				"it runs as cannot be compared with the others; update the pattern rather than "+
+				"deleting the check", f.path, len(users))
+		}
+		sites = append(sites,
+			site{f.path + " USER uid", string(users[0][1])},
+			site{f.path + " USER gid", string(users[0][2])})
+	}
+
+	args := distrolessCAUIDRE.FindAllSubmatch(distroless, -1)
+	if len(args) != 1 {
+		return fmt.Errorf("%s: found %d `ARG CA_UID=<uid>` defaults, not one, so the uid it runs "+
+			"as cannot be compared with the others; update the pattern rather than deleting "+
+			"the check", distrolessDockerfilePath, len(args))
+	}
+	// The ARG is only the uid the image runs as while USER is spelt from it.
+	if !distrolessUserRE.Match(distroless) {
+		return fmt.Errorf("%s no longer sets `USER ${CA_UID}:${CA_UID}`, so its CA_UID default "+
+			"is not necessarily the uid it runs as", distrolessDockerfilePath)
+	}
+	sites = append(sites, site{distrolessDockerfilePath + " CA_UID", string(args[0][1])})
+
+	var doc struct {
+		PodSecurityContext struct {
+			RunAsUser  *int `yaml:"runAsUser"`
+			RunAsGroup *int `yaml:"runAsGroup"`
+			FSGroup    *int `yaml:"fsGroup"`
+		} `yaml:"podSecurityContext"`
+	}
+	if err := yaml.Unmarshal(values, &doc); err != nil {
+		return fmt.Errorf("%s: %w", chartValuesPath, err)
+	}
+	for _, f := range []struct {
+		key string
+		v   *int
+	}{
+		{"runAsUser", doc.PodSecurityContext.RunAsUser},
+		{"runAsGroup", doc.PodSecurityContext.RunAsGroup},
+		{"fsGroup", doc.PodSecurityContext.FSGroup},
+	} {
+		if f.v == nil {
+			return fmt.Errorf("%s: podSecurityContext.%s is not set, so the chart's default uid "+
+				"cannot be compared with the images'", chartValuesPath, f.key)
+		}
+		sites = append(sites, site{chartValuesPath + " podSecurityContext." + f.key, strconv.Itoa(*f.v)})
+	}
+
+	for _, s := range sites[1:] {
+		if s.value != sites[0].value {
+			var all []string
+			for _, each := range sites {
+				all = append(all, fmt.Sprintf("%s=%s", each.name, each.value))
+			}
+			return fmt.Errorf("the images and the chart must run the CA as one uid and gid, so "+
+				"each can read data another wrote, but they disagree: %s",
+				strings.Join(all, ", "))
+		}
+	}
+	return nil
+}
+
 // verifyNodeTTL asserts that first-boot's NODE_TTL is the CA's own leaf
 // default, which its comment says it deliberately matches.
 //
@@ -9560,6 +9684,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking the chart's backend spellings against the CA's own...")
 	if err := verifyChartBackendAliases(); err != nil {
+		return err
+	}
+	fmt.Println("Checking the images and the chart run the CA as one uid...")
+	if err := verifyImageUIDs(); err != nil {
 		return err
 	}
 	fmt.Println("Checking that every guard claiming dev:check is wired into it...")
