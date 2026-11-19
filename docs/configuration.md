@@ -520,7 +520,8 @@ and point `tls_cert` at that before starting.
 
 While TLS is off, the whole admin API is unauthenticated: the authorisation
 middleware is only installed when TLS is configured — `tls_cert` and `tls_key`,
-their environment equivalents, or [`serving_cert`](#the-cas-own-serving-certificate). So
+their environment equivalents, or [`serving_cert`](#the-cas-own-serving-certificate) —
+and the server logs a warning saying so at every start. So
 `--host 127.0.0.1` is not decoration — treat it as required, and keep the
 window short. On an ordinary configuration the server would refuse to serve
 plain HTTP off loopback anyway, so forgetting it fails safe. On one carrying

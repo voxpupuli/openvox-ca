@@ -297,6 +297,10 @@ address unless `--no-tls-required` is set — only do that behind a trusted
 TLS-terminating proxy or in test environments. For anything reachable from the
 network, serve HTTPS as below.
 
+Without TLS the admin API is unauthenticated, even on loopback: any local
+process can sign, revoke and clean certificates, and the server logs a warning
+saying so at every start.
+
 ### HTTPS with mTLS
 
 ```bash
