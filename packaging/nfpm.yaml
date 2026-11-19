@@ -90,6 +90,28 @@ contents:
     file_info:
       mode: 0644
 
+  # The two directories this package creates, declared so that the package
+  # owns them. rpm removes a directory on erase only if a package owns it, and
+  # nfpm declares none implicitly, so without these `dnf remove` left both
+  # behind, empty and owned by nothing (openvox-ca#640). dpkg records the
+  # parents of every file it unpacks and prunes them when they empty, so the
+  # deb did not need them; they are shared anyway, so both formats declare the
+  # same thing and only the ssl tree below differs by format.
+  #
+  # 0755 root:root, which is what rpm created implicitly before: rpm re-applies
+  # a packaged directory's owner and mode on every upgrade, so declaring
+  # anything else would change existing hosts at their next update, and keep
+  # changing an operator's own mode back. The narrowing that matters is on
+  # config.yaml itself.
+  - dst: /etc/openvox-ca
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /usr/libexec/openvox-ca
+    type: dir
+    file_info:
+      mode: 0755
+
   # Internal, and under libexec because of it: invoked by the oneshot and by
   # nothing else. It is not on PATH and takes no arguments.
   - src: packaging/scripts/first-boot

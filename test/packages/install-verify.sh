@@ -314,6 +314,12 @@ payload() {
         'systemd-analyze verify openvox-ca.service openvox-ca-first-boot.service'
     check "config.yaml is 0640 root:puppet" \
         'test "$(stat -c "%a %U:%G" /etc/openvox-ca/config.yaml)" = "640 root:puppet"'
+    if [[ $FORMAT == rpm ]]; then
+        # rpm removes only the directories a package owns (openvox-ca#640).
+        check "the rpm owns /etc/openvox-ca and /usr/libexec/openvox-ca" \
+            'rpm -qf /etc/openvox-ca | grep -q "^openvox-ca-" &&
+             rpm -qf /usr/libexec/openvox-ca | grep -q "^openvox-ca-"'
+    fi
     check "the CA directory is 0770 puppet:puppet" \
         "test \"\$(stat -c '%a %U:%G' $SSL/ca)\" = '770 puppet:puppet'"
     check "the migration guide the takeover warning names is installed" \
@@ -651,6 +657,11 @@ rpm_scenarios() {
     localhost_fallback
     check "a fallback name is not recorded in /etc/sysconfig/openvox-ca" \
         'test ! -e /etc/sysconfig/openvox-ca'
+    # Nothing here that the package did not ship, so nothing should outlive it.
+    remove_pkg
+    judge "dnf remove succeeds"
+    check "dnf remove leaves neither /etc/openvox-ca nor /usr/libexec/openvox-ca behind" \
+        'test ! -e /etc/openvox-ca && test ! -e /usr/libexec/openvox-ca'
 
     start takeover ca.example.test
     place_ca "$SSL/ca"

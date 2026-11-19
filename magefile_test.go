@@ -4828,6 +4828,7 @@ func rpmContents(path string) (map[string]string, error) {
 // rpmFile is one entry of an rpm's payload, with the metadata that decides how
 // it is installed.
 type rpmFile struct {
+	dir       bool
 	mode      int
 	owner     string
 	group     string
@@ -4869,6 +4870,7 @@ func rpmPayload(path string) (map[string]rpmFile, error) {
 	out := make(map[string]rpmFile, len(entries))
 	for _, e := range entries {
 		out[e.Name()] = rpmFile{
+			dir:       e.Mode()&0o170000 == 0o040000,
 			mode:      e.Mode() & 0o7777,
 			owner:     e.UserName(),
 			group:     e.GroupName(),
@@ -5049,6 +5051,23 @@ var _ = Describe("the rpm's payload", func() {
 			Expect(f.config).To(BeFalse(), "%s is marked %%config and should not be", path)
 		}
 	})
+
+	// rpm removes a directory on erase only when a package owns it, and owns
+	// one only when the header lists it. nfpm lists none implicitly, so these
+	// two outlived every `dnf remove`, empty and owned by nothing
+	// (openvox-ca#640). Declared 0755 root:root, the mode rpm gave them
+	// implicitly, because rpm re-applies a declared mode on every upgrade.
+	DescribeTable("owns the directories it creates, so that erasing it removes them",
+		func(path string) {
+			Expect(files).To(HaveKey(path), "the rpm does not own %s", path)
+			Expect(files[path].dir).To(BeTrue(), "%s is not a directory entry", path)
+			Expect(files[path].mode).To(Equal(0o755), "mode of %s", path)
+			Expect(files[path].owner).To(Equal("root"), "owner of %s", path)
+			Expect(files[path].group).To(Equal("root"), "group of %s", path)
+		},
+		Entry("the configuration directory", "/etc/openvox-ca"),
+		Entry("the libexec directory", "/usr/libexec/openvox-ca"),
+	)
 
 	It("gives the configuration file to root:puppet", func() {
 		Expect(files["/etc/openvox-ca/config.yaml"].owner).To(Equal("root"))
