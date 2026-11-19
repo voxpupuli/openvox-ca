@@ -2907,7 +2907,7 @@ var _ = Describe("verifyImageUIDs", func() {
 		return []byte("FROM alpine AS runtime\nRUN adduser -D puppet\n" + user + "\nEXPOSE 8140\n")
 	}
 	fixture := func(user string) []byte {
-		return []byte("FROM centos\nRUN useradd puppet\n" + user + "\nEXPOSE 8140\n")
+		return []byte("FROM debian\nRUN useradd puppet\n" + user + "\nEXPOSE 8140\n")
 	}
 	distroless := func(arg, user string) []byte {
 		return []byte(arg + "\nFROM golang AS builder\nARG CA_UID\nFROM distroless\nARG CA_UID\n" + user + "\n")

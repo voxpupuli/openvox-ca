@@ -166,11 +166,11 @@ STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]'
 else
     # cpio to unpack the rpm for the takeover scenario's pre-placed CA.
-    # Unpinned, as everywhere in this repository: quay.io drops a CentOS
-    # Stream digest once a newer build lands (renovate.json says so). The
-    # repository metadata is kept rather than cleaned, so each scenario's
-    # install resolves dependencies from it instead of fetching it again.
-    dockerfile='FROM quay.io/centos/centos:stream10
+    # ubi-init boots systemd as PID 1, like the deb leg's image. Pinned by
+    # digest, which Renovate moves (see renovate.json). The repository
+    # metadata is kept rather than cleaned, so each scenario's install
+    # resolves dependencies from it instead of fetching it again.
+    dockerfile='FROM registry.access.redhat.com/ubi10/ubi-init:10.3@sha256:56b166666bfea9e23148aea63e035690dec4aca88372da83de0012d466aa5183
 RUN dnf install -y systemd openssl procps-ng cpio
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]'

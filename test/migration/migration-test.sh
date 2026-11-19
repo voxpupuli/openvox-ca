@@ -324,7 +324,7 @@ _new_ready=false
 # Scoped to this loop only; the fixture fetches keep the generous default.
 # The `VAR=x func` prefix below is temporary rather than leaking into the rest
 # of the run -- verified in bash 5.3 and in the runner image's own bash
-# (quay.io/centos/centos:stream10), because the two shells could have differed
+# (5.2, from Debian 13), because the two shells could have differed
 # and a leak would silently shorten every later fetch's timeout.
 READY_MAX_TIME=2
 READY_ATTEMPTS=60

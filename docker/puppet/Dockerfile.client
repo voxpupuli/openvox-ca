@@ -1,10 +1,10 @@
 # Puppet agent (client) image for the openvox-ca integration test stack.
 #
-# Provides a minimal CentOS Stream 10 container with the OpenVox 8 agent,
+# Provides a UBI 10 container with the OpenVox 8 agent,
 # curl, and openssl.  The entrypoint keeps the container alive so the host-side
 # test script can drive it with `$engine exec`.
 
-FROM quay.io/centos/centos:stream10
+FROM registry.access.redhat.com/ubi10/ubi:10.3@sha256:73ea54bfbfb586075bd3d45df6483a7f68875233c8cc7cebcf9b2bb42306c308
 
 RUN dnf -y install https://yum.voxpupuli.org/openvox8-release-el-10.noarch.rpm && \
     dnf -y install openvox-agent curl openssl && \
@@ -19,9 +19,9 @@ ENV PATH=/opt/puppetlabs/puppet/bin:${PATH}
 # directories at runtime (SSL bootstrap, catalog cache, reports, etc.).
 # The uid/gid is pinned so `USER` below can be numeric: the host has no way to
 # resolve a name out of the image's /etc/passwd.  1000 rather than a system uid
-# -- the system range is already crowded here (openvox-agent's own `puppet` at
-# 52, chrony at 998, systemd-oom at 999), so `useradd -r` lands on whatever
-# happens to be free that day.  groupadd/useradd fail the build if anything
+# -- the base already has system users scattered through that range (tss at 59,
+# dbus at 81, systemd-oom at 999), so `useradd -r` lands on whatever happens to
+# be free that day.  groupadd/useradd fail the build if anything
 # else has taken it.
 # The assertion below must be re-verified by hand when edited -- CI only ever
 # takes its passing branch. See docs/development/testing.md, "Container

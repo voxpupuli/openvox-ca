@@ -9150,9 +9150,9 @@ func (Test) FixtureCommands() error {
 // the full Puppet integration test suite: CA TLS, catalog application,
 // PuppetDB reporting, exported resources, and CRL revocation enforcement.
 //
-// Requires podman-compose (or docker compose) and network access to pull
-// quay.io/centos/centos:stream10, ghcr.io/openvoxproject/openvoxdb:latest,
-// and docker.io/postgres:17-alpine on first run.
+// Requires podman-compose (or docker compose) and network access to pull, on
+// first run, the Debian and UBI 10 base images the fixture Dockerfiles name and
+// the OpenVoxDB and PostgreSQL images test/compose-puppet.yml pins.
 func (Test) Puppet() error {
 	mg.Deps(Build{}.All)
 	fmt.Println("Building compose images for puppet stack...")

@@ -423,8 +423,8 @@ never declared, or the base image dropped it. The second is not hypothetical —
 on 2026-09-10 the rolling `stream10` tag dropped `diffutils`, and because
 nothing had ever declared the suite's one `diff` call, both Compose legs failed
 while *asserting a certificate-content mismatch on byte-identical files*. The
-base cannot be pinned against a repeat: quay does not retain superseded CentOS
-Stream digests, which `renovate.json` records as its reason for declining.
+image is now built on Debian, pinned by digest, but each Renovate bump of that
+pin can drop a package the same way.
 
 `mage test:fixtureCommands` exercises the guard logic on the host. CI never takes
 its failing branches, so the mutations below check the parts that only a real
@@ -432,10 +432,13 @@ image can show. Apply each to a copy, never to the tracked file, and read the
 message rather than just the non-zero exit.
 
 ```bash
-# 1. A declared package the base no longer provides. Drop diffutils from the
-#    install line, rebuild, and run a compose leg.
-#    -- expect "Bail out! ... # absent from PATH: diff", before test 1 runs.
-sed 's/ diffutils findutils/ findutils/' test/Dockerfile.run > /tmp/mut && \
+# 1. A declared package the base does not provide. Drop python3 from the
+#    install line, rebuild, and run a compose leg. Most of the declared
+#    packages are Essential in Debian and come with the base, so dropping one
+#    of those changes nothing. Of the three the base lacks, curl is the
+#    services' healthcheck and would stall the leg before the preflight runs.
+#    -- expect "Bail out! ... # absent from PATH: python3", before test 1 runs.
+sed 's/ openssl python3 sed/ openssl sed/' test/Dockerfile.run > /tmp/mut && \
     docker build -f /tmp/mut -t openvox-ca-integ:latest . && \
     docker compose -f test/compose.yml up --exit-code-from test-runner
 
@@ -456,8 +459,8 @@ bash -c 'set -uo pipefail; FIXTURE_MISSING_LOG=/proc/x; . test/fixture-commands.
 
 CI's *Packages* legs (`.github/workflows/packages.yml`, which "CI success"
 needs) build the deb and rpm as the release does and install each into a
-container booted with systemd as PID 1: `debian:trixie` for the deb and
-CentOS Stream 10 for the rpm, each on an amd64 and an arm64 runner. They judge
+container booted with systemd as PID 1: `debian:trixie` for the deb and UBI 10
+(`ubi10/ubi-init`) for the rpm, each on an amd64 and an arm64 runner. They judge
 the packages from the installed state. The CA must answer TLS verified through
 the `certs/ca.pem` the package linked, a CA placed before install must come
 through byte-identical, and each format's lifecycle (takeover, upgrade,
