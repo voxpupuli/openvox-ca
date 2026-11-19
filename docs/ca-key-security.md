@@ -25,6 +25,13 @@ gives that up; it is a debugging aid. The container images and the Helm chart ru
 the default three processes, because the isolation matters in a container as much
 as anywhere.
 
+The isolation holds only while the frontend's own TLS key is something else. A `tls_key`
+(or `--tls-key`) naming the CA's `ca_key.pem` loads the CA key straight into the
+frontend to serve TLS with, and the server warns at startup that it has.
+[`serving_cert`](configuration.md#the-cas-own-serving-certificate), which the
+container images use by default, has the CA issue the listener a certificate
+and key of its own instead.
+
 The signer answers one other request over the socketpair: `Metrics`, which
 returns its Go runtime statistics (heap, garbage collection, goroutines, its
 memory limit) so the frontend can serve them on `/metrics` under

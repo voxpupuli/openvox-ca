@@ -1,25 +1,19 @@
 # Compose deployment for openvox-ca using the published container images.
 #
 # Quick start:
-#   1. Change `--hostname` below to the DNS name agents will use to reach
-#      the CA.
-#   2. docker compose up -d        (or: podman-compose up -d)
+#   docker compose up -d        (or: podman-compose up -d)
 #
-# CA state lives in the named volume `ca-data`, so it survives container
+# CA state lives in the named volume `ca-ssl`, so it survives container
 # restarts and image upgrades. On first run a new CA is bootstrapped under
-# /data and served over HTTPS on port 8140, using the CA's own certificate
-# as the TLS server certificate (the server refuses plain HTTP on
-# non-loopback addresses).
+# /etc/puppetlabs/puppet/ssl/ca, and it issues its own serving certificate,
+# for the names `puppet` and `localhost`, beside it on the same volume: the
+# configuration baked into the image asks for that. An agent left at its
+# default server name, `puppet`, verifies it as it stands, and the CA's
+# signing key stays out of the network-facing process.
 #
-# That last part is what makes this file a one-command start, and it is not
-# a working configuration for agents: the CA certificate's keyUsage is
-# certSign/cRLSign and it carries no subjectAltName, so the handshake
-# completes and every client that verifies it refuses the connection. The
-# server warns about this at startup. Before pointing agents at this CA,
-# issue a dedicated serving certificate with `openvox-ca-ctl generate` and
-# point --tls-cert/--tls-key at it -- which also keeps the CA's long-lived
-# signing key out of the network-facing listener. See "Serving certificate"
-# in docs/configuration.md.
+# To serve another name, or to configure anything else, mount your own file
+# over /etc/openvox-ca/config.yaml (the commented line under `volumes:`). It
+# replaces the baked one entirely. See "Running" in docs/container-images.md.
 #
 # See docs/container-images.md for the available image tags, and
 # docs/configuration.md for the full configuration reference (mTLS,
@@ -41,22 +35,20 @@ services:
     # data written by a container that ran as another uid has to be re-owned
     # to 65532:65532 first (docs/container-images.md, "Runtime user").
     image: ghcr.io/voxpupuli/openvox-ca:latest
-    command:
-      - --cadir=/data
-      - --hostname=puppet.example.com
-      - --tls-cert=/data/ca_crt.pem
-      - --tls-key=/data/ca_key.pem
-    # NOTE: autosign is off by default. Only add --autosign-config=true in
-    # dev/test environments: it lets any CSR submitter obtain a signed
-    # certificate without operator review.
+    # No `command:`: the image's own runs the CA from the volume below. A
+    # command here replaces it, so restate --cadir if you add one.
+    # NOTE: autosign is off by default. Only enable it in dev/test
+    # environments: it lets any CSR submitter obtain a signed certificate
+    # without operator review.
     ports:
       - "8140:8140"
     volumes:
-      - ca-data:/data
+      - ca-ssl:/etc/puppetlabs/puppet/ssl
+      # - ./config.yaml:/etc/openvox-ca/config.yaml:ro
     restart: unless-stopped
     # No healthcheck here: every image variant declares its own, `openvox-ca
     # healthcheck`. Images released before it (v1.0.0-alpha1 and earlier)
     # declare none. See "Health check" in docs/container-images.md.
 
 volumes:
-  ca-data:
+  ca-ssl:

@@ -13,6 +13,9 @@ ENV CGO_ENABLED=0 GOOS=linux
 RUN go build -trimpath -ldflags="-s -w" -o /openvox-ca     ./cmd/openvox-ca/ && \
     go build -trimpath -ldflags="-s -w" -o /openvox-ca-ctl ./cmd/openvox-ca-ctl/
 
+# The default configuration, staged with its mode for the runtime stage's COPY.
+RUN install -D -m 0644 packaging/container/config.yaml /container-config/config.yaml
+
 # ---- Runtime Stage ----
 FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
@@ -43,6 +46,15 @@ RUN apk add --no-cache ca-certificates && \
 
 COPY --from=builder /openvox-ca     /usr/local/bin/openvox-ca
 COPY --from=builder /openvox-ca-ctl /usr/local/bin/openvox-ca-ctl
+
+# The configuration the default CMD below runs with: it has the CA issue its own
+# serving certificate, so a bare `docker run` starts and serves TLS that agents
+# can verify, without the CA key on the network-facing listener. Root-owned and
+# read-only to the CA; replace it by mounting another file over it, or with
+# OPENVOX_CA_CONFIG or --config. See packaging/container/config.yaml. Staged
+# in the builder rather than copied with --chmod, which BuildKit applies to the
+# directory it creates as well, leaving /etc/openvox-ca untraversable.
+COPY --from=builder /container-config/ /etc/openvox-ca/
 
 USER 65532:65532
 EXPOSE 8140

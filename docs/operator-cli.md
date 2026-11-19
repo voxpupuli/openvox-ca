@@ -741,10 +741,10 @@ that outlives the container:
 mkdir -p ca-admin-out
 podman unshare chown 65532:65532 ca-admin-out
 podman run --rm \
-  -v ca-data:/data \
+  -v ca-ssl:/etc/puppetlabs/puppet/ssl \
   -v "$PWD/ca-admin-out":/out:Z \
   ghcr.io/voxpupuli/openvox-ca:1.2.3 \
-  generate --cadir /data --certname admin-cli --ttl 8760h \
+  generate --cadir /etc/puppetlabs/puppet/ssl/ca --certname admin-cli --ttl 8760h \
   --pp-cli-auth --key-out /out/admin-cli_key.pem > admin-cli.crt
 
 # Take the key back: it lands 0600 owned by the container's user.
@@ -774,7 +774,7 @@ expands outside the namespace and would hand the file to a different subuid
 again.
 
 Resist fixing that with `--userns` instead. A remap applies to every path the
-container touches, `ca-data` included, so mapping yourself onto uid 65532 shifts
+container touches, `ca-ssl` included, so mapping yourself onto uid 65532 shifts
 the CA files the server left behind out from under it — and the failure moves
 from the key write to the CA directory, which is a worse place to discover it.
 Pinning an older release can also mean another uid: the unsuffixed tags up to

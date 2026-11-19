@@ -233,9 +233,12 @@ jobs:
       # that openvox-ca starts at all (a cgo build has no libc to load in
       # distroless, and builds without complaint), has openvox-ca-ctl
       # initialise a CA in each of those directories as the image's own user
-      # (an owner in a listing is not a write), and starts the server through
-      # the image's entrypoint, which bootstraps a CA in the default cadir and
-      # must answer /healthz/ready. On
+      # (an owner in a listing is not a write), and runs the image with no
+      # arguments at all. The default CMD and the configuration baked in at
+      # /etc/openvox-ca/config.yaml have to start a CA in the default cadir
+      # that answers /healthz/ready over TLS a client can verify as `puppet`,
+      # so a config the server cannot read, or one that left it serving the CA
+      # certificate itself, fails here. On
       # the push path nothing was loaded, so the image is pulled by the digest
       # that was pushed, and this is the only step on that path that runs it.
       # CI only takes the passing branch; the mutations that exercise the
@@ -314,8 +317,7 @@ jobs:
             fi
             echo "ok: a CA was initialised in $dir as $uid:$gid"
           done
-          sid="$(docker run -d -p 127.0.0.1::8140 "$ref" --cadir="$cadir" --hostname=localhost \
-            --tls-cert="$cadir/ca_crt.pem" --tls-key="$cadir/ca_key.pem")"
+          sid="$(docker run -d -p 127.0.0.1::8140 "$ref")"
           ready=""
           for _ in $(seq 1 30); do
             port="$(docker port "$sid" 8140/tcp 2> /dev/null | head -n 1)" || true
@@ -334,7 +336,14 @@ jobs:
             docker logs "$sid" 2>&1 | tail -n 40
             exit 1
           fi
-          echo "ok: the server is ready on $cadir as $uid:$gid"
+          docker cp "$sid:$cadir/ca_crt.pem" /tmp/default-ca.pem
+          if ! curl -sSf --cacert /tmp/default-ca.pem --resolve "puppet:${port}:127.0.0.1" \
+              "https://puppet:${port}/healthz/ready" > /dev/null; then
+            echo "::error::the default configuration's serving certificate does not verify as puppet against the CA"
+            docker logs "$sid" 2>&1 | tail -n 40
+            exit 1
+          fi
+          echo "ok: the default command serves verifiable TLS from $cadir as $uid:$gid"
 
       - name: Export digest
         if: needs.setup.outputs.push == 'true'

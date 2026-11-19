@@ -64,39 +64,92 @@ each check does and does not prove.
 
 ## Running
 
-The image's entrypoint is `openvox-ca`; any arguments you pass are appended to
-it, exactly like running the binary. Mount a volume for the CA directory so the
-CA survives container restarts, and publish port 8140:
+The image's entrypoint is `openvox-ca`, and its default command is
+`--cadir=/etc/puppetlabs/puppet/ssl/ca --verbosity=1`. Any arguments you pass
+are appended to the entrypoint, exactly like running the binary, and replace
+that command entirely, so restate `--cadir` in them. While the default command
+runs, its `--cadir` also outranks a `cadir` set in a configuration file.
+
+Mount a volume at `/etc/puppetlabs/puppet/ssl` so the CA survives container
+restarts, and publish port 8140:
 
 ```console
 $ docker run -d --name openvox-ca \
     -p 8140:8140 \
-    -v openvox-ca-data:/data \
-    ghcr.io/voxpupuli/openvox-ca:latest \
-    --cadir=/data --hostname=puppet.example.com \
-    --tls-cert=/data/ca_crt.pem --tls-key=/data/ca_key.pem
+    -v openvox-ca-ssl:/etc/puppetlabs/puppet/ssl \
+    ghcr.io/voxpupuli/openvox-ca:latest
 ```
 
-On first run this bootstraps a new CA under `/data` and serves HTTPS on port
-8140, using the CA's own certificate as the TLS server certificate. (The
-server refuses plain HTTP on a non-loopback address unless `--no-tls-required`
-is set — only do that behind a trusted TLS-terminating proxy or in test
-environments.)
+On first run this bootstraps a new CA under `/etc/puppetlabs/puppet/ssl/ca`, and
+the CA issues its own serving certificate, for the names `puppet` and
+`localhost`, into `/etc/puppetlabs/puppet/ssl` beside it. Its certname, the
+inventory slot it occupies, is `openvox-ca` rather than `puppet`, so on a CA
+carried over from Puppet it does not displace an existing `puppet` certificate. The volume keeps both,
+and the CA renews the certificate before it expires. A volume mounted somewhere
+else, with `--cadir` pointed into it, keeps the CA but not the certificate,
+which the baked configuration always writes to `/etc/puppetlabs/puppet/ssl`:
+the CA issues a new one whenever the container is recreated. Give such a
+deployment its own configuration, with the `store` paths on that volume. An
+agent left at its default server name, `puppet`, verifies that certificate as it stands, and the CA's
+private key stays in the signer process rather than on the listener (see
+[process isolation](ca-key-security.md#process-isolation)).
 
-That last part makes the command self-contained, and nothing else: the CA
-certificate's `keyUsage` is `certSign, cRLSign` and it has no
-`subjectAltName`, so no agent will accept the connection. The server warns
-about this at startup; see [serving
-certificate](configuration.md#serving-certificate). Before any agent talks to
-this CA, either let the CA issue its own with
-[`serving_cert`](configuration.md#the-cas-own-serving-certificate) — which
-removes this bootstrap entirely and renews the certificate unattended, which
-nothing else does once the CA key is held at a provider — or issue one with `openvox-ca-ctl generate` and
-point `--tls-cert`/`--tls-key` at that. The same goes for the rest of a
-production deployment — mTLS, an alternative storage backend, autosigning: pass the
-relevant flags, or mount a config file at `/etc/openvox-ca/config.yaml` (or
-set `OPENVOX_CA_CONFIG` to where you mounted it), which the [health
-check](#health-check) reads too. See [configuring the
+That comes from the configuration baked into the image at
+`/etc/openvox-ca/config.yaml`
+([its source](https://github.com/voxpupuli/openvox-ca/blob/main/packaging/container/config.yaml)),
+which sets [`serving_cert`](configuration.md#the-cas-own-serving-certificate)
+and nothing else. To serve another name, or to configure anything else (mTLS,
+a storage backend, autosigning), mount your own file over it, or set
+`OPENVOX_CA_CONFIG` to where you mounted it. The [health check](#health-check)
+reads the same file. Yours replaces the baked one entirely, so keep a
+`serving_cert` block in it unless you supply the certificate yourself:
+
+```yaml
+serving_cert:
+  certname: ca.example.com
+  names: [ca.example.com, puppet]
+  ttl: 2160h
+  renew_before: 720h
+  usages: [serverAuth]   # as the baked file; leaving it out adds clientAuth
+  store:
+    files:
+      cert: /etc/puppetlabs/puppet/ssl/serving_crt.pem
+      key: /etc/puppetlabs/puppet/ssl/serving_key.pem
+```
+
+Give it a certname nothing else enrols under, as the baked file does: issuing
+under the certname of an existing certificate displaces it from its inventory
+slot.
+
+**`--tls-cert` and `--tls-key` do not combine with the baked configuration.**
+`serving_cert` and `tls_cert`/`tls_key` are two answers to which certificate
+the listener presents, and the server refuses to start with both. To supply
+your own certificate, put `tls_cert` and `tls_key` in the file you mount, or
+run the server with no configuration file at all and pass the flags, restating
+`--cadir` with them:
+
+```console
+$ docker run -d --name openvox-ca -p 8140:8140 \
+    -v openvox-ca-ssl:/etc/puppetlabs/puppet/ssl \
+    -e OPENVOX_CA_CONFIG=/dev/null \
+    ghcr.io/voxpupuli/openvox-ca:latest \
+    --cadir=/etc/puppetlabs/puppet/ssl/ca \
+    --tls-cert=/etc/puppetlabs/puppet/ssl/tls.crt \
+    --tls-key=/etc/puppetlabs/puppet/ssl/tls.key
+```
+
+**Behind a TLS-terminating proxy**, the same applies to `--no-tls-required`:
+the baked configuration always serves TLS, so the flag has no effect while it is
+in place, and the server says so at startup. Run with
+`-e OPENVOX_CA_CONFIG=/dev/null`, `--cadir=/etc/puppetlabs/puppet/ssl/ca` and
+`--no-tls-required`, or mount a configuration without `serving_cert` that sets
+`no_tls_required: true`. Only do this behind a trusted proxy, or in a test
+environment. Without TLS the server installs no authorisation at all, so every
+endpoint, the administrative ones included, answers anything that can reach
+port 8140 (see [the HTTP API reference](api.md)). Publish the port to the proxy
+alone, on a private network or bound to loopback with
+`-p 127.0.0.1:8140:8140`, never with the `-p 8140:8140` the examples above use.
+See [configuring the
 server](configuration.md) for the full reference, and the [HTTP API
 reference](api.md) for the endpoints agents use.
 
@@ -190,11 +243,14 @@ server's config file, but not the arguments the server was started with:
   server listening on every address is checked over loopback; one bound with
   `host` to a specific address is checked there.
 - **Scheme.** It tries HTTPS first and falls back to plain HTTP only when the
-  server answers in plain HTTP, so TLS enabled with `--tls-cert` on the command
-  line needs nothing repeated.
+  server answers in plain HTTP, so TLS enabled anywhere the check cannot see,
+  such as `--tls-cert` on the command line under `OPENVOX_CA_CONFIG=/dev/null`,
+  needs nothing repeated.
 - **Certificate.** It does not verify the server's certificate. It sends no
-  credentials and reads nothing but the status code, and the CA's own
-  certificate, which the example above serves, cannot be verified at all.
+  credentials and reads nothing but the status code, and it has no way to know
+  which name or CA a deployment's certificate should verify against: a CA
+  serving its own certificate, which cannot be verified at all, is still
+  reported healthy.
 
 It exits 0 when the endpoint answers 200, and 1 otherwise with a one-line
 reason, which `docker inspect --format '{{json .State.Health}}' openvox-ca`
@@ -221,16 +277,17 @@ cost the pod nothing between checks.
 ### Compose
 
 The [`compose.yml`](https://github.com/voxpupuli/openvox-ca/blob/main/compose.yml) at the repository root is the equivalent
-Docker/Podman Compose deployment: edit `--hostname`, then `docker compose up
--d` (or `podman-compose up -d`). It declares no healthcheck of its own, so the
+Docker/Podman Compose deployment: `docker compose up -d` (or `podman-compose
+up -d`). It declares no healthcheck of its own, so the
 service has the image's [health check](#health-check). The
 `test/compose*.yml` files, by contrast,
 are the integration-test topologies — they build throwaway images from the
 working tree and are not deployment examples.
 
-> **Autosigning is off by default.** Only set `--autosign-config=true` in
-> dev/test environments: it lets any CSR submitter obtain a signed certificate
-> without operator review.
+> **Autosigning is off by default.** Only enable it in dev/test environments,
+> with `autosign_config: "true"` in a configuration you mount or
+> `OPENVOX_CA_AUTOSIGN_CONFIG=true` under the service's `environment:`: it lets
+> any CSR submitter obtain a signed certificate without operator review.
 
 ## Publishing
 

@@ -27,6 +27,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net"
@@ -138,6 +139,36 @@ var _ = Describe("The CA's own serving certificate", func() {
 			Entry("tls_cert alone", func(c *serverConfig) { c.TLSCert = "/etc/tls.crt" }),
 			Entry("tls_key alone", func(c *serverConfig) { c.TLSKey = "/etc/tls.key" }),
 			Entry("both", func(c *serverConfig) { c.TLSCert = "/etc/tls.crt"; c.TLSKey = "/etc/tls.key" }),
+		)
+
+		DescribeTable("names the file serving_cert came from when refusing a keypair",
+			// The container images ship serving_cert in their own
+			// configuration, so the operator refused here may never have
+			// written it. Only the default path, where that configuration
+			// lives, also names the ways out of it.
+			func(configPath string, wantFrom, wantWayOut bool) {
+				cfg := cfgWith(filesEntry())
+				cfg.TLSCert, cfg.TLSKey = "/etc/tls.crt", "/etc/tls.key"
+
+				_, err := buildServingCert(cfg, GinkgoT().TempDir(), configPath, stubCACerts{})
+				Expect(err).To(HaveOccurred())
+				if wantFrom {
+					Expect(err.Error()).To(ContainSubstring(fmt.Sprintf("serving_cert (read from %q)", configPath)))
+				} else {
+					Expect(err.Error()).To(HavePrefix("serving_cert and tls_cert/tls_key"))
+				}
+				wayOut := ContainSubstring(configEnvVar + "=/dev/null")
+				if wantWayOut {
+					Expect(err.Error()).To(wayOut)
+				} else {
+					Expect(err.Error()).NotTo(wayOut)
+				}
+			},
+			// Also where the packages install theirs; the hint says it is about
+			// the images, so a packaged operator can read past it.
+			Entry("the default path, where the images' configuration is", defaultConfigFile, true, true),
+			Entry("a file the operator named", "/srv/openvox-ca/config.yaml", true, false),
+			Entry("no file at all", "", false, false),
 		)
 
 		It("names its own configuration block in a refusal, without an index", func() {
@@ -1984,3 +2015,25 @@ func stubCluster(client func(string) (kubernetes.Interface, error), ns func() (s
 	DeferCleanup(func() { inClusterClientset, podNamespace = restoreClient, restoreNS })
 	inClusterClientset, podNamespace = client, ns
 }
+
+var _ = Describe("noTLSRequiredNotice", func() {
+	// The container images' baked serving_cert turns TLS on, so
+	// --no-tls-required passed to one does nothing; the operator must hear so.
+	DescribeTable("warns only when the opt-out is set and TLS makes it inert",
+		func(noTLSRequired, tlsConfigured, warns bool) {
+			msg := noTLSRequiredNotice(&serverConfig{NoTLSRequired: noTLSRequired}, tlsConfigured)
+			if warns {
+				Expect(msg).To(SatisfyAll(
+					ContainSubstring("no_tls_required is set but has no effect"),
+					ContainSubstring("serving_cert"),
+				))
+			} else {
+				Expect(msg).To(BeEmpty())
+			}
+		},
+		Entry("set, with TLS configured", true, true, true),
+		Entry("unset, without TLS", false, false, false),
+		Entry("set, without TLS (the setting doing its job)", true, false, false),
+		Entry("unset, with TLS configured", false, true, false),
+	)
+})

@@ -211,8 +211,12 @@ must not end with another variant's, so the label says which variant an image
 is. The step then runs `openvox-ca --version`, because a cgo build
 fails only when a base without libc tries to start it, and has
 `openvox-ca-ctl setup` initialise a CA in each of those directories as the
-image's user, because an owner in a listing is not a write. Last, it starts the
-server through the image's entrypoint and waits for `/healthz/ready`.
+image's user, because an owner in a listing is not a write. Last, it runs the
+image with no arguments, so the default `CMD` and the configuration baked in at
+`/etc/openvox-ca/config.yaml` must start a CA that answers `/healthz/ready`, and
+the listener's certificate must verify as `puppet` against that CA's: a baked
+configuration the server cannot read, or one that serves the CA's own
+certificate, fails there.
 
 CI only ever exercises the passing branch of these guards, so **whenever you
 edit one, re-verify by hand that it still fails.** A guard that has stopped
@@ -237,8 +241,8 @@ sed 's/-u 1000/-u 1001/' docker/puppet/Dockerfile.client > /tmp/mut && \
 
 # 3. Ownership of the directories the CA writes (Dockerfile.alpine).
 #    Drop either argument of the chown; the loop asserts both, so either is
-#    caught. The first is the image's default --cadir, the second is what
-#    compose.yml and the docs mount.
+#    caught. The first is the image's default --cadir, whose parent compose.yml
+#    and the docs mount; the second is a mount point for --cadir=/data.
 #    -- expect "/etc/puppetlabs/puppet/ssl/ca is owned by 0:0, not 65532:65532"
 sed 's|chown -R puppet:puppet /etc/puppetlabs/puppet /data|chown -R puppet:puppet /data|' \
     Dockerfile.alpine > /tmp/mut && docker build -f /tmp/mut .
@@ -257,7 +261,7 @@ sed 's|^RUN expected=|RUN usermod -aG wheel puppet \&\& expected=|' \
 ```
 
 For `Dockerfile.distroless`, mutations 5 and 6 abort its build. Mutations 7 to
-17 build a bad image, and the image check must then reject it. To run that check
+19 build a bad image, and the image check must then reject it. To run that check
 by hand, take its `run:` script out of the workflow as the first command below
 does. Run it on Linux, because the parsing expects GNU tar's listing format:
 
@@ -273,7 +277,7 @@ sed 's|chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet /rootfs/data
 sed 's|chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet /rootfs/data|chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet|' \
     Dockerfile.distroless > /tmp/mut && docker build -f /tmp/mut .
 
-# 7-17. The image check. Build the mutant with the label CI gives it, then run
+# 7-19. The image check. Build the mutant with the label CI gives it, then run
 #    the check against it. Distroless is the unsuffixed variant, so its label
 #    is the plain tag and its SUFFIX is empty:
 #    docker build --label org.opencontainers.image.version=edge \
@@ -316,6 +320,16 @@ sed 's|^ENTRYPOINT \["/usr/local/bin/openvox-ca"\]$|ENTRYPOINT ["/usr/local/bin/
 # 17. Label the unsuffixed variant as another: build the unmodified
 #    Dockerfile.distroless with --label org.opencontainers.image.version=edge-alpine.
 #    -- expect "the version label is 'edge-alpine', another variant's; this variant's tags carry no suffix"
+# 18. Bake the default configuration in with COPY --chmod, which leaves
+#    /etc/openvox-ca untraversable, so the server never reads it.
+#    -- expect "the server did not answer /healthz/ready: it exited, or 60 seconds
+#    passed", followed by the server's own "refusing to start: plain HTTP"
+sed 's|^COPY --from=builder /container-config/ /etc/openvox-ca/$|COPY --chmod=0644 packaging/container/config.yaml /etc/openvox-ca/config.yaml|' \
+    Dockerfile.distroless > /tmp/mut
+# 19. A default configuration that serves the CA's own certificate.
+#    -- expect "the default configuration's serving certificate does not verify as puppet against the CA"
+sed "s|^RUN install -D -m 0644 packaging/container/config.yaml /container-config/config.yaml\$|RUN mkdir /container-config \&\& printf 'tls_cert: %s\\\\ntls_key: %s\\\\n' /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem /etc/puppetlabs/puppet/ssl/ca/ca_key.pem > /container-config/config.yaml|" \
+    Dockerfile.distroless > /tmp/mut
 ```
 
 These are deliberately not a CI job: each mutation is a full image build, and
