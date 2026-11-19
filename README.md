@@ -387,6 +387,46 @@ equivalents, or `serving_cert` — the server:
 The complete flag, environment-variable, and config-file reference is in
 [configuring the server](docs/configuration.md).
 
+### Submitting, listing and signing a request
+
+An agent submits its own certificate request on its first run, or with `puppet
+ssl bootstrap`. Without one to hand, OpenSSL and `curl` can stand in for it.
+Against the local demo above:
+
+```bash
+openssl req -new -newkey rsa:2048 -nodes -subj /CN=agent.example.com \
+  -keyout agent.example.com_key.pem -out agent.example.com_csr.pem
+curl -fsS -X PUT -H 'Content-Type: text/plain' --data-binary @agent.example.com_csr.pem \
+  http://127.0.0.1:8140/puppet-ca/v1/certificate_request/agent.example.com
+
+./bin/openvox-ca-ctl list --server-url http://127.0.0.1:8140
+./bin/openvox-ca-ctl sign --server-url http://127.0.0.1:8140 --certname agent.example.com
+./bin/openvox-ca-ctl list --server-url http://127.0.0.1:8140 --all
+```
+
+Every `openvox-ca-ctl` command here needs `--server-url`, because it defaults to
+`https://localhost:8140` and the demo speaks plain HTTP. `list` prints each
+name, quoted, beside its state: `"agent.example.com"  requested` before the
+`sign` and `"agent.example.com"  signed` after it.
+
+Against the HTTPS server, `openvox-ca-ctl` has to verify the server against the
+CA certificate and present an admin certificate. The serving certificate issued
+above is one, because that server names it in `--puppet-server`:
+
+```bash
+./bin/openvox-ca-ctl list \
+  --server-url  https://puppet.example.com:8140 \
+  --ca-cert     /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
+  --client-cert /etc/puppetlabs/puppet/ssl/ca/signed/puppet.example.com.pem \
+  --client-key  /etc/puppetlabs/puppet/ssl/ca/private/puppet.example.com_key.pem
+```
+
+`sign` takes the same four flags. Submitting a request needs no client
+certificate: add `--cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem` to the
+`curl` command and change its URL. To stop repeating the flags, set them in
+`/etc/openvox-ca/ctl.yaml` (see [configuration](docs/operator-cli.md#configuration)).
+The [operator CLI reference](docs/operator-cli.md) covers the other subcommands.
+
 ## Documentation
 
 | Guide | What it covers |
