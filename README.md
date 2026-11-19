@@ -82,6 +82,10 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 
 ## Installation
 
+This README and `docs/` describe the `main` branch, which can be ahead of the
+newest release. For a release, read them at its tag: the files under
+`https://github.com/voxpupuli/openvox-ca/tree/v<version>/`.
+
 ### Container images (recommended)
 
 Prebuilt, multi-arch images are published to the GitHub Container Registry for
@@ -105,11 +109,13 @@ SBOM pair per tarball, `checksums.txt`, and a signed provenance
 bundle (see [verifying what you downloaded](#verifying-what-you-downloaded)). Every archive
 contains both binaries (`openvox-ca`, `openvox-ca-ctl`) and the systemd unit
 `openvox-ca.service`. Asset names carry the release version, so set `VERSION` to the release you
-want (the newest is on the
-[releases page](https://github.com/voxpupuli/openvox-ca/releases/latest)) and download by tag:
+want and download by tag. The first command below takes the newest release, pre-releases
+included, with the GitHub CLI. Without it, take a version from the
+[releases page](https://github.com/voxpupuli/openvox-ca/releases): its `latest` link skips
+pre-releases.
 
 ```console
-$ VERSION=0.9.0
+$ VERSION=$(gh release list -R voxpupuli/openvox-ca --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName | ltrimstr("v")')
 $ curl -fLO https://github.com/voxpupuli/openvox-ca/releases/download/v${VERSION}/openvox-ca_${VERSION}_linux_amd64.tar.gz
 $ curl -fLO https://github.com/voxpupuli/openvox-ca/releases/download/v${VERSION}/checksums.txt
 $ sha256sum --ignore-missing -c checksums.txt
@@ -122,6 +128,12 @@ before `1.0.0` in both `apt` and `dnf`. GitHub does not keep a `~` in an asset n
 published filename has a dot there instead, and that is the name `checksums.txt` lists:
 `openvox-ca_1.0.0.beta1-1_amd64.deb`, `openvox-ca-1.0.0.beta1-1.x86_64.rpm`. A final
 release has no tilde to replace: `openvox-ca_1.0.0-1_amd64.deb`.
+
+v1.0.0-alpha1 is the exception: its `checksums.txt` lists the packages under their tilde
+names, so `sha256sum -c` cannot find them. For that release, compare a package's hash with
+its line by hand. Later releases list the names they publish. Either way, check that
+`sha256sum` printed `OK` for the file you downloaded, because `--ignore-missing` skips a
+listed file it cannot find without saying so.
 
 See [running under systemd](docs/systemd.md) for the rest of a VM install.
 
