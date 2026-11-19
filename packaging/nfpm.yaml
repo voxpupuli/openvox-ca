@@ -128,6 +128,15 @@ contents:
     file_info:
       mode: 0755
 
+  # Run as root by the oneshot's other ExecStartPost=+, on both formats, to
+  # write /etc/openvox-ca/ctl.yaml for the packaged openvox-ca-ctl
+  # (openvox-ca#639). The deb's drop-in below re-adds it after clearing the
+  # list.
+  - src: packaging/scripts/write-ctl-config
+    dst: /usr/libexec/openvox-ca/write-ctl-config
+    file_info:
+      mode: 0755
+
   # deb only: point both units at /etc/default/openvox-ca, which the postinst
   # renders from debconf through ucf, and take record-environment off the
   # oneshot. Vendor drop-ins rather than lines in the shared units, so the

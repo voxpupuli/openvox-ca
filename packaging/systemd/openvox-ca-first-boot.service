@@ -2,10 +2,10 @@
 #
 # A unit rather than a maintainer script, for three reasons. It runs under the
 # service's hardening directives rather than as unconfined root -- the
-# deliberate differences are ReadWritePaths= below, which is wider, and, on
-# EL, one ExecStartPost=+ step, record-environment, which runs as root outside
-# the sandbox to write /etc/sysconfig/openvox-ca (see there; the deb's drop-in
-# clears it). It can run
+# deliberate differences are ReadWritePaths= below, which is wider, and the
+# ExecStartPost=+ steps, which run as root outside the sandbox:
+# write-ctl-config on both formats, and on EL record-environment as well (see
+# there; the deb's drop-in leaves it out). It can run
 # again after the CA directory is wiped, which a postinst that already ran will
 # not; RemainAfterExit=yes means that is the next boot or an explicit
 # `systemctl restart openvox-ca-first-boot`, not a restart of the service. And
@@ -49,6 +49,13 @@ EnvironmentFile=-/etc/sysconfig/openvox-ca
 # do. The script reads only a marker's presence and a symlink's text from the
 # tree `puppet` writes, never a file's content, and never fails the unit.
 ExecStartPost=+/usr/libexec/openvox-ca/record-environment
+
+# Writes /etc/openvox-ca/ctl.yaml on the same run and under the same rule, so
+# the packaged openvox-ca-ctl reaches this CA without flags. Root for the same
+# reason: /etc/openvox-ca is root's, and the file tells root's CLI which key to
+# load, so `puppet` must not be able to write it. It reads only the marker's
+# presence and the serving link's text, and never fails the unit.
+ExecStartPost=+/usr/libexec/openvox-ca/write-ctl-config
 
 # Where first-boot leaves that marker. Created afresh by systemd, owned by
 # `puppet`, writable under ProtectSystem=strict, and removed when the unit
