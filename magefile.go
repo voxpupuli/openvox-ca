@@ -9632,7 +9632,7 @@ func (Dev) Lint() error {
 // govulncheckInstall installs the govulncheck version ci.yml pins. Renovate's
 // custom manager for it reads this file, ci.yml and CONTRIBUTING.md, so one
 // bump moves all three, and a magefile spec fails if they disagree.
-const govulncheckInstall = "go install golang.org/x/vuln/cmd/govulncheck@v1.9.0"
+const govulncheckInstall = "go install golang.org/x/vuln/cmd/govulncheck@v1.10.0"
 
 // Vulncheck runs govulncheck over every release variant this host can load
 // and over the magefile, teeing its output to .test-output/govulncheck.log. It
