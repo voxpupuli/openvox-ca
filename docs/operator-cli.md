@@ -379,7 +379,7 @@ See [storage backends](storage-backends.md#migrating-between-backends) for migra
 With nothing to show it prints `(no certificates)`. It exits `0` either way.
 The name is quoted because it is whatever the server returned, so a control
 character in it cannot forge a line. Unlike `puppetserver ca list`, it prints
-no fingerprints, subject alternative names or authorization extensions, does
+no fingerprints, subject alternative names or authorisation extensions, does
 not group the lines under headings, and has no `--format json`
 ([#648](https://github.com/voxpupuli/openvox-ca/issues/648)). A script that
 needs those reads them from `GET /puppet-ca/v1/certificate_statuses/all`

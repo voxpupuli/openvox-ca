@@ -83,7 +83,7 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 ## Installation
 
 This README and `docs/` describe the `main` branch, which can be ahead of the
-newest release. The download and verification steps below work for every
+newest release. The tarball download and checksum steps below work for every
 published release, v1.0.0-alpha1 included. For what a release's features do,
 read the docs at its tag: the files under
 `https://github.com/voxpupuli/openvox-ca/tree/v<version>/`.
@@ -111,15 +111,16 @@ SBOM pair per tarball, `checksums.txt`, and a signed provenance
 bundle (see [verifying what you downloaded](#verifying-what-you-downloaded)). Every archive
 contains both binaries (`openvox-ca`, `openvox-ca-ctl`) and the systemd unit
 `openvox-ca.service`. Asset names carry the release version, so set `VERSION` to the release you
-want and download by tag. The first command below takes the newest release, pre-releases
-included, with the GitHub CLI, which must be signed in (`gh auth login`, or `GH_TOKEN` set)
-even though the repository is public; the second says so if it found no release. Without the
-CLI, take a version from the [releases page](https://github.com/voxpupuli/openvox-ca/releases):
-its `latest` link skips pre-releases.
+want and download by tag. The first command below asks the GitHub API for the newest
+release, pre-releases included, through the GitHub CLI, which must be signed in
+(`gh auth login`, or `GH_TOKEN` set) even though the repository is public; the second says so
+if that produced no version. Without the CLI, take a version from the
+[releases page](https://github.com/voxpupuli/openvox-ca/releases): its `latest` link skips
+pre-releases.
 
 ```console
-$ VERSION=$(gh release list -R voxpupuli/openvox-ca --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName | ltrimstr("v")')
-$ : "${VERSION:?no release found; set VERSION by hand}"
+$ VERSION=$(gh api repos/voxpupuli/openvox-ca/releases --jq '([.[] | select(.draft | not)][0].tag_name // empty) | ltrimstr("v")')
+$ : "${VERSION:?no release found, or gh failed (see above); set VERSION by hand}"
 $ curl -fLO https://github.com/voxpupuli/openvox-ca/releases/download/v${VERSION}/openvox-ca_${VERSION}_linux_amd64.tar.gz
 $ curl -fLO https://github.com/voxpupuli/openvox-ca/releases/download/v${VERSION}/checksums.txt
 $ sha256sum --ignore-missing -c checksums.txt
