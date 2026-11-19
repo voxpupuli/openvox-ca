@@ -83,7 +83,9 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 ## Installation
 
 This README and `docs/` describe the `main` branch, which can be ahead of the
-newest release. For a release, read them at its tag: the files under
+newest release. The download and verification steps below work for every
+published release, v1.0.0-alpha1 included. For what a release's features do,
+read the docs at its tag: the files under
 `https://github.com/voxpupuli/openvox-ca/tree/v<version>/`.
 
 ### Container images (recommended)
@@ -110,12 +112,14 @@ bundle (see [verifying what you downloaded](#verifying-what-you-downloaded)). Ev
 contains both binaries (`openvox-ca`, `openvox-ca-ctl`) and the systemd unit
 `openvox-ca.service`. Asset names carry the release version, so set `VERSION` to the release you
 want and download by tag. The first command below takes the newest release, pre-releases
-included, with the GitHub CLI. Without it, take a version from the
-[releases page](https://github.com/voxpupuli/openvox-ca/releases): its `latest` link skips
-pre-releases.
+included, with the GitHub CLI, which must be signed in (`gh auth login`, or `GH_TOKEN` set)
+even though the repository is public; the second says so if it found no release. Without the
+CLI, take a version from the [releases page](https://github.com/voxpupuli/openvox-ca/releases):
+its `latest` link skips pre-releases.
 
 ```console
 $ VERSION=$(gh release list -R voxpupuli/openvox-ca --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName | ltrimstr("v")')
+$ : "${VERSION:?no release found; set VERSION by hand}"
 $ curl -fLO https://github.com/voxpupuli/openvox-ca/releases/download/v${VERSION}/openvox-ca_${VERSION}_linux_amd64.tar.gz
 $ curl -fLO https://github.com/voxpupuli/openvox-ca/releases/download/v${VERSION}/checksums.txt
 $ sha256sum --ignore-missing -c checksums.txt
@@ -281,8 +285,10 @@ $ cosign verify ghcr.io/voxpupuli/openvox-ca-charts/openvox-ca:${VERSION} \
 
 ### Building from source
 
-Requires [Mage](https://magefile.org/) and the Go release named by the `go`
-directive in [`go.mod`](go.mod), or newer. An older Go from 1.21 onwards fetches
+Requires the Go release named by the `go` directive in [`go.mod`](go.mod), or
+newer. The build runs on [Mage](https://magefile.org/), but installing it is
+optional: `go run mage.go <target>` runs any target with the version `go.mod`
+pins. An older Go from 1.21 onwards fetches
 that toolchain itself under its default `GOTOOLCHAIN=auto`; one before 1.21, or a
 distribution package that sets `GOTOOLCHAIN=local`, fails to build instead.
 
@@ -290,6 +296,8 @@ distribution package that sets `GOTOOLCHAIN=local`, fails to build instead.
 git clone https://github.com/voxpupuli/openvox-ca.git
 cd openvox-ca
 mage build:all      # → bin/openvox-ca and bin/openvox-ca-ctl
+# or, without mage installed:
+go run mage.go build:all
 ```
 
 Full build instructions (including the FIPS build) are in
