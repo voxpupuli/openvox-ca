@@ -24,8 +24,9 @@ image:
   #   image:
   #     tag: "0.9.0"
   #
-  # The distroless variant is "0.9.0-distroless". Its own user is 65532:65532,
-  # but podSecurityContext below sets the uid the pod runs as either way.
+  # The distroless variant is "0.9.0-distroless". The Alpine and distroless
+  # images run as 65532:65532, the uid podSecurityContext below sets; it
+  # overrides the CentOS Stream image's own 1000:1000.
   #
   # An explicit tag is used exactly as given; the chart never appends a suffix
   # to it. Charts built from an unreleased tree (a -dev appVersion) fall back
@@ -535,11 +536,17 @@ podLabels: {}
 # — e.g. ignore-check.kube-linter.io/… suppressions.
 deploymentAnnotations: {}
 
+# 65532 is the uid the Alpine and distroless images run as, and the one the
+# chart runs every image as. On a volume the kubelet applies fsGroup to, it
+# re-groups data another uid wrote and adds group read and write, so the pod can
+# take it over. On one it does not (a hostPath, or a driver without fsGroup
+# support), re-own the data to this uid first: the CA's private keys are
+# readable by their owner alone. See docs/helm-chart.md, "Choosing an image".
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 1000
-  runAsGroup: 1000
-  fsGroup: 1000
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
   seccompProfile:
     type: RuntimeDefault
 

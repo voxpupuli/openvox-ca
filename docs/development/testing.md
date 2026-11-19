@@ -225,8 +225,10 @@ non-zero exit — a mutation that breaks the build for the wrong reason looks
 identical to one that worked.
 
 ```bash
-# 1. Pinned uid. Works on Dockerfile, Dockerfile.alpine and test/Dockerfile.run
-#    (context `.`) -- expect "puppet is 1001:1000, not 1000:1000".
+# 1. Pinned uid (context `.`). On Dockerfile.alpine and test/Dockerfile.run
+#    -- expect "puppet is 65533:65532, not 65532:65532".
+sed 's/-u 65532/-u 65533/' Dockerfile.alpine > /tmp/mut && docker build -f /tmp/mut .
+#    On Dockerfile, whose uid is 1000 -- expect "puppet is 1001:1000, not 1000:1000".
 sed 's/-u 1000/-u 1001/' Dockerfile > /tmp/mut && docker build -f /tmp/mut .
 
 # 2. The same, for docker/puppet/Dockerfile.client. Note the build context, and
@@ -238,13 +240,14 @@ sed 's/-u 1000/-u 1001/' docker/puppet/Dockerfile.client > /tmp/mut && \
 # 3. Ownership of the directories the CA writes (Dockerfile, Dockerfile.alpine).
 #    Drop either argument of the chown; the loop asserts both, so either is
 #    caught. The first is the image's default --cadir, the second is what
-#    compose.yml and the docs mount.
-#    -- expect "/etc/puppetlabs/puppet/ssl/ca is owned by 0:0, not 1000:1000"
+#    compose.yml and the docs mount. Shown for Dockerfile.alpine; on Dockerfile
+#    the messages name 1000:1000 instead.
+#    -- expect "/etc/puppetlabs/puppet/ssl/ca is owned by 0:0, not 65532:65532"
 sed 's|chown -R puppet:puppet /etc/puppetlabs/puppet /data|chown -R puppet:puppet /data|' \
-    Dockerfile > /tmp/mut && docker build -f /tmp/mut .
-#    -- expect "/data is owned by 0:0, not 1000:1000"
+    Dockerfile.alpine > /tmp/mut && docker build -f /tmp/mut .
+#    -- expect "/data is owned by 0:0, not 65532:65532"
 sed 's|chown -R puppet:puppet /etc/puppetlabs/puppet /data|chown -R puppet:puppet /etc/puppetlabs/puppet|' \
-    Dockerfile > /tmp/mut && docker build -f /tmp/mut .
+    Dockerfile.alpine > /tmp/mut && docker build -f /tmp/mut .
 
 # 4. Package-assigned identity (docker/puppet/Dockerfile). This one is inherited
 #    rather than chosen, so mutate the image, not the expectation: flipping

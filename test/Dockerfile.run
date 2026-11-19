@@ -72,27 +72,26 @@ FROM quay.io/centos/centos:stream10
 # alternative -- quay does not retain superseded CentOS Stream digests, which
 # renovate.json records as its reason for declining to pin it.
 #
-# uid/gid 1000 pinned to match the CentOS Stream and Alpine published images
-# (see Dockerfile): `USER`
-# has to be numeric, and the local runtime image should present the same
-# identity as the one it stands in for.
+# uid/gid 65532 pinned to match the Alpine and distroless published images
+# (see Dockerfile.alpine): `USER` has to be numeric, and the local runtime
+# image should present the same identity as the one it stands in for.
 # The assertion below must be re-verified by hand when edited -- CI only ever
 # takes its passing branch. See docs/development/testing.md, "Container
 # identity guards".
 RUN dnf install -y bash coreutils-single curl diffutils findutils grep \
         openssl python3 sed && \
     dnf clean all && \
-    groupadd -g 1000 puppet && \
-    useradd -m -u 1000 -g 1000 puppet && \
-    { [ "$(id -u puppet):$(id -g puppet)" = "1000:1000" ] || \
-        { echo "puppet is $(id -u puppet):$(id -g puppet), not 1000:1000; USER below must match" >&2; exit 1; }; } && \
+    groupadd -g 65532 puppet && \
+    useradd -m -u 65532 -g 65532 puppet && \
+    { [ "$(id -u puppet):$(id -g puppet)" = "65532:65532" ] || \
+        { echo "puppet is $(id -u puppet):$(id -g puppet), not 65532:65532; USER below must match" >&2; exit 1; }; } && \
     mkdir -p /etc/puppetlabs/puppet/ssl/ca /etc/openvox-ca /data && \
     chown -R puppet:puppet /etc/puppetlabs/puppet /etc/openvox-ca /data
 
 COPY bin/openvox-ca     /usr/local/bin/openvox-ca
 COPY bin/openvox-ca-ctl /usr/local/bin/openvox-ca-ctl
 
-USER 1000:1000
+USER 65532:65532
 EXPOSE 8140
 
 # NOTE: autosign is OFF by default. Set --autosign-config=true only in

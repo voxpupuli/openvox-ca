@@ -7,7 +7,7 @@ built, differing in base image and in the user they run as:
 | Variant | Base image | Tag suffix | Runs as |
 | --- | --- | --- | --- |
 | CentOS Stream | `quay.io/centos/centos` | *(none)* | `1000:1000` |
-| Alpine | `alpine` | `-alpine` | `1000:1000` |
+| Alpine | `alpine` | `-alpine` | `65532:65532` |
 | Distroless | `gcr.io/distroless/static-debian13:nonroot` | `-distroless` | `65532:65532` |
 
 Every variant is built for `linux/amd64` and `linux/arm64` and published as a
@@ -18,9 +18,9 @@ architecture automatically. The images are published as
 The distroless variant holds the two binaries, a CA trust store and little
 else: no shell, no package manager, no `curl` or `kill`. It has the least in it
 to patch or to exploit, and what that costs is listed under [the distroless
-variant](#the-distroless-variant). It runs as a **different uid** from the
-other two, so switching an existing deployment to or from it means re-owning
-its data; see [runtime user](#runtime-user).
+variant](#the-distroless-variant). The CentOS Stream variant runs as a
+**different uid** from the other two, so switching an existing deployment to or
+from it means re-owning its data; see [runtime user](#runtime-user).
 
 ## Pulling
 
@@ -113,9 +113,10 @@ process. See [memory budget](configuration.md#memory-budget).
 
 ### Runtime user
 
-The CentOS Stream and Alpine variants run as the non-root user `puppet`,
-uid/gid **1000**. The distroless variant runs as uid/gid **65532**, the base
-image's own `nonroot` user. Each declares its user numerically, so that a host
+The Alpine and distroless variants run as uid/gid **65532**: the distroless
+base image's own `nonroot` user, and a `puppet` user created with that uid in
+the Alpine image. The CentOS Stream variant runs as `puppet`, uid/gid **1000**.
+Each declares its user numerically, so that a host
 which cannot read the image's `/etc/passwd` can still tell who the process runs
 as. Under Kubernetes, a container whose image only names its user fails to
 start when the pod sets `runAsNonRoot` without also setting `runAsUser` — the
@@ -124,7 +125,7 @@ kubelet cannot verify that a name is non-root, and the container stops at
 
 A named volume like the one above is created with the right ownership
 automatically. A bind mount is not, so `chown` the host directory to the
-variant's uid and gid (`1000:1000`, or `65532:65532` for distroless) before
+variant's uid and gid (`65532:65532`, or `1000:1000` for CentOS Stream) before
 starting the container, or the CA cannot write its state. Under rootless Podman
 the container's uid maps to a subordinate uid on the host, so a plain `chown`
 leaves the directory unwritable — use `podman unshare chown <uid>:<gid> <dir>`,
@@ -132,14 +133,18 @@ or mount with the `:U` suffix. Under Kubernetes, `fsGroup` on the pod covers
 PersistentVolumeClaims and `emptyDir`, but the kubelet does not apply it to a
 `hostPath`, which needs the same treatment as a bind mount.
 
-**Switching between distroless and either other variant changes the uid**, and
+**Switching between CentOS Stream and either other variant changes the uid**, and
 the CA's state does not follow by itself. The private keys are written `0600`,
 readable by their owner alone, so the new variant cannot read a key the old one
 wrote, and openvox-ca never changes the owner or mode of an existing file.
-Re-own the volume or bind mount to the new uid and gid before starting the new
-variant. Under Kubernetes, set the pod's `runAsUser`, `runAsGroup` and
-`fsGroup` to match the variant: `fsGroup` re-groups the volume, but it leaves
-each file's owner as it was.
+Re-own a Docker or Podman volume or bind mount to the new uid and gid before
+starting the new variant. Under Kubernetes the Helm chart runs every variant as
+`65532:65532` through `podSecurityContext`, whatever the image's own user, so
+switching images there changes no uid. Where the kubelet applies `fsGroup` to
+the volume, as it does to most PersistentVolumeClaims and to `emptyDir`, it also
+re-groups data another uid wrote and adds group read and write; a `hostPath`, or
+a driver without `fsGroup` support, needs re-owning like a bind mount. See
+[choosing an image](helm-chart.md#choosing-an-image).
 
 ### The distroless variant
 

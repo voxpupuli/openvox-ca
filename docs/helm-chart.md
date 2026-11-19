@@ -250,16 +250,20 @@ image:
 
 and the distroless variant is `tag: "0.9.0-distroless"`. That image has no
 shell, which the chart does not need: its probes are `httpGet`, made by the
-kubelet from outside the container. It does change two things. `kubectl exec
-<pod> -- kill -HUP 1` has no `kill` to run; see [the distroless
+kubelet from outside the container. What it does change is signalling: `kubectl
+exec <pod> -- kill -HUP 1` has no `kill` to run; see [the distroless
 variant](container-images.md#the-distroless-variant) for other ways to signal
-it. And the image's own user is `65532:65532` rather than `1000:1000`.
+it.
 
-`podSecurityContext` runs the pod as `1000:1000` whichever image you choose, so
-selecting the distroless tag alone leaves the uid as it was. To run it as its
-own user, set `runAsUser`, `runAsGroup` and `fsGroup` to `65532` as well, and
-re-own an existing volume first: the CA's private keys are readable by their
-owner alone, and `fsGroup` changes a file's group, not its owner.
+`podSecurityContext` runs the pod as `65532:65532`, the user the Alpine and
+distroless images run as, whichever image you choose. Data another uid wrote
+stays readable where the kubelet applies `fsGroup` to the volume, as it does to
+most PersistentVolumeClaims and to `emptyDir`: it re-groups the files to 65532
+and adds group read and write (see [server-side key generation and the
+uid](storage-backends.md#server-side-key-generation-and-the-uid)). Where it does not — a `hostPath`, or a volume
+driver without `fsGroup` support — re-own the data to `65532:65532` before the
+pod starts, because the CA's private keys are readable by their owner alone and
+openvox-ca never changes the owner of an existing file.
 
 To pin by digest (which is what you want if you are reconciling with Flux or
 Argo CD and letting an image automation update it):

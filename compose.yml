@@ -37,8 +37,8 @@ services:
     # guarantee: two pulls at different times can yield different images.
     # Pin a release tag (e.g. :1.2.3) or a digest for production
     # deployments. `-alpine` and `-distroless` variants of every tag are also
-    # published. The distroless variant runs as uid 65532 rather than 1000, so
-    # re-own an existing ca-data volume to 65532:65532 before switching
+    # published. Those two run as uid 65532 and this one as 1000, so re-own an
+    # existing ca-data volume to the new uid before switching between them
     # (docs/container-images.md, "Runtime user").
     image: ghcr.io/voxpupuli/openvox-ca:latest
     command:

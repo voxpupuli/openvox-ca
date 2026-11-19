@@ -21,8 +21,8 @@ ENV PATH=/opt/puppetlabs/puppet/bin:${PATH}
 # resolve a name out of the image's /etc/passwd.  1000 rather than a system uid
 # -- the system range is already crowded here (openvox-agent's own `puppet` at
 # 52, chrony at 998, systemd-oom at 999), so `useradd -r` lands on whatever
-# happens to be free that day, and it matches the uid the openvox-ca images
-# use.  groupadd/useradd fail the build if anything else has taken it.
+# happens to be free that day.  groupadd/useradd fail the build if anything
+# else has taken it.
 # The assertion below must be re-verified by hand when edited -- CI only ever
 # takes its passing branch. See docs/development/testing.md, "Container
 # identity guards".

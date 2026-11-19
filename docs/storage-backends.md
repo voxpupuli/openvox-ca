@@ -250,7 +250,7 @@ Kubernetes `fsGroup` with the default `fsGroupChangePolicy: Always`, the kubelet
 gives the volume to that group and ORs group access in at every mount — read and
 write on files, and read, write, search and the setgid bit on directories — so
 `private/` is group-writable again before the next uid starts. The Helm chart
-pins the uid (`runAsUser: 1000`) and sets an `fsGroup` by default, so a chart
+pins the uid (`runAsUser: 65532`) and sets an `fsGroup` by default, so a chart
 install is affected only where the uid has been unpinned and group access is not
 restored. It is not restored with no `fsGroup`, with
 `fsGroupChangePolicy: OnRootMismatch` (which leaves the volume alone once its
