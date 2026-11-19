@@ -332,12 +332,19 @@ certificate:
   --cadir /etc/puppetlabs/puppet/ssl/ca --host 127.0.0.1 --hostname puppet.example.com &
 PCA_PID=$!
 
-# Wait for it to serve: a cold cadir generates an RSA-4096 key first.
-for _ in $(seq 1 300); do
-  curl -sf http://127.0.0.1:8140/puppet-ca/v1/certificate/ca >/dev/null && break; sleep 1
-done
+# Wait for it to serve: a cold cadir generates an RSA-4096 key first. Stop
+# waiting if it exits instead, or is still not serving after five minutes.
+wait_for_ca() {
+  for _ in $(seq 1 300); do
+    curl -sf http://127.0.0.1:8140/puppet-ca/v1/certificate/ca >/dev/null && return 0
+    kill -0 "$PCA_PID" 2>/dev/null || { echo "openvox-ca has exited; see its output above" >&2; return 1; }
+    sleep 1
+  done
+  echo "openvox-ca is still not serving after 300 seconds" >&2
+  return 1
+}
 
-./bin/openvox-ca-ctl generate \
+wait_for_ca && ./bin/openvox-ca-ctl generate \
   --server-url http://127.0.0.1:8140 \
   --certname   puppet.example.com \
   --dns        puppet.example.com \
