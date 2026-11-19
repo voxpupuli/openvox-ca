@@ -20,9 +20,7 @@
 package main
 
 import (
-	"os"
 	"os/exec"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -36,18 +34,12 @@ import (
 // compile against a bumped mage module.
 var _ = Describe("the zero-install bootstrap", func() {
 	It("lists the targets through `go run mage.go`", func(ctx SpecContext) {
-		// mage runs `go build`, which may run git for VCS stamping, and under
-		// the pre-push hook an inherited GIT_DIR would point that at the real
-		// repository rather than this checkout. Strip GIT_* rather than append.
-		env := make([]string, 0, len(os.Environ()))
-		for _, kv := range os.Environ() {
-			if !strings.HasPrefix(kv, "GIT_") {
-				env = append(env, kv)
-			}
-		}
-
+		// mage runs `go build`, which may run git for VCS stamping, so specEnv
+		// strips GIT_* as for any spec that shells out. A developer's
+		// MAGEFILE_ENABLE_COLOR would wrap each target name in ANSI codes,
+		// which the match below cannot see past, so colour is forced off.
 		cmd := exec.CommandContext(ctx, "go", "run", "mage.go", "-l")
-		cmd.Env = env
+		cmd.Env = specEnv("MAGEFILE_ENABLE_COLOR=false")
 		out, err := cmd.CombinedOutput()
 		Expect(err).NotTo(HaveOccurred(), "go run mage.go -l:\n%s", out)
 		Expect(string(out)).To(MatchRegexp(`(?m)^\s+test:magefile\s`),
