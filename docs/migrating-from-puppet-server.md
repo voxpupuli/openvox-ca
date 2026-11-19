@@ -610,17 +610,31 @@ each with the `subject` and the reason in `error`.
 
 ## CLI command mapping
 
-| Puppet / puppetserver ca | openvox-ca-ctl | Notes |
+`openvox-ca-ctl` is modelled on `puppetserver ca`, not a copy of it. The table
+maps each `puppetserver ca` subcommand to its nearest equivalent, and says where
+there is none.
+
+| puppetserver ca | openvox-ca-ctl | Notes |
 | --- | --- | --- |
-| `puppet cert list` | `openvox-ca-ctl list` | Pending CSRs |
-| `puppet cert list --all` | `openvox-ca-ctl list --all` | All certs |
-| `puppet cert sign <name>` | `openvox-ca-ctl sign --certname <name>` | |
-| `puppet cert sign --all` | `openvox-ca-ctl sign --all` | Exits `24` when nothing is waiting, as `puppetserver ca` does |
-| `puppet cert revoke <name>` | `openvox-ca-ctl revoke --certname <name>` | Exits `24` for a subject holding only an unsigned request, as `puppetserver ca` does |
-| `puppet cert clean <name>` | `openvox-ca-ctl clean --certname <name>` | Revoke + delete. Exits `0` for a subject holding only a request, where `puppetserver ca` exits `24` |
+| `puppetserver ca list` | `openvox-ca-ctl list` | Pending CSRs. Prints only each name and its state; see [the operator CLI reference](operator-cli.md#list-output) |
+| `puppetserver ca list --all` | `openvox-ca-ctl list --all` | All certs |
+| `puppetserver ca sign --certname <name>` | `openvox-ca-ctl sign --certname <name>` | |
+| `puppetserver ca sign --all` | `openvox-ca-ctl sign --all` | Exits `24` when nothing is waiting, as `puppetserver ca` does |
+| `puppetserver ca revoke --certname <name>` | `openvox-ca-ctl revoke --certname <name>` | Exits `24` for a subject holding only an unsigned request, as `puppetserver ca` does |
+| `puppetserver ca clean --certname <name>` | `openvox-ca-ctl clean --certname <name>` | Revoke + delete. Exits `0` for a subject holding only a request, where `puppetserver ca` exits `24` |
 | `puppetserver ca setup` | `openvox-ca-ctl setup --cadir <path>` | |
 | `puppetserver ca import` | `openvox-ca-ctl import --cadir <path> ...` | |
 | `puppetserver ca generate` | `openvox-ca-ctl generate --certname <name>` | Needs a running server. Use `openvox-ca generate --certname <name> --ttl <duration>` to mint offline, which is also the only way to mint a *new* `pp_cli_auth` certificate |
+| `puppetserver ca migrate` | Not provided | Upstream moves the CA directory to Puppet Server's own location. openvox-ca starts on the directory where it is. `openvox-ca-ctl migrate` is a different command, which copies a CA between [storage backends](storage-backends.md#migrating-between-backends) |
+| `puppetserver ca prune` | Not provided | [#647](https://github.com/voxpupuli/openvox-ca/issues/647). The opt-in expired-certificate cleanup ([`enable_expired_cert_cleanup`](configuration.md#config-file)) removes expired certificates from the CRL on a timer |
+| `puppetserver ca delete` | Not provided | [#649](https://github.com/voxpupuli/openvox-ca/issues/649). The same cleanup deletes expired certificates from storage. `clean` deletes one subject's certificate, but revokes it as well |
+| `puppetserver ca enable --infracrl` | Not provided | openvox-ca has no infrastructure-only CRL |
+
+`--certname` takes one name per run. A comma-separated list, as `puppetserver
+ca` accepts, is refused as an invalid name, and `list` takes no `--certname`
+([#646](https://github.com/voxpupuli/openvox-ca/issues/646)). The removed
+`puppet cert list`, `sign`, `revoke` and `clean` commands map to the same
+`openvox-ca-ctl` subcommands as their `puppetserver ca` counterparts.
 
 The exit statuses are listed in [the operator CLI reference](operator-cli.md#exit-status).
 

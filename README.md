@@ -78,7 +78,7 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 - **Configuration reload:** `SIGHUP` (or `systemctl reload`) re-reads the TLS keypair and the admin allow list without dropping connections, so renewing the CA's server certificate or decommissioning a compile server needs no restart. See [reloading configuration](docs/configuration.md#reloading-configuration)
 - **systemd integration:** `Type=notify` readiness (`systemctl start` returns once the listener is actually accepting), a live status line covering the listener, CA expiry and CRL freshness, watchdog keep-alives, and `systemctl reload` for TLS certificate renewal and admin allow-list changes; ships a hardened unit, rendered per channel from [one template](https://github.com/voxpupuli/openvox-ca/blob/main/packaging/systemd/openvox-ca.service) — installed by the packages, and in every release tarball ready to use. See [running under systemd](docs/systemd.md)
 - **FIPS-compatible:** the core CA uses the standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto` (the optional Kubernetes export and a managed certificate stored in a Secret add the `client-go` dependency)
-- **`openvox-ca-ctl`:** operator CLI matching `puppetserver ca` subcommands. See the [operator CLI reference](docs/operator-cli.md)
+- **`openvox-ca-ctl`:** operator CLI modelled on `puppetserver ca`; the [CLI command mapping](docs/migrating-from-puppet-server.md#cli-command-mapping) lists where it differs. See the [operator CLI reference](docs/operator-cli.md)
 
 ## Installation
 

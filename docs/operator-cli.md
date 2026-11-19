@@ -1,6 +1,6 @@
 # Operator CLI (`openvox-ca-ctl`)
 
-`openvox-ca-ctl` mirrors the `puppet cert` / `puppetserver ca` subcommands and communicates with a running `openvox-ca` server over HTTP(S). The `setup`, `import` and `migrate` subcommands operate directly on storage and need no running server.
+`openvox-ca-ctl` is modelled on `puppetserver ca`, with the differences listed in [the CLI command mapping](migrating-from-puppet-server.md#cli-command-mapping), and communicates with a running `openvox-ca` server over HTTP(S). The `setup`, `import` and `migrate` subcommands operate directly on storage and need no running server.
 
 ## Global flags
 
@@ -365,6 +365,25 @@ server takes, so run them as the user the server runs as rather than under
 `sudo` (see the link below for why). See [running a second process against a
 live store](storage-backends.md#running-a-second-process-against-a-live-store).
 See [storage backends](storage-backends.md#migrating-between-backends) for migration details.
+
+### `list` output
+
+`list` writes one line per subject to stdout: its name, quoted, and its state
+(`requested`, `signed` or `revoked`), in two aligned columns. From `list --all`:
+
+```text
+"agent.example.com"   requested
+"puppet.example.com"  signed
+```
+
+With nothing to show it prints `(no certificates)`. It exits `0` either way.
+The name is quoted because it is whatever the server returned, so a control
+character in it cannot forge a line. Unlike `puppetserver ca list`, it prints
+no fingerprints, subject alternative names or authorization extensions, does
+not group the lines under headings, and has no `--format json`
+([#648](https://github.com/voxpupuli/openvox-ca/issues/648)). A script that
+needs those reads them from `GET /puppet-ca/v1/certificate_statuses/all`
+instead (see [docs/api.md](api.md#certificate-statuses-list)).
 
 ## Offline subcommands on the server binary
 
