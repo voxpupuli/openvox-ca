@@ -97,6 +97,8 @@ every release:
 $ docker pull ghcr.io/voxpupuli/openvox-ca:latest
 ```
 
+`latest` first appears with the 1.0.0 release; until then, pull `edge`.
+
 Every tag comes in two variants: distroless (the unsuffixed tags, also
 published with a `-distroless` suffix) and Alpine (`-alpine`). See [container
 images](docs/container-images.md) for how they differ, the available tags and

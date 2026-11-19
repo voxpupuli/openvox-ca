@@ -801,13 +801,14 @@ at startup. The CRL and the inventory are correct immediately.
 
 ##### Reading the version back off a floating tag
 
-Pin the *version*, not whatever tag the deployment names. `compose.yml` ships
-`:latest` deliberately, so copying the tag from a deployment that floats would
-reintroduce exactly the skew this avoids.
+Pin the *version*, not whatever tag the deployment names. `compose.yml` ships a
+floating tag deliberately (`:edge` until 1.0.0, then `:latest`), so copying the
+tag from a deployment that floats would reintroduce exactly the skew this
+avoids.
 
 Take the digest off the **running container, before you stop it**. Inspecting
-the tag instead would resolve to whatever `:latest` points at now, which is the
-one thing it may no longer be:
+the tag instead would resolve to whatever it points at now, which is the one
+thing it may no longer be:
 
 ```bash
 podman inspect --format '{{index .RepoDigests 0}}' \

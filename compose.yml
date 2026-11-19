@@ -26,15 +26,17 @@ name: openvox-ca
 
 services:
   openvox-ca:
-    # `:latest` is deliberately left unpinned so this example tracks the
-    # newest release, but a floating tag carries no supply-chain integrity
-    # guarantee: two pulls at different times can yield different images.
-    # Pin a release tag (e.g. :1.2.3) or a digest for production
-    # deployments. This is the distroless image; an `-alpine` variant of
+    # `:edge` until 1.0.0, the first release `:latest` will name: pre-releases
+    # never move `:latest`, so it does not exist yet. Either is a floating
+    # tag, deliberately left unpinned so this example tracks the newest
+    # build, but a floating tag carries no supply-chain integrity guarantee:
+    # two pulls at different times can yield different images, and `:edge`
+    # is unreleased code from main. Pin a release tag (e.g. :1.2.3) or a
+    # digest for production deployments. This is the distroless image; an `-alpine` variant of
     # every tag, with a shell, is also published. Both run as uid 65532, so
     # data written by a container that ran as another uid has to be re-owned
     # to 65532:65532 first (docs/container-images.md, "Runtime user").
-    image: ghcr.io/voxpupuli/openvox-ca:latest
+    image: ghcr.io/voxpupuli/openvox-ca:edge
     # No `command:`: the image's own runs the CA from the volume below. A
     # command here replaces it, so restate --cadir if you add one.
     # NOTE: autosign is off by default. Only enable it in dev/test
