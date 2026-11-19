@@ -33,7 +33,7 @@ guide is the human-friendly entry point; where the two overlap, AGENTS.md wins.
 - Docker or Podman with the Compose plugin, for the integration and stack tests
 - Only to run the vulnerability scan locally (CI always runs it):
   [govulncheck](https://go.dev/doc/tutorial/govulncheck)
-  (`go install golang.org/x/vuln/cmd/govulncheck@v1.9.0`)
+  (`go install golang.org/x/vuln/cmd/govulncheck@v1.10.0`)
 - Only if you are changing the Helm chart under [`charts/`](charts/):
   [Helm](https://helm.sh/docs/intro/install/) and
   [kubeconform](https://github.com/yannh/kubeconform)
