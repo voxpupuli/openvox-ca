@@ -77,8 +77,10 @@ COPY --from=builder /container-config/ /etc/openvox-ca/
 USER ${CA_UID}:${CA_UID}
 EXPOSE 8140
 
-# The image's own health state, for `docker ps`, compose and Podman. It is a
-# subcommand of the server binary rather than curl or wget so the same line
+# The image's own health state, for `docker ps` and Docker Compose. Podman
+# does not read it from an OCI-format image, which is what CI publishes, so
+# compose.yml declares the same check and the docs give Podman users the
+# --health-cmd that matches it. It is a subcommand of the server binary rather than curl or wget so the same line
 # works in every image, including one with no shell. It requests
 # /healthz/ready, over HTTPS or plain HTTP as the server speaks, on the port
 # from the server's config file and OPENVOX_CA_* environment; a port set only

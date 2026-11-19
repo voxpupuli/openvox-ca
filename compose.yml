@@ -48,9 +48,16 @@ services:
       - ca-ssl:/etc/puppetlabs/puppet/ssl
       # - ./config.yaml:/etc/openvox-ca/config.yaml:ro
     restart: unless-stopped
-    # No healthcheck here: every image variant declares its own, `openvox-ca
-    # healthcheck`. Images released before it (v1.0.0-alpha1 and earlier)
-    # declare none. See "Health check" in docs/container-images.md.
+    # The image's own HEALTHCHECK, restated: Docker reads it from the image,
+    # but Podman does not read it from the OCI-format images published here,
+    # so without this podman-compose would report no health at all. See
+    # "Health check" in docs/container-images.md.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/openvox-ca", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
 
 volumes:
   ca-ssl:

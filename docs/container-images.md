@@ -230,8 +230,20 @@ not work, and needs another route:
 ### Health check
 
 Every image declares a `HEALTHCHECK` that runs `openvox-ca healthcheck`, so
-`docker ps` and `podman ps` report the container's health without any
-configuration. It requests `/healthz/ready` every 30 seconds and marks the
+`docker ps` reports the container's health without any configuration. Podman
+does not: it reads no `HEALTHCHECK` from an OCI-format image, and the images
+are published in that format, so `podman ps` shows no health until you pass
+the same check yourself:
+
+```console
+$ podman run -d --name openvox-ca \
+    --health-cmd '["/usr/local/bin/openvox-ca", "healthcheck"]' \
+    --health-interval 30s --health-timeout 5s \
+    --health-start-period 120s --health-retries 3 \
+    … ghcr.io/voxpupuli/openvox-ca:latest
+```
+
+The check requests `/healthz/ready` every 30 seconds and marks the
 container unhealthy after three failures in a row. The first two minutes are a
 grace period, because the first start generates the CA key; the first check
 that passes ends it.
@@ -282,8 +294,8 @@ cost the pod nothing between checks.
 
 The [`compose.yml`](https://github.com/voxpupuli/openvox-ca/blob/main/compose.yml) at the repository root is the equivalent
 Docker/Podman Compose deployment: `docker compose up -d` (or `podman-compose
-up -d`). It declares no healthcheck of its own, so the
-service has the image's [health check](#health-check). The
+up -d`). It restates the image's [health check](#health-check) as its own, so
+the service reports its health under Podman as well as Docker. The
 `test/compose*.yml` files, by contrast,
 are the integration-test topologies — they build throwaway images from the
 working tree and are not deployment examples.

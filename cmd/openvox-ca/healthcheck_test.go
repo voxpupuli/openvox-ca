@@ -19,6 +19,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -32,6 +33,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.yaml.in/yaml/v3"
 )
 
 // runHealthcheck runs `openvox-ca healthcheck` through the root command, as
@@ -299,27 +301,68 @@ var _ = Describe("healthcheck subcommand", func() {
 		// Every image at the top of the tree, so an image added later is held
 		// to it without anyone extending a list -- and must declare one: an
 		// image without it reports no health at all, which is #366 again.
-		declares := regexp.MustCompile(`(?m)^HEALTHCHECK\b`)
-		timeout := regexp.MustCompile(`(?m)^HEALTHCHECK [^\n]*--timeout=(\d+)s`)
-		paths, err := filepath.Glob(filepath.Join("..", "..", "Dockerfile*"))
-		Expect(err).NotTo(HaveOccurred())
-		checked := 0
-		for _, path := range paths {
-			src, err := os.ReadFile(path)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(declares.Match(src)).To(BeTrue(), "%s declares no HEALTHCHECK", path)
-			m := timeout.FindSubmatch(src)
-			Expect(m).NotTo(BeNil(), "%s declares a HEALTHCHECK with no --timeout", path)
-			secs, err := strconv.Atoi(string(m[1]))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(defaultHealthcheckTimeout).To(BeNumerically("<", time.Duration(secs)*time.Second), path)
-			checked++
-		}
-		// Both images declare one, so a glob that matched nothing cannot pass.
-		Expect(checked).To(BeNumerically(">=", 2))
+		// imagesHealthcheck holds every image to declaring one, at least two
+		// images to exist, and all of them to agree.
+		Expect(defaultHealthcheckTimeout).To(BeNumerically("<", imagesHealthcheck().timeout))
 		// The image runs the check with no --timeout, so the flag's default is
 		// the value in force, not the constant on its own.
 		Expect(newHealthcheckCmd().Flags().Lookup("timeout").DefValue).To(Equal(defaultHealthcheckTimeout.String()))
+	})
+
+	// compose.yml and the Podman example in docs/container-images.md restate
+	// the images' HEALTHCHECK, because Podman reads none from an OCI-format
+	// image (#633). Each copy is read against the Dockerfiles rather than
+	// against literals, so a change to the images' check that leaves a copy
+	// behind fails, whichever field it touches -- the start period above all,
+	// the first start's grace for generating the CA key.
+	It("holds compose.yml's restated healthcheck to the images' own", func() {
+		images := imagesHealthcheck()
+		src, err := os.ReadFile(filepath.Join("..", "..", "compose.yml"))
+		Expect(err).NotTo(HaveOccurred())
+		var doc struct {
+			Services map[string]struct {
+				Healthcheck struct {
+					Test        []string `yaml:"test"`
+					Interval    string   `yaml:"interval"`
+					Timeout     string   `yaml:"timeout"`
+					StartPeriod string   `yaml:"start_period"`
+					Retries     int      `yaml:"retries"`
+				} `yaml:"healthcheck"`
+			} `yaml:"services"`
+		}
+		Expect(yaml.Unmarshal(src, &doc)).To(Succeed())
+		Expect(doc.Services).To(HaveKey("openvox-ca"))
+		hc := doc.Services["openvox-ca"].Healthcheck
+		Expect(hc.Test).NotTo(BeEmpty(), "compose.yml declares no healthcheck test")
+		Expect(hc.Test[0]).To(Equal("CMD"))
+		Expect(healthcheckSpec{
+			cmd:         hc.Test[1:],
+			interval:    mustParseDuration(hc.Interval),
+			timeout:     mustParseDuration(hc.Timeout),
+			startPeriod: mustParseDuration(hc.StartPeriod),
+			retries:     hc.Retries,
+		}).To(Equal(images))
+	})
+
+	It("holds the documented Podman --health-cmd to the images' own", func() {
+		images := imagesHealthcheck()
+		src, err := os.ReadFile(filepath.Join("..", "..", "docs", "container-images.md"))
+		Expect(err).NotTo(HaveOccurred())
+		flag := func(name, value string) string {
+			GinkgoHelper()
+			m := regexp.MustCompile(`--` + name + ` ` + value).FindSubmatch(src)
+			Expect(m).NotTo(BeNil(), "docs/container-images.md's podman run has no --%s", name)
+			return string(m[1])
+		}
+		doc := healthcheckSpec{
+			interval:    mustParseDuration(flag("health-interval", `(\S+)`)),
+			timeout:     mustParseDuration(flag("health-timeout", `(\S+)`)),
+			startPeriod: mustParseDuration(flag("health-start-period", `(\S+)`)),
+		}
+		Expect(json.Unmarshal([]byte(flag("health-cmd", `'(\[[^']*\])'`)), &doc.cmd)).To(Succeed())
+		doc.retries, err = strconv.Atoi(flag("health-retries", `(\d+)`))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(doc).To(Equal(images))
 	})
 
 	DescribeTable("requests the endpoint --probe names",
@@ -429,3 +472,49 @@ var _ = Describe("healthcheck subcommand", func() {
 		Expect(healthcheckTransport().Proxy).To(BeNil())
 	})
 })
+
+// healthcheckSpec is the images' HEALTHCHECK, in the terms every copy of it
+// states: the command and the four timings.
+type healthcheckSpec struct {
+	cmd                            []string
+	interval, timeout, startPeriod time.Duration
+	retries                        int
+}
+
+// imagesHealthcheck reads the HEALTHCHECK every Dockerfile at the top of the
+// tree declares, and requires them to agree, so the copies have one answer to
+// match.
+func imagesHealthcheck() healthcheckSpec {
+	GinkgoHelper()
+	line := regexp.MustCompile(`(?m)^HEALTHCHECK --interval=(\S+) --timeout=(\S+) --start-period=(\S+) --retries=(\d+) \\\n\s+CMD (\[.*\])$`)
+	paths, err := filepath.Glob(filepath.Join("..", "..", "Dockerfile*"))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(len(paths)).To(BeNumerically(">=", 2))
+	var images *healthcheckSpec
+	for _, path := range paths {
+		src, err := os.ReadFile(path)
+		Expect(err).NotTo(HaveOccurred())
+		m := line.FindSubmatch(src)
+		Expect(m).NotTo(BeNil(), "%s has no HEALTHCHECK in the form this spec reads", path)
+		c := healthcheckSpec{
+			interval:    mustParseDuration(string(m[1])),
+			timeout:     mustParseDuration(string(m[2])),
+			startPeriod: mustParseDuration(string(m[3])),
+		}
+		c.retries, err = strconv.Atoi(string(m[4]))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(json.Unmarshal(m[5], &c.cmd)).To(Succeed(), path)
+		if images != nil {
+			Expect(c).To(Equal(*images), "%s's HEALTHCHECK differs from another image's", path)
+		}
+		images = &c
+	}
+	return *images
+}
+
+func mustParseDuration(s string) time.Duration {
+	GinkgoHelper()
+	d, err := time.ParseDuration(s)
+	Expect(err).NotTo(HaveOccurred(), s)
+	return d
+}
