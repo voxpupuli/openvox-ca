@@ -36,6 +36,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 	"github.com/voxpupuli/openvox-ca/internal/metrics"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
@@ -195,6 +196,27 @@ var _ = Describe("which process the exporter's go_* and process_* series describ
 			for _, mf := range mfs {
 				Expect(strings.HasPrefix(mf.GetName(), "openvoxca_") && mf.GetHelp() == "stray").To(BeFalse(),
 					"a non-go_* family from the source was served")
+			}
+		})
+
+		// The one openvoxca_* family the signer may report, because only the
+		// process holding the OpenBao token manager can see its state. Kept as
+		// sent: like every openvoxca_* series it describes the CA, so it
+		// carries no role, and an alert on it must not have to say which
+		// process to look at.
+		It("takes the OpenBao authentication gauge from the source, without a role", func() {
+			gauge := prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: constants.OpenBaoAuthenticatedMetric, Help: "from the signer"})
+			gauge.Set(0)
+			exporter.AddRuntime("signer", fakeRuntime{mfs: runtimeOf(gauge)})
+			mfs := gather()
+			Expect(roleValues(mfs, constants.OpenBaoAuthenticatedMetric)).To(Equal([]string{"<none>"}),
+				"the signer's gauge must be served, once, with no role label")
+			for _, mf := range mfs {
+				if mf.GetName() == constants.OpenBaoAuthenticatedMetric {
+					Expect(mf.GetMetric()[0].GetGauge().GetValue()).To(Equal(0.0),
+						"the value must be the signer's, not a default")
+				}
 			}
 		})
 

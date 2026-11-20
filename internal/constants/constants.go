@@ -25,3 +25,10 @@ package constants
 // It is an operator-facing contract: dashboards, recording rules and the
 // shipped mixin's alerts all match on it.
 const MetricsNamespace = "openvoxca"
+
+// OpenBaoAuthenticatedMetric is the one openvoxca_* family the isolated signer
+// reports over its Metrics RPC: the OpenBao Transit session's state, which only
+// the process holding the token manager can see. The signer registers it and
+// the frontend's exporter lets it through, and nothing else in the namespace,
+// so the two must agree on its name.
+const OpenBaoAuthenticatedMetric = MetricsNamespace + "_openbao_authenticated"

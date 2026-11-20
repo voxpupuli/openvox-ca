@@ -32,8 +32,10 @@ import (
 	"strings"
 
 	"github.com/openbao/openbao/api/v2"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 )
 
 // Signer implements crypto.Signer by proxying every operation to an OpenBao
@@ -327,6 +329,30 @@ type KeyProvider struct {
 	tm    *TokenManager
 	mount string
 	key   string
+}
+
+// authenticatedDesc describes openvoxca_openbao_authenticated, which the
+// KeyProvider reports as a prometheus.Collector.
+var authenticatedDesc = prometheus.NewDesc(
+	constants.OpenBaoAuthenticatedMetric,
+	"1 while the most recent login to OpenBao succeeded, 0 from the first failed "+
+		"re-authentication until one succeeds. While it is 0 no new token can be had, so "+
+		"issuance, CRL re-signing and OCSP fail once the token in hand expires. The signer "+
+		"retries every five seconds whichever path the failed login came from.",
+	nil, nil)
+
+// Describe implements prometheus.Collector. The KeyProvider is one so that
+// whichever process holds it, the isolated signer or a single-process server,
+// can report its session's state without knowing which provider it has.
+func (p *KeyProvider) Describe(ch chan<- *prometheus.Desc) { ch <- authenticatedDesc }
+
+// Collect implements prometheus.Collector, reporting TokenManager.Authenticated.
+func (p *KeyProvider) Collect(ch chan<- prometheus.Metric) {
+	v := 0.0
+	if p.tm.Authenticated() {
+		v = 1
+	}
+	ch <- prometheus.MustNewConstMetric(authenticatedDesc, prometheus.GaugeValue, v)
 }
 
 // NewKeyProvider builds a KeyProvider that manages the Transit key named by

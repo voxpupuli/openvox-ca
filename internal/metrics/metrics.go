@@ -29,6 +29,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 	"github.com/voxpupuli/openvox-ca/internal/httpserver"
 )
 
@@ -138,7 +139,12 @@ func (e *Exporter) AddProcess(role string, pid int) {
 // signer's go_* series, which the signer returns over its RPC.
 //
 // Only go_* families are taken, and any role label g supplies is replaced: the
-// role is the exporter's to assign, not the other process's to claim. A source
+// role is the exporter's to assign, not the other process's to claim. The one
+// exception is constants.OpenBaoAuthenticatedMetric, which the signer reports
+// when it holds an OpenBao Transit session and which is kept as sent, without
+// a role: like every openvoxca_* series it describes the CA, not a process. No
+// other openvoxca_* family is taken, so a source cannot shadow the exporter's
+// own. A source
 // that fails is logged, as sibling=role, and left out of that scrape, so a
 // wedged signer costs its own series and nothing else.
 func (e *Exporter) AddRuntime(role string, g prometheus.Gatherer) {
@@ -193,11 +199,16 @@ func (e *Exporter) Gatherer() prometheus.Gatherer {
 }
 
 // labelRuntimeFamilies keeps only the go_* families in mfs and sets
-// RoleLabel=role on every metric in them, replacing any role already there.
-// mfs is freshly decoded and owned by the caller, so it is modified in place.
+// RoleLabel=role on every metric in them, replacing any role already there,
+// and keeps constants.OpenBaoAuthenticatedMetric unchanged. mfs is freshly
+// decoded and owned by the caller, so it is modified in place.
 func labelRuntimeFamilies(role string, mfs []*dto.MetricFamily) []*dto.MetricFamily {
 	out := mfs[:0]
 	for _, mf := range mfs {
+		if mf.GetName() == constants.OpenBaoAuthenticatedMetric {
+			out = append(out, mf)
+			continue
+		}
 		if !strings.HasPrefix(mf.GetName(), "go_") {
 			continue
 		}
