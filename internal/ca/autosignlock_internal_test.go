@@ -270,6 +270,32 @@ var _ = Describe("Autosign executable concurrency", func() {
 		}
 	})
 
+	It("keeps back the configured executable timeout, not the default", func() {
+		// With a one-second timeout the reserve is a few seconds, so a
+		// request with twelve in hand can queue for a while; reserving the
+		// default thirty would have turned it away at once.
+		myCA.AutosignConfig.ExecutableTimeout = time.Second
+		drain := fillSlots()
+		csrPEM := csrFor("configured.test")
+		answered := make(chan submission, 1)
+		go func() {
+			defer GinkgoRecover()
+			waitCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+			defer cancel()
+			signed, err := myCA.SaveRequest(waitCtx, "configured.test", csrPEM)
+			answered <- submission{signed, err}
+		}()
+		Consistently(answered, 2*time.Second).ShouldNot(Receive(),
+			"the request gave up as if the default timeout had to be kept back")
+
+		release()
+		drain()
+		var got submission
+		Eventually(answered, 5*time.Second).Should(Receive(&got))
+		Expect(got.err).NotTo(HaveOccurred())
+		Expect(got.signed).To(BeTrue())
+	})
+
 	It("keeps c.mu free while a request waits for a slot", func() {
 		// A full set of slots is a queue, and a queue under c.mu would stall
 		// every reader of the CA's caches as before #664. A reader, and an
