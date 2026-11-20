@@ -746,6 +746,13 @@ than 5.8, a `subPath` mount into a root-owned directory (not under
 `configMount`, itself a ConfigMap volume root) is what keeps the check on: see
 [the autosign executable's path](configuration.md#the-autosign-executables-path).
 
+A plugin runs while the CA holds its CA-wide lock, so the readiness probe waits
+for it. The chart leaves that probe at the Kubernetes defaults (a one-second
+timeout, every 10 seconds, three failures), so a plugin that runs for 20 seconds
+or more can take the pod out of the Service until it finishes. Keep it fast; see
+[autosigning](configuration.md#autosigning) and
+[#664](https://github.com/voxpupuli/openvox-ca/issues/664).
+
 ## Monitoring
 
 The Prometheus exporter is off by default. Enabling it opens a second,
