@@ -360,10 +360,12 @@ openvox-ca-ctl migrate \
 the server to be **stopped**, on every backend. On a backend that supports one
 running instance (`filesystem`, `sqlite`), run one beside a live server and it is
 refused, naming the process holding the store — not left waiting for a lock it
-was never going to get. On a backend with distributed locking nothing detects a
-running server, so stopping every replica first is up to you. Because they reach storage directly they take the same locks a running
-server takes, so run them as the user the server runs as rather than under
-`sudo` (see the link below for why). See [running a second process against a
+was never going to get. `setup` and `import` take a filesystem cadir only;
+`migrate` can also reach a backend with distributed locking, where nothing
+detects a running server, so stopping every replica first is up to you. Because
+they reach storage directly they take the same locks a running server takes,
+so run them as the user the server runs as rather than under `sudo` (see the
+link below for why). See [running a second process against a
 live store](storage-backends.md#running-a-second-process-against-a-live-store).
 See [storage backends](storage-backends.md#migrating-between-backends) for migration details.
 

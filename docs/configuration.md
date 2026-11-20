@@ -431,9 +431,11 @@ or a packaged CA whose certificate you are replacing by hand.
 
 `openvox-ca-ctl generate` needs a running server, so the procedure below issues
 the first serving certificate against this CA started temporarily on loopback
-with TLS switched off. The offline `openvox-ca generate` issues it with no
-server at all; see [the first credential on a new
-CA](operator-cli.md#the-first-credential-on-a-new-ca). **Stop
+with TLS switched off. Once the store holds a CA (from `openvox-ca-ctl setup`,
+or one earlier start), the offline `openvox-ca generate` issues it with no server
+running instead; it refuses on a store that holds no CA. A serving certificate
+takes `--dns` and never `--pp-cli-auth`; see [`generate`: minting a certificate
+offline](operator-cli.md#generate-minting-a-certificate-offline). **Stop
 the service first if one is running.** That is not just courtesy on
 `filesystem` and `sqlite`: those permit exactly one instance. The store lock
 will normally refuse the second process rather than let it corrupt anything, so
@@ -2111,8 +2113,7 @@ a shared root, one issuing agent certificates and one issuing server
 certificates. Without it, those administrators cannot authenticate at all.
 
 **Nothing below applies unless `client_ca` is set.** With it absent there is one
-trust domain, it is ours, and admin is `puppet_server` plus `pp_cli_auth`
-exactly as it has always been.
+trust domain, it is ours, and admin is `puppet_server` plus `pp_cli_auth`.
 
 ```yaml
 client_ca:

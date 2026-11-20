@@ -98,7 +98,8 @@ alerting rules for the openvox-ca exporter. It alerts on:
   revocation of a certificate a renewal replaced, which leaves that certificate
   a valid credential. Live on any CA that renews certificates, since
   `superseded_cert_revoke_after_sec` defaults to 24 hours; only where it is set
-  to `0` does the revocation happen inside the renewal instead, and a failure
+  to `0`, and no `managed_certs` entry sets a non-zero `revoke_after` of its own,
+  does the revocation happen inside the renewal instead, and a failure
   there counts towards the CRL-update alert above, which needs a second failure
   within its window: a single one is left to its log warning. Even then a store
   that cannot

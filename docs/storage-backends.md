@@ -67,8 +67,12 @@ that reaches storage directly.
 This is a property of the backend's locking rather than of its name. The HA
 backends — `etcd`, `redis`, `postgres` and `mysql` — coordinate writers across
 processes *and* hosts, so on those you may run as many instances as you like, on
-as many machines as you like, and none of this section applies to them. A future
-backend inherits whichever behaviour its locking earns it.
+as many machines as you like, and the one-instance rule does not apply to them.
+A command that reaches storage directly still needs every replica stopped there,
+and nothing detects one that is running; on those backends that means `migrate`,
+since `setup` and `import` take a filesystem cadir only (see [migrating between
+backends](#migrating-between-backends)). A future backend inherits whichever
+behaviour its locking earns it.
 
 ### Why only one
 
