@@ -23,6 +23,7 @@ SYSTEMD_RUNTIME="${OPENVOX_CA_SYSTEMD_RUNTIME:-/run/systemd/system}"
 CONFMODULE="${OPENVOX_CA_CONFMODULE:-/usr/share/debconf/confmodule}"
 SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
 DEFAULT_FILE="${OPENVOX_CA_DEFAULT_FILE:-/etc/default/openvox-ca}"
+ETCDIR="${OPENVOX_CA_ETCDIR:-/etc/openvox-ca}"
 
 # Loaded before anything with an effect: the confmodule re-executes this script
 # under debconf's frontend. Only on a deb purge, and only while debconf is
@@ -125,6 +126,15 @@ if [ "${1:-}" = purge ]; then
 	for f in "$DEFAULT_FILE" "$DEFAULT_FILE".ucf-new "$DEFAULT_FILE".ucf-old "$DEFAULT_FILE".ucf-dist; do
 		rm -f -- "$f"
 	done
+
+	# The CLI's configuration, which provisioning writes rather than the
+	# package ships (openvox-ca#639), so dpkg does not know to remove it. It is
+	# configuration like the file above, and removed on the same terms. rm
+	# unlinks a symlink rather than following it, and /etc/openvox-ca is
+	# root's, so nothing here can be steered elsewhere. The directory is
+	# dpkg's: it prunes it after this script returns, if this emptied it
+	# (measured on trixie, not inferred).
+	rm -f -- "$ETCDIR/ctl.yaml"
 
 	# deb-systemd-helper's own state for the unit the postinst enabled.
 	if command -v deb-systemd-helper >/dev/null 2>&1; then

@@ -3842,6 +3842,7 @@ var _ = Describe("buildVariantPackages", func() {
 			Entry("the service unit", "/usr/lib/systemd/system/openvox-ca.service", int64(0o644)),
 			Entry("the provisioning oneshot", "/usr/lib/systemd/system/openvox-ca-first-boot.service", int64(0o644)),
 			Entry("the provisioning script", "/usr/libexec/openvox-ca/first-boot", int64(0o755)),
+			Entry("the CLI configuration writer", "/usr/libexec/openvox-ca/write-ctl-config", int64(0o755)),
 			Entry("the service's Debian drop-in", "/usr/lib/systemd/system/openvox-ca.service.d/00-debian.conf", int64(0o644)),
 			Entry("the oneshot's Debian drop-in", "/usr/lib/systemd/system/openvox-ca-first-boot.service.d/00-debian.conf", int64(0o644)),
 			Entry("the sysusers declaration", "/usr/lib/sysusers.d/openvox-ca.conf", int64(0o644)),
@@ -4828,6 +4829,7 @@ func rpmContents(path string) (map[string]string, error) {
 // rpmFile is one entry of an rpm's payload, with the metadata that decides how
 // it is installed.
 type rpmFile struct {
+	dir       bool
 	mode      int
 	owner     string
 	group     string
@@ -4869,6 +4871,7 @@ func rpmPayload(path string) (map[string]rpmFile, error) {
 	out := make(map[string]rpmFile, len(entries))
 	for _, e := range entries {
 		out[e.Name()] = rpmFile{
+			dir:       e.Mode()&0o170000 == 0o040000,
 			mode:      e.Mode() & 0o7777,
 			owner:     e.UserName(),
 			group:     e.GroupName(),
@@ -4972,6 +4975,7 @@ var _ = Describe("the rpm's payload", func() {
 		Entry("the provisioning oneshot", "/usr/lib/systemd/system/openvox-ca-first-boot.service", 0o644),
 		Entry("the provisioning script", "/usr/libexec/openvox-ca/first-boot", 0o755),
 		Entry("the environment recorder", "/usr/libexec/openvox-ca/record-environment", 0o755),
+		Entry("the CLI configuration writer", "/usr/libexec/openvox-ca/write-ctl-config", 0o755),
 		Entry("the sysusers declaration", "/usr/lib/sysusers.d/openvox-ca.conf", 0o644),
 		Entry("the configuration file", "/etc/openvox-ca/config.yaml", 0o640),
 	)
@@ -5049,6 +5053,23 @@ var _ = Describe("the rpm's payload", func() {
 			Expect(f.config).To(BeFalse(), "%s is marked %%config and should not be", path)
 		}
 	})
+
+	// rpm removes a directory on erase only when a package owns it, and owns
+	// one only when the header lists it. nfpm lists none implicitly, so these
+	// two outlived every `dnf remove`, empty and owned by nothing
+	// (openvox-ca#640). Declared 0755 root:root, the mode rpm gave them
+	// implicitly, because rpm re-applies a declared mode on every upgrade.
+	DescribeTable("owns the directories it creates, so that erasing it removes them",
+		func(path string) {
+			Expect(files).To(HaveKey(path), "the rpm does not own %s", path)
+			Expect(files[path].dir).To(BeTrue(), "%s is not a directory entry", path)
+			Expect(files[path].mode).To(Equal(0o755), "mode of %s", path)
+			Expect(files[path].owner).To(Equal("root"), "owner of %s", path)
+			Expect(files[path].group).To(Equal("root"), "group of %s", path)
+		},
+		Entry("the configuration directory", "/etc/openvox-ca"),
+		Entry("the libexec directory", "/usr/libexec/openvox-ca"),
+	)
 
 	It("gives the configuration file to root:puppet", func() {
 		Expect(files["/etc/openvox-ca/config.yaml"].owner).To(Equal("root"))
@@ -5386,14 +5407,17 @@ var _ = Describe("the provisioning oneshot's unit", func() {
 		Entry("the oneshot", firstBootUnit),
 	)
 
-	// "+" is the whole of why record-environment can write /etc/sysconfig, and
-	// it belongs on ExecStartPost= and nowhere else: on ExecStart= it would
-	// take provisioning itself out of the sandbox and run it as root. The
-	// runtime directory is where first-boot leaves the marker the recorder
-	// looks for, and the only place under ProtectSystem=strict it can.
-	It("records the environment as root, after provisioning, leaving provisioning confined", func() {
-		Expect(directives).To(HaveKeyWithValue("ExecStartPost",
-			[]string{"+/usr/libexec/openvox-ca/record-environment"}))
+	// "+" is the whole of why record-environment can write /etc/sysconfig and
+	// write-ctl-config /etc/openvox-ca, and it belongs on ExecStartPost= and
+	// nowhere else: on ExecStart= it would take provisioning itself out of the
+	// sandbox and run it as root. The runtime directory is where first-boot
+	// leaves the marker both look for, and the only place under
+	// ProtectSystem=strict it can.
+	It("runs its root steps after provisioning, leaving provisioning confined", func() {
+		Expect(directives).To(HaveKeyWithValue("ExecStartPost", []string{
+			"+/usr/libexec/openvox-ca/record-environment",
+			"+/usr/libexec/openvox-ca/write-ctl-config",
+		}))
 		Expect(directives).To(HaveKeyWithValue("ExecStart", []string{"/usr/libexec/openvox-ca/first-boot"}))
 		Expect(directives).To(HaveKeyWithValue("RuntimeDirectory", []string{"openvox-ca-first-boot"}))
 	})
@@ -5950,6 +5974,395 @@ var _ = Describe("record-environment", func() {
 	})
 })
 
+var _ = Describe("write-ctl-config", func() {
+	// The second packaged script that runs as root outside the sandbox,
+	// reading a tree `puppet` can write (openvox-ca#639). What matters is what
+	// it writes -- the four settings that let the packaged openvox-ca-ctl
+	// reach this CA -- and what it refuses: a file it would overwrite, a link
+	// it would follow, a name or port it cannot vouch for. Every case exits
+	// zero, because a non-zero ExecStartPost= fails the oneshot and takes the
+	// service down with it.
+	var sslDir, etcDir, runtimeDir, stubBin, target, servingCert string
+
+	// stubSystemctl answers `systemctl show -p Environment openvox-ca.service`
+	// as told, or fails, exactly as record-environment's stub does. Always on
+	// PATH, because a Linux runner has a real systemctl that would answer for
+	// whatever host runs the suite; any other question gets an empty answer,
+	// so asking about the wrong unit fails the drop-in specs.
+	stubSystemctl := func(environment string, ok bool) {
+		GinkgoHelper()
+		body := "#!/bin/sh\nif [ \"$*\" = 'show -p Environment openvox-ca.service' ]; then\n" +
+			"\tprintf 'Environment=%s\\n' " + shellQuote(environment) + "\nelse\n\tprintf 'Environment=\\n'\nfi\n"
+		if !ok {
+			body = "#!/bin/sh\nexit 1\n"
+		}
+		Expect(os.WriteFile(filepath.Join(stubBin, "systemctl"), []byte(body), 0o755)).To(Succeed())
+	}
+
+	BeforeEach(func() {
+		sslDir = GinkgoT().TempDir()
+		etcDir = GinkgoT().TempDir()
+		runtimeDir = GinkgoT().TempDir()
+		stubBin = GinkgoT().TempDir()
+		target = filepath.Join(etcDir, "ctl.yaml")
+		servingCert = filepath.Join(sslDir, "certs", "openvox-ca-server.pem")
+
+		// What a first-boot run that linked the serving credential leaves.
+		Expect(os.MkdirAll(filepath.Join(sslDir, "certs"), 0o755)).To(Succeed())
+		Expect(os.Symlink("ca.example.com.pem", servingCert)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(runtimeDir, "serving-credential-linked"), nil, 0o644)).To(Succeed())
+		stubSystemctl("", true)
+	})
+
+	run := func(extraEnv ...string) firstBootResult {
+		cmd := exec.Command("sh", "packaging/scripts/write-ctl-config")
+		cmd.Env = append(os.Environ(),
+			"PATH="+stubBin+":/usr/bin:/bin",
+			"OPENVOX_CA_SSLDIR="+sslDir,
+			"OPENVOX_CA_ETCDIR="+etcDir,
+			"RUNTIME_DIRECTORY="+runtimeDir,
+			// The shipped file, which is what a default install reads.
+			"OPENVOX_CA_CONFIG=packaging/config/config.yaml",
+			// Cleared: the script reads it as the oneshot's environment.
+			"OPENVOX_CA_PORT=",
+		)
+		cmd.Env = append(cmd.Env, extraEnv...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				return firstBootResult{ok: false, output: string(out)}
+			}
+			Expect(err).NotTo(HaveOccurred())
+		}
+		return firstBootResult{ok: true, output: string(out)}
+	}
+
+	// settings decodes the file the way the CLI reads it: as YAML, comments
+	// and all.
+	settings := func() map[string]string {
+		GinkgoHelper()
+		body, err := os.ReadFile(target)
+		Expect(err).NotTo(HaveOccurred())
+		var out map[string]string
+		Expect(yaml.Unmarshal(body, &out)).To(Succeed())
+		return out
+	}
+
+	absentAt := func(path string) {
+		GinkgoHelper()
+		_, err := os.Lstat(path)
+		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue(), "%s exists: %v", path, err)
+	}
+	absent := func() { GinkgoHelper(); absentAt(target) }
+
+	// The four settings, and only those: the CLI decodes its configuration
+	// strictly, so a fifth key it does not know would make every command
+	// refuse to run.
+	It("points the CLI at this host's CA, through the aliases provisioning maintains", func() {
+		r := run()
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(settings()).To(Equal(map[string]string{
+			"server_url":  "https://ca.example.com:8141",
+			"ca_cert":     filepath.Join(sslDir, "certs", "ca.pem"),
+			"client_cert": servingCert,
+			"client_key":  filepath.Join(sslDir, "private_keys", "openvox-ca-server.pem"),
+		}))
+
+		// The temporary file it hard-links from is gone, so a dot-file is not
+		// left in /etc/openvox-ca on every provisioning.
+		entries, err := os.ReadDir(etcDir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(entries).To(HaveLen(1), "a temporary file was left behind")
+	})
+
+	// It holds paths and no secret; the key it names stays the CA's.
+	It("creates the file 0644", func() {
+		Expect(run().ok).To(BeTrue())
+		info, err := os.Stat(target)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o644)))
+	})
+
+	// The port the server listens on, resolved as the server resolves it:
+	// environment, then file, then the binary's 8140.
+	DescribeTable("uses the port the server will listen on",
+		func(config string, env []string, want string) {
+			if config != "" {
+				path := filepath.Join(GinkgoT().TempDir(), "config.yaml")
+				Expect(os.WriteFile(path, []byte(config), 0o640)).To(Succeed())
+				env = append(env, "OPENVOX_CA_CONFIG="+path)
+			}
+			r := run(env...)
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(settings()).To(HaveKeyWithValue("server_url", want))
+		},
+		Entry("the shipped configuration's", "", nil, "https://ca.example.com:8141"),
+		Entry("an edited one", "cadir: /srv/ca\nport: 9140\n", nil, "https://ca.example.com:9140"),
+		Entry("one with a trailing comment", "port: 9140   # moved off 8141\n", nil, "https://ca.example.com:9140"),
+		Entry("the binary's default when the file sets none", "cadir: /srv/ca\n", nil, "https://ca.example.com:8140"),
+		Entry("a commented-out one is not one", "# port: 9140\n", nil, "https://ca.example.com:8140"),
+		// Indented, it belongs to some other block, not to the server.
+		Entry("a nested one is not the server's", "metrics:\n  port: 9100\n", nil, "https://ca.example.com:8140"),
+		Entry("the environment's over the file's", "port: 9140\n", []string{"OPENVOX_CA_PORT=9443"}, "https://ca.example.com:9443"),
+		Entry("the binary's default with no file at all", "", []string{"OPENVOX_CA_CONFIG=/nonexistent/config.yaml"}, "https://ca.example.com:8140"),
+	)
+
+	// A port it cannot read is a port it would have to guess, and a guess
+	// leaves the CLI dialling something else.
+	DescribeTable("writes nothing, and says why, for a port it cannot read",
+		func(config string, env []string, says string) {
+			path := filepath.Join(GinkgoT().TempDir(), "config.yaml")
+			Expect(os.WriteFile(path, []byte(config), 0o640)).To(Succeed())
+			r := run(append(env, "OPENVOX_CA_CONFIG="+path)...)
+			Expect(r.ok).To(BeTrue(), "a refusal failed the unit: %s", r.output)
+			Expect(r.output).To(ContainSubstring(says))
+			absent()
+		},
+		Entry("a quoted port", "port: \"9140\"\n", nil, "cannot read"),
+		Entry("an empty port", "port:\n", nil, "cannot read"),
+		Entry("a port spelt with a space before the colon", "port : 9140\n", nil, "cannot read"),
+		Entry("an environment value that is not a number", "port: 8141\n", []string{"OPENVOX_CA_PORT=81 41"}, "not a number"),
+	)
+
+	// A drop-in for openvox-ca.service alone is not in this script's
+	// environment, so systemd is asked for the service's Environment= lines.
+	// The environment file reaches both units and outranks any Environment=
+	// line, so a value from it still wins.
+	DescribeTable("uses the port a drop-in gives the service",
+		func(service string, env []string, want string) {
+			stubSystemctl(service, true)
+			r := run(env...)
+			Expect(r.ok).To(BeTrue(), r.output)
+			Expect(settings()).To(HaveKeyWithValue("server_url", want))
+		},
+		Entry("over config.yaml's", "OPENVOX_CA_PORT=9440", nil, "https://ca.example.com:9440"),
+		Entry("among other variables", "OPENVOX_CA_LOG_LEVEL=debug OPENVOX_CA_PORT=9440", nil, "https://ca.example.com:9440"),
+		Entry("but not over the environment file's", "OPENVOX_CA_PORT=9440", []string{"OPENVOX_CA_PORT=9443"}, "https://ca.example.com:9443"),
+		// It names the port, so the configuration file no longer matters.
+		Entry("even when the drop-in also moves the configuration file",
+			"OPENVOX_CA_CONFIG=/etc/openvox-ca/site.yaml OPENVOX_CA_PORT=9440", nil, "https://ca.example.com:9440"),
+		Entry("and ignores a variable that merely starts the same way",
+			"OPENVOX_CA_PORTAL=9440", nil, "https://ca.example.com:8141"),
+	)
+
+	// A port it cannot know is a port it would have to guess.
+	DescribeTable("writes nothing, and says why, when the service's port cannot be known",
+		func(service string, ok bool, says string) {
+			stubSystemctl(service, ok)
+			r := run()
+			Expect(r.ok).To(BeTrue(), "a refusal failed the unit: %s", r.output)
+			Expect(r.output).To(ContainSubstring(says))
+			absent()
+		},
+		Entry("a drop-in moves its configuration file", "OPENVOX_CA_CONFIG=/etc/openvox-ca/site.yaml", true, "reads its configuration from OPENVOX_CA_CONFIG"),
+		Entry("a quoted one", `"OPENVOX_CA_CONFIG=/etc/openvox ca/site.yaml"`, true, "reads its configuration from OPENVOX_CA_CONFIG"),
+		// systemd quotes a value holding a space, and a port never holds one.
+		Entry("a drop-in's port is quoted", `"OPENVOX_CA_PORT=94 40"`, true, "not a number"),
+		Entry("systemd cannot be asked", "", false, "could not ask systemd"),
+	)
+
+	// The environment file decides the port before systemd would be asked,
+	// so a host where it cannot be asked still gets a file.
+	It("does not need systemd when the environment file sets the port", func() {
+		stubSystemctl("", false)
+		r := run("OPENVOX_CA_PORT=9443")
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(settings()).To(HaveKeyWithValue("server_url", "https://ca.example.com:9443"))
+	})
+
+	// "Cannot ask" covers "nothing to ask with". The PATH holds only the
+	// tools the script needs, because a Linux runner's /usr/bin has a real
+	// systemctl that would otherwise answer.
+	It("writes nothing, and says why, when there is no systemctl", func() {
+		minimal := GinkgoT().TempDir()
+		for _, tool := range []string{"readlink", "sed", "tail", "grep", "mktemp", "chmod", "ln", "rm"} {
+			path, err := exec.LookPath(tool)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(os.Symlink(path, filepath.Join(minimal, tool))).To(Succeed())
+		}
+		r := run("PATH=" + minimal)
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(r.output).To(ContainSubstring("systemctl is not on PATH"))
+		absent()
+	})
+
+	It("writes nothing when config.yaml cannot be read", func() {
+		if os.Geteuid() == 0 {
+			Skip("root reads a mode-0 file regardless")
+		}
+		config := filepath.Join(GinkgoT().TempDir(), "config.yaml")
+		Expect(os.WriteFile(config, []byte("port: 8141\n"), 0o000)).To(Succeed())
+		r := run("OPENVOX_CA_CONFIG=" + config)
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(r.output).To(ContainSubstring("cannot read " + config))
+		absent()
+	})
+
+	// Never rewritten: an operator's file, or an earlier run's, is theirs.
+	// The hard link would refuse it anyway, so the output is what shows the
+	// file was recognised rather than merely failed over: a "could not
+	// write" warning on every re-mint would send an operator looking for a
+	// fault that is not there.
+	It("leaves a file that is already there exactly as it was, and says so", func() {
+		Expect(os.WriteFile(target, []byte("server_url: https://mine.example.com:8141\n"), 0o600)).To(Succeed())
+		r := run()
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(os.ReadFile(target)).To(Equal([]byte("server_url: https://mine.example.com:8141\n")))
+		Expect(r.output).To(ContainSubstring("already exists"))
+		Expect(r.output).NotTo(ContainSubstring("could not write"))
+	})
+
+	// The operator's own certificate at the alias: readlink would fail on it
+	// too, but with a message about reading rather than about what is there.
+	It("names a serving credential that is not a link as the reason", func() {
+		Expect(os.Remove(servingCert)).To(Succeed())
+		Expect(os.WriteFile(servingCert, []byte("CERT\n"), 0o644)).To(Succeed())
+		r := run()
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(r.output).To(ContainSubstring("is not a symlink"))
+		absent()
+	})
+
+	// No record, unlike record-environment: a deleted file comes back on the
+	// next run that relinks the serving credential, which is a re-mint.
+	It("writes a fresh one on the next run that links the serving credential, once deleted", func() {
+		Expect(run().ok).To(BeTrue())
+		Expect(os.Remove(target)).To(Succeed())
+		Expect(os.Remove(servingCert)).To(Succeed())
+		Expect(os.Symlink("renamed.example.com.pem", servingCert)).To(Succeed())
+		r := run()
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(settings()).To(HaveKeyWithValue("server_url", "https://renamed.example.com:8141"))
+	})
+
+	// As root, writing through a link would create or replace whatever it
+	// names; and replacing the link with a file is overwriting what was there.
+	DescribeTable("leaves a symlink at the target exactly as it was",
+		func(referentExists bool) {
+			elsewhere := filepath.Join(GinkgoT().TempDir(), "elsewhere")
+			if referentExists {
+				Expect(os.WriteFile(elsewhere, []byte("THEIRS\n"), 0o644)).To(Succeed())
+			}
+			Expect(os.Symlink(elsewhere, target)).To(Succeed())
+			r := run()
+			Expect(r.ok).To(BeTrue(), r.output)
+
+			Expect(os.Readlink(target)).To(Equal(elsewhere), "the link was replaced")
+			if referentExists {
+				Expect(os.ReadFile(elsewhere)).To(Equal([]byte("THEIRS\n")), "it wrote through the link")
+			} else {
+				absentAt(elsewhere)
+			}
+			// Recognised, not merely failed over: ln would refuse the path
+			// too, but with a "could not write" warning about a fault that
+			// is not there. Only the dangling entry reaches the -L test.
+			Expect(r.output).To(ContainSubstring("already exists"))
+			Expect(r.output).NotTo(ContainSubstring("could not write"))
+		},
+		Entry("dangling", false),
+		Entry("pointing at a file", true),
+	)
+
+	DescribeTable("writes nothing",
+		func(setup func() []string) {
+			env := setup()
+			r := run(env...)
+			Expect(r.ok).To(BeTrue(), "a refusal failed the unit: %s", r.output)
+			absent()
+		},
+		// first-boot leaves the marker only on a run that created the serving
+		// link under a name it does not consider a fallback, so its absence
+		// is every later boot and every short-hostname or localhost run.
+		Entry("when this run did not link the serving credential", func() []string {
+			Expect(os.Remove(filepath.Join(runtimeDir, "serving-credential-linked"))).To(Succeed())
+			return nil
+		}),
+		Entry("when it was not started by the unit", func() []string {
+			return []string{"RUNTIME_DIRECTORY="}
+		}),
+		Entry("when the serving credential is not a link", func() []string {
+			Expect(os.Remove(servingCert)).To(Succeed())
+			Expect(os.WriteFile(servingCert, []byte("CERT\n"), 0o644)).To(Succeed())
+			return nil
+		}),
+	)
+
+	// Asserted at the directory it was pointed at, not the BeforeEach's: it
+	// must neither create the directory as root nor write into it, and the
+	// message is what tells this guard from the mktemp failure behind it.
+	It("writes nothing, and creates nothing, when /etc/openvox-ca is not there", func() {
+		missing := filepath.Join(GinkgoT().TempDir(), "absent")
+		r := run("OPENVOX_CA_ETCDIR=" + missing)
+		Expect(r.ok).To(BeTrue(), "a refusal failed the unit: %s", r.output)
+		Expect(r.output).To(ContainSubstring("is not a directory"))
+		absentAt(missing)
+	})
+
+	It("warns and carries on when /etc/openvox-ca cannot be written", func() {
+		if os.Geteuid() == 0 {
+			Skip("running as root: every directory is writable, so the guard cannot fire")
+		}
+		Expect(os.Chmod(etcDir, 0o555)).To(Succeed())
+		DeferCleanup(os.Chmod, etcDir, os.FileMode(0o755))
+		r := run()
+		Expect(r.ok).To(BeTrue(), "a write failure failed the unit: %s", r.output)
+		Expect(r.output).To(ContainSubstring("could not create a temporary file"))
+		absent()
+	})
+
+	// The last write can fail after the temporary file exists, and the
+	// temporary file must not be left in /etc/openvox-ca.
+	It("cleans up when the final link fails", func() {
+		Expect(os.WriteFile(filepath.Join(stubBin, "ln"), []byte("#!/bin/sh\nexit 1\n"), 0o755)).To(Succeed())
+		r := run()
+		Expect(r.ok).To(BeTrue(), "a failed write failed the unit: %s", r.output)
+		Expect(r.output).To(ContainSubstring("could not write"))
+		entries, err := os.ReadDir(etcDir)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(entries).To(BeEmpty(), "the temporary file was left behind")
+	})
+
+	// The name lands in a URL in a YAML file that root's CLI reads. The
+	// allow-list is first-boot's, applied again here rather than trusted, and
+	// each entry carries exactly one thing it refuses.
+	DescribeTable("refuses a link first-boot would not have made",
+		func(linkTarget string) {
+			Expect(os.Remove(servingCert)).To(Succeed())
+			Expect(os.Symlink(linkTarget, servingCert)).To(Succeed())
+			r := run()
+			Expect(r.ok).To(BeTrue(), "a refusal failed the unit: %s", r.output)
+			Expect(r.output).To(ContainSubstring("not writing"))
+			absent()
+		},
+		Entry("a newline", "ca.example.com\nclient_key: x.pem"),
+		Entry("a YAML comment", "ca#x.pem"),
+		Entry("a userinfo separator", "user@ca.example.com.pem"),
+		Entry("a port separator", "ca.example.com:1.pem"),
+		Entry("a path out of certs/", "../ca/ca_crt.pem"),
+		Entry("a space", "ca x.pem"),
+		Entry("something other than a certificate", "ca.example.com"),
+		Entry("the CA alias", "ca.pem"),
+		Entry("the serving alias itself", "openvox-ca-server.pem"),
+		Entry("an option", "-x.pem"),
+		Entry("an empty name", ".pem"),
+		Entry("the current directory", "..pem"),
+		Entry("the parent directory", "...pem"),
+	)
+
+	// The name is the link's text, never a file's content: reading content
+	// as root under a tree `puppet` writes would let `puppet` choose it.
+	It("takes the name from the link's text, not from what it points at", func() {
+		Expect(os.WriteFile(filepath.Join(sslDir, "certs", "ca.example.com.pem"),
+			[]byte("evil.example.com\n"), 0o644)).To(Succeed())
+		Expect(os.WriteFile(filepath.Join(runtimeDir, "serving-credential-linked"),
+			[]byte("evil.example.com\n"), 0o644)).To(Succeed())
+		r := run()
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(settings()).To(HaveKeyWithValue("server_url", "https://ca.example.com:8141"))
+	})
+})
+
 var _ = Describe("the deb's unit drop-ins", func() {
 	DescribeTable("point the unit at /etc/default/openvox-ca, and start without it",
 		func(path string) {
@@ -5962,13 +6375,15 @@ var _ = Describe("the deb's unit drop-ins", func() {
 	)
 
 	// An empty assignment clears the list, which is how the deb takes
-	// record-environment off the oneshot. A value here would add a second
-	// command instead -- running a script the deb does not ship, and failing
-	// the unit.
-	It("clears the oneshot's ExecStartPost=, and sets nothing else", func() {
+	// record-environment off the oneshot; without it, the line after would add
+	// to the unit's list instead -- running a script the deb does not ship, and
+	// failing the unit. The list is then rebuilt with write-ctl-config, which
+	// both formats run, so dropping that line would leave the deb's CLI with no
+	// ctl.yaml and nothing to say why.
+	It("clears the oneshot's ExecStartPost= down to write-ctl-config, and sets nothing else", func() {
 		d, err := unitDirectives(filepath.Join("packaging", "systemd", "debian", "openvox-ca-first-boot.conf"))
 		Expect(err).NotTo(HaveOccurred())
-		Expect(d).To(HaveKeyWithValue("ExecStartPost", []string{""}))
+		Expect(d).To(HaveKeyWithValue("ExecStartPost", []string{"", "+/usr/libexec/openvox-ca/write-ctl-config"}))
 		Expect(d).To(HaveLen(2), "the drop-in changes more than its two directives")
 	})
 })
@@ -7212,6 +7627,7 @@ func debHostPins() []string {
 		"OPENVOX_CA_STATEDIR=" + filepath.Join(pin, "state"),
 		"OPENVOX_CA_SYSTEMD_RUNTIME=" + filepath.Join(pin, "no-systemd"),
 		"OPENVOX_CA_PUPPET_CONF=" + filepath.Join(pin, "puppet.conf"),
+		"OPENVOX_CA_ETCDIR=" + filepath.Join(pin, "etc-openvox-ca"),
 	}
 }
 
@@ -7903,11 +8319,17 @@ var _ = Describe("the deb's purge", func() {
 	// yes. What it deletes is the CA directory and the links provisioning
 	// made to it, each only if it is still the link provisioning would have
 	// made: the rest of the ssl tree may be an agent's.
-	var dir, db, log, stubBin, sslDir, defaultFile string
+	var dir, db, log, stubBin, sslDir, defaultFile, etcDir, ctlConfig string
 
 	BeforeEach(func() {
 		dir = GinkgoT().TempDir()
 		db = GinkgoT().TempDir()
+		// What write-ctl-config leaves in /etc/openvox-ca once dpkg has taken
+		// the conffile: the one file dpkg does not know to remove.
+		etcDir = filepath.Join(GinkgoT().TempDir(), "openvox-ca")
+		ctlConfig = filepath.Join(etcDir, "ctl.yaml")
+		Expect(os.Mkdir(etcDir, 0o755)).To(Succeed())
+		Expect(os.WriteFile(ctlConfig, []byte("server_url: https://ca.example.com:8141\n"), 0o644)).To(Succeed())
 		log = filepath.Join(GinkgoT().TempDir(), "calls.log")
 		stubBin = GinkgoT().TempDir()
 		sslDir = GinkgoT().TempDir()
@@ -7949,6 +8371,7 @@ var _ = Describe("the deb's purge", func() {
 			"OPENVOX_CA_SYSTEMD_RUNTIME="+filepath.Join(GinkgoT().TempDir(), "no-systemd"),
 			"OPENVOX_CA_SSLDIR="+sslDir,
 			"OPENVOX_CA_DEFAULT_FILE="+defaultFile,
+			"OPENVOX_CA_ETCDIR="+etcDir,
 		)
 		out, err := cmd.CombinedOutput()
 		calls, _ := os.ReadFile(log)
@@ -8035,6 +8458,44 @@ var _ = Describe("the deb's purge", func() {
 		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue())
 	})
 
+	// Provisioning writes ctl.yaml, the package does not ship it, so dpkg's
+	// purge of the package's configuration does not reach it, and with it in
+	// place dpkg would leave /etc/openvox-ca behind as well. It goes whatever
+	// the answer, like ucf's file: it is configuration, not the CA's data.
+	// The directory itself is dpkg's to prune once this has emptied it.
+	DescribeTable("removes the CLI's configuration",
+		func(answer string) {
+			r, _ := run(answer, "purge")
+			Expect(r.ok).To(BeTrue(), r.output)
+			_, err := os.Lstat(ctlConfig)
+			Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue(), "ctl.yaml survived the purge: %v", err)
+		},
+		Entry("keeping the CA", "false"),
+		Entry("removing the CA", "true"),
+	)
+
+	// Only that file: whatever else is there is not the package's to delete.
+	It("leaves the directory, and anything else in it, to dpkg", func() {
+		mine := filepath.Join(etcDir, "site.yaml")
+		Expect(os.WriteFile(mine, []byte("mine\n"), 0o644)).To(Succeed())
+		r, _ := run("false", "purge")
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(mine).To(BeAnExistingFile())
+	})
+
+	// rm -f unlinks a symlink; it never deletes what the link names.
+	It("removes a symlink at ctl.yaml without touching what it points at", func() {
+		elsewhere := filepath.Join(GinkgoT().TempDir(), "elsewhere.yaml")
+		Expect(os.WriteFile(elsewhere, []byte("THEIRS\n"), 0o644)).To(Succeed())
+		Expect(os.Remove(ctlConfig)).To(Succeed())
+		Expect(os.Symlink(elsewhere, ctlConfig)).To(Succeed())
+		r, _ := run("false", "purge")
+		Expect(r.ok).To(BeTrue(), r.output)
+		Expect(os.ReadFile(elsewhere)).To(Equal([]byte("THEIRS\n")))
+		_, err := os.Lstat(ctlConfig)
+		Expect(errors.Is(err, os.ErrNotExist)).To(BeTrue(), "the link survived the purge: %v", err)
+	})
+
 	// Removal, rpm erasure and rpm upgrade never ask and never delete.
 	DescribeTable("does nothing of the kind outside a deb purge",
 		func(arg string, want []string) {
@@ -8049,6 +8510,9 @@ var _ = Describe("the deb's purge", func() {
 			Expect(got).To(Equal(want))
 			untouched()
 			Expect(defaultFile).To(BeAnExistingFile())
+			// The rpm leaves it as it leaves /etc/sysconfig/openvox-ca, and a
+			// deb removal keeps configuration by definition.
+			Expect(ctlConfig).To(BeAnExistingFile())
 		},
 		// dh_installsystemd's postrm: a removal masks the unit, and its
 		// enablement links stay, so a reinstall enables it again.

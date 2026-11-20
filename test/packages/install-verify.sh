@@ -298,7 +298,8 @@ payload() {
         'test -f /usr/lib/systemd/system/openvox-ca-first-boot.service &&
          grep -x "ExecStart=/usr/bin/openvox-ca" /usr/lib/systemd/system/openvox-ca.service &&
          ! grep -n "@BINDIR@" /usr/lib/systemd/system/openvox-ca.service'
-    check "first-boot is installed executable" 'test -x /usr/libexec/openvox-ca/first-boot'
+    check "first-boot and write-ctl-config are installed executable" \
+        'test -x /usr/libexec/openvox-ca/first-boot && test -x /usr/libexec/openvox-ca/write-ctl-config'
     if [[ $FORMAT == deb ]]; then
         check "the deb ships both Debian drop-ins and no record-environment" \
             'test -f /usr/lib/systemd/system/openvox-ca.service.d/00-debian.conf &&
@@ -314,6 +315,15 @@ payload() {
         'systemd-analyze verify openvox-ca.service openvox-ca-first-boot.service'
     check "config.yaml is 0640 root:puppet" \
         'test "$(stat -c "%a %U:%G" /etc/openvox-ca/config.yaml)" = "640 root:puppet"'
+    if [[ $FORMAT == rpm ]]; then
+        # The deb starts the CA as it installs, so only here is this the state
+        # before provisioning.
+        check "no ctl.yaml before provisioning" 'test ! -e /etc/openvox-ca/ctl.yaml'
+        # rpm removes only the directories a package owns (openvox-ca#640).
+        check "the rpm owns /etc/openvox-ca and /usr/libexec/openvox-ca" \
+            'rpm -qf /etc/openvox-ca | grep -q "^openvox-ca-" &&
+             rpm -qf /usr/libexec/openvox-ca | grep -q "^openvox-ca-"'
+    fi
     check "the CA directory is 0770 puppet:puppet" \
         "test \"\$(stat -c '%a %U:%G' $SSL/ca)\" = '770 puppet:puppet'"
     check "the migration guide the takeover warning names is installed" \
@@ -331,6 +341,20 @@ serves() {
             https://$1:8141/puppet-ca/v1/certificate/ca -o /root/served.pem &&
          test \"\$(openssl x509 -in /root/served.pem -noout -fingerprint -sha256)\" = \
               \"\$(openssl x509 -in $SSL/ca/ca_crt.pem -noout -fingerprint -sha256)\""
+}
+
+# ctl_reaches NAME asserts that the packaged openvox-ca-ctl, run with no flags
+# and no environment, reaches the packaged server (openvox-ca#639): that
+# provisioning wrote /etc/openvox-ca/ctl.yaml for NAME, root's own, and that
+# the CLI reading it authenticates as an admin -- list is admin-only -- and
+# sees this host's own certificate.
+ctl_reaches() {
+    check "provisioning wrote /etc/openvox-ca/ctl.yaml 0644 root:root, for https://$1:8141" \
+        "test \"\$(stat -c '%a %U:%G' /etc/openvox-ca/ctl.yaml)\" = '644 root:root' &&
+         grep -x 'server_url: https://$1:8141' /etc/openvox-ca/ctl.yaml"
+    check "the packaged openvox-ca-ctl lists this CA's certificates with no flags" \
+        "env -i PATH=/usr/bin:/bin /usr/bin/openvox-ca-ctl list --all >/root/ctl-list.txt 2>&1 &&
+         grep -q '$1' /root/ctl-list.txt || { cat /root/ctl-list.txt; false; }"
 }
 
 unit_state() {
@@ -425,6 +449,7 @@ deb_scenarios() {
         'grep -x OPENVOX_CA_CERTNAME=ca.example.test /etc/default/openvox-ca &&
          grep -x OPENVOX_CA_PUPPET_SERVER=ca.example.test /etc/default/openvox-ca'
     environment ca.example.test /etc/default/openvox-ca
+    ctl_reaches ca.example.test
     check "debconf-communicate reads the answer back" \
         'echo "get openvox-ca/ca-name" | debconf-communicate openvox-ca | grep -x "0 ca.example.test"'
     check "config.yaml is a dpkg conffile and /etc/default/openvox-ca is not" \
@@ -462,6 +487,7 @@ deb_scenarios() {
         'test "$(systemctl is-enabled openvox-ca.service 2>&1)" = masked'
     stopped "apt remove"
     ca_unchanged "after remove"
+    check "apt remove keeps ctl.yaml, as it keeps configuration" 'test -f /etc/openvox-ca/ctl.yaml'
 
     install_upgrade
     judge "reinstalling after remove succeeds"
@@ -476,6 +502,7 @@ deb_scenarios() {
     check "purge removes /etc/default/openvox-ca and unmasks the unit" \
         'test ! -e /etc/default/openvox-ca &&
          test "$(systemctl is-enabled openvox-ca.service 2>&1)" != masked'
+    check "purge removes ctl.yaml, and /etc/openvox-ca with it" 'test ! -e /etc/openvox-ca'
 
     # A purge that kept the CA makes the next install a takeover, by design:
     # dpkg has forgotten the package, so nothing says whose the CA is.
@@ -508,6 +535,8 @@ deb_scenarios() {
         'grep -x OPENVOX_CA_CERTNAME=named.example.test /etc/default/openvox-ca &&
          grep -x OPENVOX_CA_PUPPET_SERVER=named.example.test /etc/default/openvox-ca'
     environment named.example.test /etc/default/openvox-ca
+    check "ctl.yaml names the preseeded name" \
+        "grep -x 'server_url: https://named.example.test:8141' /etc/openvox-ca/ctl.yaml"
     check "debconf-communicate reads the preseeded answer back" \
         'echo "get openvox-ca/ca-name" | debconf-communicate openvox-ca | grep -x "0 named.example.test"'
     serves named.example.test
@@ -542,6 +571,7 @@ deb_scenarios() {
     check "systemctl enable --now adopts it" 'systemctl enable --now openvox-ca.service'
     ca_unchanged "after adoption"
     serves ca.example.test /root/placed-ca.pem
+    ctl_reaches ca.example.test
 
     # The other two takeover triggers, each on a first install. The first
     # purge removes the adopted CA so it cannot be the trigger; the second
@@ -579,6 +609,7 @@ localhost_fallback() {
     check "and the oneshot exited zero" \
         'test "$(systemctl show -p ExecMainStatus --value openvox-ca-first-boot)" = 0'
     serves localhost
+    check "a fallback name is not written into ctl.yaml" 'test ! -e /etc/openvox-ca/ctl.yaml'
 }
 
 # -- EL ----------------------------------------------------------------------
@@ -602,6 +633,7 @@ rpm_scenarios() {
         'grep -x OPENVOX_CA_CERTNAME=ca.example.test /etc/sysconfig/openvox-ca &&
          grep -x OPENVOX_CA_PUPPET_SERVER=ca.example.test /etc/sysconfig/openvox-ca'
     environment ca.example.test /etc/sysconfig/openvox-ca
+    ctl_reaches ca.example.test
     remember_ca
 
     # Once per host. A plain restart provisions nothing, so it only shows the
@@ -643,6 +675,8 @@ rpm_scenarios() {
     check "dnf remove disables both units, leaving no link behind" \
         'test -z "$(find /etc/systemd/system -mindepth 2 -name "openvox-ca*" -print)" &&
          ! systemctl cat openvox-ca.service openvox-ca-first-boot.service >/dev/null 2>&1'
+    check "dnf remove takes /usr/libexec/openvox-ca, and leaves ctl.yaml" \
+        'test ! -e /usr/libexec/openvox-ca && test -f /etc/openvox-ca/ctl.yaml'
 
     start localhost localhost
     install_first
@@ -651,6 +685,11 @@ rpm_scenarios() {
     localhost_fallback
     check "a fallback name is not recorded in /etc/sysconfig/openvox-ca" \
         'test ! -e /etc/sysconfig/openvox-ca'
+    # Nothing here that the package did not ship, so nothing should outlive it.
+    remove_pkg
+    judge "dnf remove succeeds"
+    check "dnf remove leaves neither /etc/openvox-ca nor /usr/libexec/openvox-ca behind" \
+        'test ! -e /etc/openvox-ca && test ! -e /usr/libexec/openvox-ca'
 
     start takeover ca.example.test
     place_ca "$SSL/ca"
@@ -663,6 +702,7 @@ rpm_scenarios() {
     check "systemctl enable --now adopts it" 'systemctl enable --now openvox-ca.service'
     ca_unchanged "after adoption"
     serves ca.example.test /root/placed-ca.pem
+    ctl_reaches ca.example.test
 }
 
 started=$SECONDS

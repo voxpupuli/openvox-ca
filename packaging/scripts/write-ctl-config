@@ -1,0 +1,235 @@
+#!/bin/sh
+#
+# Writes /etc/openvox-ca/ctl.yaml, so that the packaged openvox-ca-ctl reaches
+# the packaged server without flags (openvox-ca#639). Installed as
+# /usr/libexec/openvox-ca/write-ctl-config by both packages and run only by
+# openvox-ca-first-boot.service, as an ExecStartPost=+ -- as root and outside
+# the unit's sandbox, after first-boot has succeeded.
+#
+# Without it the CLI falls back to its built-in https://localhost:8140, which
+# is wrong three ways on a packaged host: the packages listen on 8141, the
+# serving certificate is issued for this host's name rather than localhost,
+# and the CA that issued it is in no system trust store.
+#
+# Root because /etc/openvox-ca is root's. first-boot runs as `puppet` under
+# ProtectSystem=strict and cannot write there, which is as it should be: the
+# file tells root's CLI which key to load, so `puppet` must not be able to
+# write it.
+#
+# It writes four settings, and only the first varies by host:
+#
+#   server_url   https://<name>:<port>, the name the serving certificate was
+#                issued for and the port the server listens on
+#   ca_cert      certs/ca.pem, provisioning's alias for the CA certificate
+#   client_cert  the serving-credential aliases, which name this host's node
+#   client_key   certificate -- a CA admin wherever the admin allow-list names
+#                it, which on a default install it does
+#
+# It writes the file only when all of these hold:
+#
+#   - first-boot left its marker in $RUNTIME_DIRECTORY. It does that only on a
+#     run that created the serving-credential link, and only when the name did
+#     not come from a fallback tier: the short hostname and localhost are
+#     failure states whose remedy is re-minting under a corrected name, and
+#     recording the wrong one here would leave the CLI pointing at it. The rule
+#     is record-environment's, so the two never record different names;
+#   - /etc/openvox-ca is a directory;
+#   - there is nothing at /etc/openvox-ca/ctl.yaml, not even a dangling link.
+#
+# So it is written once per provisioning and never rewritten. Unlike
+# record-environment it keeps no record of having written it: a deleted
+# ctl.yaml comes back on the next run that relinks the serving credential,
+# which is a re-mint, and a re-mint is exactly when a fresh one is wanted.
+# Nothing it writes outranks anything an operator set: the CLI's environment
+# variables and flags both outrank its configuration file.
+#
+# The file is not packaged, so neither format compares it on upgrade and it
+# never produces an .rpmnew or a conffile prompt. Removal leaves it, like
+# /etc/sysconfig/openvox-ca; a deb purge deletes it.
+#
+# Nothing here fails the unit. A non-zero ExecStartPost= fails
+# openvox-ca-first-boot.service, and the service with it, over a convenience
+# a working CA does not need; so every refusal is a warning and the exit
+# status is always 0.
+
+set -u
+
+warn() { echo "openvox-ca write-ctl-config: WARNING: $*" >&2; }
+info() { echo "openvox-ca write-ctl-config: $*" >&2; }
+
+# Overridable so a test can run this against a scratch tree, as
+# record-environment's are. The unit sets none of them.
+SSLDIR="${OPENVOX_CA_SSLDIR:-/etc/puppetlabs/puppet/ssl}"
+ETCDIR="${OPENVOX_CA_ETCDIR:-/etc/openvox-ca}"
+CONFIG="${OPENVOX_CA_CONFIG:-$ETCDIR/config.yaml}"
+TARGET="$ETCDIR/ctl.yaml"
+
+# The aliases first-boot maintains. ctl.yaml names the aliases rather than
+# the files they point at, so a re-mint that relinks them needs no edit here.
+SERVING_CERT="$SSLDIR/certs/openvox-ca-server.pem"
+SERVING_KEY="$SSLDIR/private_keys/openvox-ca-server.pem"
+CA_CERT="$SSLDIR/certs/ca.pem"
+
+# systemd sets RUNTIME_DIRECTORY from the unit's RuntimeDirectory=. Unset means
+# this was not started by the unit, so there is no run to act on.
+[ -n "${RUNTIME_DIRECTORY:-}" ] || exit 0
+MARKER="$RUNTIME_DIRECTORY/serving-credential-linked"
+{ [ -e "$MARKER" ] || [ -L "$MARKER" ]; } || exit 0
+
+if [ ! -d "$ETCDIR" ]; then
+	warn "$ETCDIR is not a directory; not writing $TARGET."
+	exit 0
+fi
+
+# Already there: the operator's, or an earlier run's. Either way it is left
+# exactly as it is.
+if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
+	info "$TARGET already exists; leaving it alone."
+	exit 0
+fi
+
+# The name comes from the link's own text and from nothing else, for the
+# reason record-environment gives: everything under $SSLDIR is writable by
+# `puppet`, and reading a file's content there as root would let `puppet`
+# choose what that content is. readlink opens nothing.
+if [ ! -L "$SERVING_CERT" ]; then
+	warn "$SERVING_CERT is not a symlink, so there is no name to write; not writing $TARGET."
+	exit 0
+fi
+target=$(readlink "$SERVING_CERT") || {
+	warn "could not read $SERVING_CERT; not writing $TARGET."
+	exit 0
+}
+name=${target%.pem}
+
+# The same allow-list first-boot and record-environment apply. The name lands
+# in a URL in a YAML file, and nothing that could end the scalar, start a
+# comment or name another host's path belongs in it.
+case "$target" in
+*.pem) ;;
+*) name= ;;
+esac
+case "$name" in
+"" | -* | . | .. | ca | openvox-ca-server) name= ;;
+*[!A-Za-z0-9._-]*) name= ;;
+esac
+if [ -z "$name" ]; then
+	warn "$SERVING_CERT does not point at a certificate first-boot would have linked; not" \
+		"writing $TARGET."
+	exit 0
+fi
+
+# The port, resolved as the server resolves it: the environment outranks the
+# configuration file, and the binary's 8140 applies when neither sets one.
+#
+# The environment comes from two places. The environment file is read by both
+# units, so a value from it is already here, and it outranks any Environment=
+# line: systemd lets an EnvironmentFile= value override the same variable set
+# by Environment=, wherever that line sits. A drop-in for openvox-ca.service
+# alone is not in this environment, so systemd is asked for the service's
+# Environment= lines, as record-environment asks it. There, OPENVOX_CA_PORT is
+# the port, and OPENVOX_CA_CONFIG points the service at a configuration file
+# whose port this cannot know, so it stops rather than write the wrong one --
+# as it does when systemd cannot be asked. Not seen, by decision rather than
+# oversight, for the reason record-environment gives: a drop-in's own
+# EnvironmentFile= and an ExecStart= override passing --port or --config.
+# docs/systemd.md says so.
+#
+# Only the plain form is read from the file -- `port: 8141`, as shipped. Any
+# other line that starts with the key is a value this cannot read, and writing
+# a guess would leave the CLI dialling the wrong port, so it stops instead. The
+# file is root's (0640 root:puppet in the package), so `puppet` cannot plant a
+# value here.
+port=
+if [ -n "${OPENVOX_CA_PORT:-}" ]; then
+	port=$OPENVOX_CA_PORT
+else
+	if ! command -v systemctl >/dev/null 2>&1; then
+		warn "systemctl is not on PATH, so whether openvox-ca.service sets its port in a drop-in" \
+			"cannot be checked; not writing $TARGET."
+		exit 0
+	fi
+	if ! env=$(systemctl show -p Environment openvox-ca.service 2>/dev/null); then
+		warn "could not ask systemd whether openvox-ca.service sets its port in a drop-in; not" \
+			"writing $TARGET."
+		exit 0
+	fi
+	# Word by word, with globbing off so a word is never expanded. systemd
+	# quotes an assignment whose value holds a space; a port never does, so a
+	# quoted one is a value this cannot read, and the number check below
+	# refuses it.
+	service_config=no
+	set -f
+	for word in ${env#Environment=}; do
+		case "$word" in
+		OPENVOX_CA_PORT=*) port=${word#OPENVOX_CA_PORT=} ;;
+		\"OPENVOX_CA_PORT=*) port=quoted ;;
+		OPENVOX_CA_CONFIG=* | \"OPENVOX_CA_CONFIG=*) service_config=yes ;;
+		esac
+	done
+	set +f
+	if [ -z "$port" ] && [ "$service_config" = yes ]; then
+		warn "openvox-ca.service reads its configuration from OPENVOX_CA_CONFIG, set in a drop-in," \
+			"so its port is not the one in $CONFIG; not writing $TARGET."
+		exit 0
+	fi
+fi
+if [ -n "$port" ]; then
+	:
+elif [ -e "$CONFIG" ] && [ ! -r "$CONFIG" ]; then
+	warn "cannot read $CONFIG to find the port; not writing $TARGET."
+	exit 0
+elif [ -f "$CONFIG" ]; then
+	port=$(sed -n 's/^port:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*\(#.*\)\{0,1\}$/\1/p' "$CONFIG" | tail -n 1)
+	if [ -z "$port" ] && grep -Eq '^port[[:space:]]*:' "$CONFIG"; then
+		warn "$CONFIG sets port in a form this script cannot read; not writing $TARGET." \
+			"Write it as a plain number -- port: 8141 -- or write $TARGET yourself."
+		exit 0
+	fi
+fi
+[ -n "$port" ] || port=8140
+case "$port" in
+*[!0-9]*)
+	warn "OPENVOX_CA_PORT is not a number; not writing $TARGET."
+	exit 0
+	;;
+esac
+
+# Written beside the target and hard-linked into place: ln refuses an existing
+# path, symlinks included, so nothing that appeared since the check above is
+# overwritten or followed, and the file is never visible half-written. 0644,
+# set on the temporary file this script has just created: it holds paths and
+# no secret, and the key it names stays readable by `puppet` alone, so the
+# mode decides nothing about who can authenticate with it.
+tmp=$(mktemp "$ETCDIR/.ctl.yaml.XXXXXX") || {
+	warn "could not create a temporary file in $ETCDIR; not writing $TARGET."
+	exit 0
+}
+{
+	printf '%s\n' \
+		"# Written by openvox-ca's first-boot provisioning, on the run that linked this" \
+		"# host's serving certificate, so that openvox-ca-ctl reaches this host's CA" \
+		"# without flags. It is not part of the package and is never rewritten: it is" \
+		"# yours to edit. Delete it and the next run that relinks the serving" \
+		"# certificate -- a re-mint -- writes a fresh one." \
+		"#" \
+		"# The client certificate is this host's node certificate, which can sign," \
+		"# revoke and clean while the server's admin allow-list names it -- as" \
+		"# provisioning arranges on a default install. Its key is readable by root and" \
+		"# puppet only, so run openvox-ca-ctl as root." \
+		"#" \
+		"# See /usr/share/doc/openvox-ca/docs/systemd.md." \
+		"server_url: https://$name:$port" \
+		"ca_cert: $CA_CERT" \
+		"client_cert: $SERVING_CERT" \
+		"client_key: $SERVING_KEY"
+} >"$tmp" && chmod 0644 "$tmp" && ln "$tmp" "$TARGET" 2>/dev/null
+written=$?
+rm -f "$tmp"
+if [ "$written" -eq 0 ]; then
+	info "wrote $TARGET for https://$name:$port"
+else
+	warn "could not write $TARGET. The CA serves without it; give openvox-ca-ctl" \
+		"--server-url, --ca-cert, --client-cert and --client-key instead."
+fi
+exit 0
