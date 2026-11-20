@@ -78,9 +78,15 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 - **Configuration reload:** `SIGHUP` (or `systemctl reload`) re-reads the TLS keypair and the admin allow list without dropping connections, so renewing the CA's server certificate or decommissioning a compile server needs no restart. See [reloading configuration](docs/configuration.md#reloading-configuration)
 - **systemd integration:** `Type=notify` readiness (`systemctl start` returns once the listener is actually accepting), a live status line covering the listener, CA expiry and CRL freshness, watchdog keep-alives, and `systemctl reload` for TLS certificate renewal and admin allow-list changes; ships a hardened unit, rendered per channel from [one template](https://github.com/voxpupuli/openvox-ca/blob/main/packaging/systemd/openvox-ca.service) — installed by the packages, and in every release tarball ready to use. See [running under systemd](docs/systemd.md)
 - **FIPS-compatible:** the core CA uses the standard library only (`crypto/x509`, `net/http`); no CGO by default; FIPS build available via `GOEXPERIMENT=boringcrypto` (the optional Kubernetes export and a managed certificate stored in a Secret add the `client-go` dependency)
-- **`openvox-ca-ctl`:** operator CLI matching `puppetserver ca` subcommands. See the [operator CLI reference](docs/operator-cli.md)
+- **`openvox-ca-ctl`:** operator CLI modelled on `puppetserver ca`; the [CLI command mapping](docs/migrating-from-puppet-server.md#cli-command-mapping) lists where it differs. See the [operator CLI reference](docs/operator-cli.md)
 
 ## Installation
+
+This README and `docs/` describe the `main` branch, which can be ahead of the
+newest release. The tarball download and checksum steps below work for every
+published release, v1.0.0-alpha1 included. For what a release's features do,
+read the docs at its tag: the files under
+`https://github.com/voxpupuli/openvox-ca/tree/v<version>/`.
 
 ### Container images (recommended)
 
@@ -105,11 +111,16 @@ SBOM pair per tarball, `checksums.txt`, and a signed provenance
 bundle (see [verifying what you downloaded](#verifying-what-you-downloaded)). Every archive
 contains both binaries (`openvox-ca`, `openvox-ca-ctl`) and the systemd unit
 `openvox-ca.service`. Asset names carry the release version, so set `VERSION` to the release you
-want (the newest is on the
-[releases page](https://github.com/voxpupuli/openvox-ca/releases/latest)) and download by tag:
+want and download by tag. The first command below asks the GitHub API for the newest
+release, pre-releases included, through the GitHub CLI, which must be signed in
+(`gh auth login`, or `GH_TOKEN` set) even though the repository is public; the second says so
+if that produced no version. Without the CLI, take a version from the
+[releases page](https://github.com/voxpupuli/openvox-ca/releases): its `latest` link skips
+pre-releases.
 
 ```console
-$ VERSION=0.9.0
+$ VERSION=$(gh api repos/voxpupuli/openvox-ca/releases --jq '([.[] | select(.draft | not)][0].tag_name // empty) | ltrimstr("v")')
+$ : "${VERSION:?no release found, or gh failed (see above); set VERSION by hand}"
 $ curl -fLO https://github.com/voxpupuli/openvox-ca/releases/download/v${VERSION}/openvox-ca_${VERSION}_linux_amd64.tar.gz
 $ curl -fLO https://github.com/voxpupuli/openvox-ca/releases/download/v${VERSION}/checksums.txt
 $ sha256sum --ignore-missing -c checksums.txt
@@ -122,6 +133,12 @@ before `1.0.0` in both `apt` and `dnf`. GitHub does not keep a `~` in an asset n
 published filename has a dot there instead, and that is the name `checksums.txt` lists:
 `openvox-ca_1.0.0.beta1-1_amd64.deb`, `openvox-ca-1.0.0.beta1-1.x86_64.rpm`. A final
 release has no tilde to replace: `openvox-ca_1.0.0-1_amd64.deb`.
+
+v1.0.0-alpha1 is the exception: its `checksums.txt` lists the packages under their tilde
+names, so `sha256sum -c` cannot find them. For that release, compare a package's hash with
+its line by hand. Later releases list the names they publish. Either way, check that
+`sha256sum` printed `OK` for the file you downloaded, because `--ignore-missing` skips a
+listed file it cannot find without saying so.
 
 See [running under systemd](docs/systemd.md) for the rest of a VM install.
 
@@ -269,8 +286,10 @@ $ cosign verify ghcr.io/voxpupuli/openvox-ca-charts/openvox-ca:${VERSION} \
 
 ### Building from source
 
-Requires [Mage](https://magefile.org/) and the Go release named by the `go`
-directive in [`go.mod`](go.mod), or newer. An older Go from 1.21 onwards fetches
+Requires the Go release named by the `go` directive in [`go.mod`](go.mod), or
+newer. The build runs on [Mage](https://magefile.org/), but installing it is
+optional: `go run mage.go <target>` runs any target with the version `go.mod`
+pins. An older Go from 1.21 onwards fetches
 that toolchain itself under its default `GOTOOLCHAIN=auto`; one before 1.21, or a
 distribution package that sets `GOTOOLCHAIN=local`, fails to build instead.
 
@@ -278,6 +297,8 @@ distribution package that sets `GOTOOLCHAIN=local`, fails to build instead.
 git clone https://github.com/voxpupuli/openvox-ca.git
 cd openvox-ca
 mage build:all      # → bin/openvox-ca and bin/openvox-ca-ctl
+# or, without mage installed:
+go run mage.go build:all
 ```
 
 Full build instructions (including the FIPS build) are in
@@ -320,12 +341,19 @@ certificate:
   --cadir /etc/puppetlabs/puppet/ssl/ca --host 127.0.0.1 --hostname puppet.example.com &
 PCA_PID=$!
 
-# Wait for it to serve: a cold cadir generates an RSA-4096 key first.
-for _ in $(seq 1 300); do
-  curl -sf http://127.0.0.1:8140/puppet-ca/v1/certificate/ca >/dev/null && break; sleep 1
-done
+# Wait for it to serve: a cold cadir generates an RSA-4096 key first. Stop
+# waiting if it exits instead, or is still not serving after five minutes.
+wait_for_ca() {
+  for _ in $(seq 1 300); do
+    curl -sf http://127.0.0.1:8140/puppet-ca/v1/certificate/ca >/dev/null && return 0
+    kill -0 "$PCA_PID" 2>/dev/null || { echo "openvox-ca has exited; see its output above" >&2; return 1; }
+    sleep 1
+  done
+  echo "openvox-ca is still not serving after 300 seconds" >&2
+  return 1
+}
 
-./bin/openvox-ca-ctl generate \
+wait_for_ca && ./bin/openvox-ca-ctl generate \
   --server-url http://127.0.0.1:8140 \
   --certname   puppet.example.com \
   --dns        puppet.example.com \
@@ -367,6 +395,46 @@ equivalents, or `serving_cert` — the server:
 
 The complete flag, environment-variable, and config-file reference is in
 [configuring the server](docs/configuration.md).
+
+### Submitting, listing and signing a request
+
+An agent submits its own certificate request on its first run, or with `puppet
+ssl bootstrap`. Without one to hand, OpenSSL and `curl` can stand in for it.
+Against the local demo above:
+
+```bash
+openssl req -new -newkey rsa:2048 -nodes -subj /CN=agent.example.com \
+  -keyout agent.example.com_key.pem -out agent.example.com_csr.pem
+curl -fsS -X PUT -H 'Content-Type: text/plain' --data-binary @agent.example.com_csr.pem \
+  http://127.0.0.1:8140/puppet-ca/v1/certificate_request/agent.example.com
+
+./bin/openvox-ca-ctl list --server-url http://127.0.0.1:8140
+./bin/openvox-ca-ctl sign --server-url http://127.0.0.1:8140 --certname agent.example.com
+./bin/openvox-ca-ctl list --server-url http://127.0.0.1:8140 --all
+```
+
+Every `openvox-ca-ctl` command here needs `--server-url`, because it defaults to
+`https://localhost:8140` and the demo speaks plain HTTP. `list` prints each
+name, quoted, beside its state: `"agent.example.com"  requested` before the
+`sign` and `"agent.example.com"  signed` after it.
+
+Against the HTTPS server, `openvox-ca-ctl` has to verify the server against the
+CA certificate and present an admin certificate. The serving certificate issued
+above is one, because that server names it in `--puppet-server`:
+
+```bash
+./bin/openvox-ca-ctl list \
+  --server-url  https://puppet.example.com:8140 \
+  --ca-cert     /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
+  --client-cert /etc/puppetlabs/puppet/ssl/ca/signed/puppet.example.com.pem \
+  --client-key  /etc/puppetlabs/puppet/ssl/ca/private/puppet.example.com_key.pem
+```
+
+`sign` takes the same four flags. Submitting a request needs no client
+certificate: add `--cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem` to the
+`curl` command and change its URL. To stop repeating the flags, set them in
+`/etc/openvox-ca/ctl.yaml` (see [configuration](docs/operator-cli.md#configuration)).
+The [operator CLI reference](docs/operator-cli.md) covers the other subcommands.
 
 ## Documentation
 

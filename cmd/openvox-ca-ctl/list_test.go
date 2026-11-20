@@ -88,4 +88,11 @@ var _ = Describe("list output escaping", func() {
 			To(Equal(strings.Index(lines[1], "requested")),
 				"states must start at the same column:\n%s", strings.Join(lines, "\n"))
 	})
+
+	It("says there is nothing to list, and succeeds, when the server returns none", func() {
+		// docs/operator-cli.md publishes this line and the exit status 0, so a
+		// script may branch on them.
+		respBody = `[]`
+		Expect(run()).To(Equal("(no certificates)\n"))
+	})
 })
