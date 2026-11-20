@@ -46,6 +46,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+
+	"github.com/voxpupuli/openvox-ca/internal/audit"
 )
 
 // InheritedFD is the file descriptor number used to pass the socketpair
@@ -160,7 +162,7 @@ func (s *Service) Sign(req *SignRequest, resp *SignResponse) error {
 	if err := checkSignRequest(req); err != nil {
 		// The frontend never builds such a request itself, so one arriving
 		// here means a frontend that is broken or no longer ours.
-		slog.Warn("Refused a signing request", "error", err)
+		slog.Warn("Refused a signing request", audit.Event(audit.SignerRequestRefused), "error", err)
 		return err
 	}
 	sig, err := s.key.Sign(rand.Reader, req.Digest, req.HashFunc)

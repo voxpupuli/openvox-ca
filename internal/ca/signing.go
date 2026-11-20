@@ -41,6 +41,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/voxpupuli/openvox-ca/internal/audit"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
@@ -1063,9 +1064,9 @@ func (c *CA) reissueLeafLocked(ctx context.Context, subject string, original *x5
 	}
 
 	// Record every authorisation grant this renewal carried, with
-	// the line GenerateWithOptions writes for a fresh one, so an operator
-	// alerting on it sees an administrator credential renewed as well as one
-	// minted. It matters most on a re-key, which puts the grant on a key this
+	// the audit record GenerateWithOptions writes for a fresh one
+	// (audit.CertificateAuthGrantIssued), so an operator alerting on it sees
+	// an administrator credential renewed as well as one minted. It matters most on a re-key, which puts the grant on a key this
 	// CA has never seen; the renewal attribute says which happened. Logged
 	// straight after issueLeafLocked, as GenerateWithOptions does, so nothing
 	// later can return early and lose it.
@@ -1077,6 +1078,7 @@ func (c *CA) reissueLeafLocked(ctx context.Context, subject string, original *x5
 	grants := AuthExtensionMap(carried)
 	for _, name := range slices.Sorted(maps.Keys(grants)) {
 		slog.Warn("Issued certificate carrying a Puppet authorisation extension",
+			audit.Event(audit.CertificateAuthGrantIssued),
 			"subject", subject, "grant", name+"="+grants[name], "renewal", renewal)
 	}
 	return certPEM, nil
