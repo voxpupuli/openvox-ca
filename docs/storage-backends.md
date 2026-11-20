@@ -68,10 +68,14 @@ This is a property of the backend's locking rather than of its name. The HA
 backends — `etcd`, `redis`, `postgres` and `mysql` — coordinate writers across
 processes *and* hosts, so on those you may run as many instances as you like, on
 as many machines as you like, and the one-instance rule does not apply to them.
-A command that reaches storage directly still needs every replica stopped there,
-and nothing detects one that is running; on those backends that means `migrate`,
-since `setup` and `import` take a filesystem cadir only (see [migrating between
-backends](#migrating-between-backends)). A future backend inherits whichever
+Of the `openvox-ca-ctl` commands that reach storage directly, only `migrate` can
+reach these backends (`setup` and `import` take a filesystem cadir only), and it
+still needs every replica stopped, since nothing detects one that is running
+(see [migrating between backends](#migrating-between-backends)). The offline
+`openvox-ca` subcommands each say whether they are safe beside running
+replicas: offline `generate` is, and `rebuild-inventory-hmac --yes-re-bless` is
+not; see [running alongside a live
+server](operator-cli.md#running-alongside-a-live-server). A future backend inherits whichever
 behaviour its locking earns it.
 
 ### Why only one

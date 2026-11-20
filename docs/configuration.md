@@ -213,7 +213,7 @@ revoke_on_auto_renew: true      # false matches OpenVox Server's Clojure CA (no 
 # revokes it once the overlap window elapses, so both verify in the meantime and
 # relying parties can pick up the replacement without a gap. The window is a
 # deliberate weakening and it is on by default — read "Delayed supersession"
-# below, and set 0 for the earlier behaviour of revoking inside the call.
+# below, and set 0 to revoke the predecessor inside the renewal call instead.
 superseded_cert_revoke_after_sec: -1   # overlap window; 0 = revoke inside the renewal; -1/unset = 24h
 superseded_cert_sweep_interval_sec: 0  # how often the sweep runs; 0 = built-in default (15m)
 
@@ -1049,12 +1049,11 @@ does not hold is answered `unknown` — before the CRL is consulted at all — s
 the index decides whether the responder will speak about a certificate, and the
 CRL decides what it says.
 
-Like the CRL cache, that index was loaded once at startup and afterwards only
-recorded this process's own issuances. On the shared backends that meant a
-replica answered `unknown` for every certificate one of its peers had signed,
-indefinitely: the certificate is valid, the inventory row is in shared storage,
-and only a restart made the replica see it. `ocsp_index_sync_interval_sec`
-closes that. Each replica re-reads the inventory on the interval and adds what
+Like the CRL cache, that index is built at startup, and a process adds only its
+own issuances to it. On the shared backends a replica would therefore answer
+`unknown` for every certificate one of its peers signed until it restarted: the
+certificate is valid and the inventory row is in shared storage.
+`ocsp_index_sync_interval_sec` closes that. Each replica re-reads the inventory on the interval and adds what
 it does not already hold, so the interval is the worst-case window in which a
 newly issued certificate is reported as unrecognised elsewhere in the fleet.
 The default is five minutes — longer than the CRL sync's minute because the
