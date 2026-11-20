@@ -649,6 +649,25 @@ func plainHTTPGenerateNotice(cfg *serverConfig, tlsConfigured bool) string {
 		"returns private keys in cleartext, without client authentication, to any caller that can reach the listener"
 }
 
+// plainHTTPAdminNotice is the startup warning that the admin API is open to
+// anyone while TLS is off: the authorisation middleware is only installed with
+// TLS, so sign, revoke and clean answer any caller that reaches the listener.
+// The same on loopback, because there it is any local process instead. It
+// also says so when the admin allow list is set, which has nothing to check
+// without client certificates. Empty when TLS is configured.
+func plainHTTPAdminNotice(cfg *serverConfig, tlsConfigured bool) string {
+	if tlsConfigured {
+		return ""
+	}
+	msg := "TLS is not configured, so the admin API is unauthenticated: any process that can reach " +
+		"the listener can sign, revoke and clean certificates. Configure tls_cert/tls_key or " +
+		"serving_cert to require client certificates."
+	if cfg.PuppetServer != "" || cfg.PuppetServerFile != "" {
+		msg += " --puppet-server / --puppet-server-file have no effect without TLS."
+	}
+	return msg
+}
+
 // ocspURLWithoutResponderNotice is the startup warning for an ocsp_url set
 // while enable_ocsp is not. Issued certificates then advertise a responder this
 // server does not serve, which is right when the URL names one elsewhere and a
@@ -1378,9 +1397,8 @@ func newRootCmd() *cobra.Command {
 			if msg := ocspURLWithoutResponderNotice(cfg); msg != "" {
 				slog.Warn(msg, "ocsp_url", cfg.OCSPUrl)
 			}
-			if !tlsConfigured && (cfg.PuppetServer != "" || cfg.PuppetServerFile != "") {
-				slog.Warn("--puppet-server / --puppet-server-file have no effect without TLS; " +
-					"all endpoints are accessible without authentication in plain HTTP mode.")
+			if msg := plainHTTPAdminNotice(cfg, tlsConfigured); msg != "" {
+				slog.Warn(msg)
 			}
 			// The sweep's interval is added to every overlap window in the worst
 			// case, because a certificate becomes due between two passes and is
