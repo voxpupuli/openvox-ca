@@ -16,6 +16,48 @@ refuses to publish a tag that does not equal `"v" + Version`. Between releases
 the constant carries a `-dev` suffix, so a stray tag on an unprepared commit
 fails the gate instead of shipping mislabelled artefacts.
 
+## What the version number promises
+
+From 1.0.0, openvox-ca follows [semantic versioning](https://semver.org/).
+Semver measures every release against a declared public API: a change that
+breaks it needs a new major version, a backwards-compatible addition a new
+minor, and a fix that does neither a new patch. Until 1.0.0 is tagged nothing
+is promised, and a breaking change can land in any release.
+
+The public API is what an operator, or a tool an operator runs, builds on:
+
+1. **The HTTP API.** Every route, its request and response formats and its
+   status codes, as [the API reference](../api.md) documents them.
+2. **Both command lines.** The subcommands, flags and exit statuses of
+   `openvox-ca` and `openvox-ca-ctl`.
+3. **Configuration.** Every key in `config.yaml` and `ctl.yaml`, and every
+   `OPENVOX_CA_*` and `OPENVOX_CA_CTL_*` environment variable, with the meaning
+   of its value.
+4. **Storage layout and formats.** What each backend stores and where, so that
+   a store one 1.x release wrote is one every later 1.x release reads.
+5. **Metrics.** The name and label set of every `openvoxca_*` series.
+6. **The mixin's alert names.** Routing and silences are keyed on them.
+7. **The Helm chart's values.**
+8. **Image tags and paths.** The tag scheme, the image names, and the paths in
+   the image an operator mounts or configures.
+9. **Structured log field names**, such as `client.cn`, because log-based
+   alerts and SIEM rules select on them.
+
+Not covered, so free to change in a minor or patch release:
+
+- **Log message text, and the order of fields in a record.** Key an alert on
+  a field rather than on the wording of a message.
+- **Go packages.** Every package another module could import is under
+  `internal/`, which the Go toolchain refuses to let it import; the rest are
+  commands and test tools.
+- **The mixin's alert thresholds and durations.** They are tuning, and an
+  override in your own Prometheus rules outlives a change to them.
+- **The default value of a tunable.** A default moves when a better one is
+  found. A value you set keeps its meaning.
+
+[AGENTS.md's compatibility contracts](../../AGENTS.md#compatibility-contracts-do-not-rename)
+are a subset of this list: the names that must not be rebranded.
+
 ## What a release produces
 
 | Artefact | Produced by | Where it lands |
