@@ -453,7 +453,7 @@ func (s *StorageService) SerialExists(ctx context.Context, serial string) (bool,
 // serial reaching this method was typed by an operator, who may reasonably
 // write it in the lowercase, zero-padded or colon-free form some other tool
 // printed. Normalising here is also what lets a modern random serial and a
-// zero-padded sequential one from an older inventory be looked up the same way.
+// zero-padded sequential one be looked up the same way.
 //
 // Integrity matches LatestSerialForSubject, the by-subject lookup this is the
 // twin of: on a blob backend the HMAC is verified before the scan, so an
@@ -478,14 +478,14 @@ func (s *StorageService) SerialExists(ctx context.Context, serial string) (bool,
 // The scan is linear in the inventory. An indexed by-serial lookup is NOT
 // available even on backends that have the index: the schema's unique index on
 // serial is an exact-match index over the stored text, while this lookup must
-// match on the normalised value whatever rendering a row's text holds:
-// zero-padded, as OpenVox Server writes its inventory, or canonical (see
-// readSerialIndex's comment in internal/ca/ocsp.go). An indexed
-// exact match would silently miss precisely the historical certificates most
-// likely to need retiring. A fast path that tried the canonical rendering first
+// match on the normalised value, and a structured row's text is not guaranteed
+// canonical: canonicalInventoryLine renders the serial exactly as the writer
+// passed it. An indexed exact match would silently miss a certificate whose row
+// holds another rendering. A fast path that tried the canonical rendering first
 // and fell back to this scan would be sound; it is deliberately left for later,
 // since this answers an operator-initiated single revocation rather than a hot
-// path, and on blob backends the verification above reads everything regardless.
+// path, and on blob backends the verification above reads everything
+// regardless.
 func (s *StorageService) SubjectForSerial(ctx context.Context, serial string) (string, error) {
 	want, err := NormaliseSerial(serial)
 	if err != nil {
@@ -2014,10 +2014,11 @@ func (s *StorageService) verifyInventoryHMACLocked(ctx context.Context, hmacKey 
 	if !hmac.Equal(storedMAC, computedMAC) {
 		// Name the integrity scheme we computed under. A mismatch usually means
 		// genuine tampering, but it also fires when a backend is served under a
-		// different scheme than the stored value was written with (e.g. a
-		// ca_key_file/ca_cert_file server on a build before the InventoryStore
-		// unwrap fix stored a whole-blob HMAC over what is now read as a hash
-		// chain). Surfacing the scheme lets an operator tell the two apart.
+		// different scheme than the stored value was written with. The one known
+		// way to get there is a ca_key_file/ca_cert_file server on a build of
+		// main from before v1.0.0-alpha1, which stored a whole-blob HMAC over
+		// what is now read as a hash chain. Surfacing the scheme lets an operator
+		// tell the two apart.
 		scheme := s.inventoryScheme()
 		slog.Warn("inventory HMAC mismatch; integrity check failed", "scheme", scheme,
 			"repair", inventoryRepairHint)

@@ -769,9 +769,8 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			// behaviour had regressed, and none of them would fail if the
 			// record named the wrong directory in the right words. What matters
 			// is which directory is named and that the mtime is carried -- the
-			// doc gives the mtime as what separates a live holder from a
-			// leftover, so omitting it sends the operator to stat a path this
-			// already stat'd.
+			// doc gives the mtime as what points at a live holder, so omitting
+			// it sends the operator to stat a path this already stat'd.
 			Expect(buf.String()).To(ContainSubstring("stranded="+legacy),
 				"the attribute naming the directory left behind")
 			inUse, ok := lockDirOf("file:" + link)
@@ -804,7 +803,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			Expect(os.WriteFile(dbPath, nil, 0o600)).To(Succeed(), "seed the database")
 			inUse, ok := lockDirOf("file:" + dbPath)
 			Expect(ok).To(BeTrue(), "lock directory")
-			Expect(os.Mkdir(inUse, 0o700)).To(Succeed(), "the one this version uses")
+			Expect(os.Mkdir(inUse, 0o700)).To(Succeed(), "the one this code uses")
 
 			viaAlias := filepath.Join(alias, "ca.db")
 			Expect(filepath.Join(alias, ".ca.db.locks")).NotTo(Equal(inUse),
@@ -827,7 +826,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			Expect(os.WriteFile(dbPath, nil, 0o600)).To(Succeed(), "seed the database")
 			dir, ok := lockDirOf("file:" + dbPath)
 			Expect(ok).To(BeTrue(), "lock directory")
-			Expect(os.Mkdir(dir, 0o700)).To(Succeed(), "the one this version uses")
+			Expect(os.Mkdir(dir, 0o700)).To(Succeed(), "the one this code uses")
 
 			buf := captureWarnings()
 			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})

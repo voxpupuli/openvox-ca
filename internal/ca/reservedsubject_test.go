@@ -32,8 +32,8 @@ import (
 
 // The subject "ca" would have its generated key written to private/ca_key.pem,
 // which is the CA key itself in a cadir that keeps it there, and the CA key's
-// legacy location in any other (#495). Every path that generates a
-// key refuses it; submitting a CSR for it does not.
+// legacy location in any other (#495). Every path that generates a key refuses
+// it; submitting a CSR for it does not.
 var _ = Describe("Generating a key for the subject \"ca\"", func() {
 	var (
 		ctx   = context.Background()

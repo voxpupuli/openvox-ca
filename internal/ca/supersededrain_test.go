@@ -52,12 +52,13 @@ import (
 // that one after the fact; this one states the invariant it violated.
 // recordSuperseded is what makes the stored form canonical. Its two callers
 // disagree: AutoRenew passes serialHexStr of the presented certificate, already
-// canonical, while Renew passes LatestSerialForSubject, which returns inventory
-// text verbatim — and a migrated or older inventory carries zero-padded
-// serials. Only a white-box call can feed it a genuinely non-canonical value:
-// a spec driving Renew against a fresh store cannot, because that store's
-// inventory is already canonical, which is precisely how a spec written that
-// way passes whether or not the canonicalisation exists.
+// canonical, while Renew passes LatestSerialForSubject, whose form depends on
+// the backend: a structured backend returns the row's text as stored, which
+// nothing guarantees is canonical. Only a white-box call can feed it a
+// genuinely non-canonical value: a spec driving Renew against a fresh store
+// cannot, because that store's inventory is already canonical, which is
+// precisely how a spec written that way passes whether or not the
+// canonicalisation exists.
 var _ = Describe("recordSuperseded", func() {
 	var (
 		ctx   context.Context

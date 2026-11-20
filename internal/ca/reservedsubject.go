@@ -24,8 +24,8 @@ import "errors"
 // <cadir>/private/S_key.pem whatever the storage backend, so the key for "ca"
 // would land on private/ca_key.pem. On the filesystem backend that is the CA
 // key itself in a cadir that keeps it there, and the CA key's legacy location
-// in any other, where the backend then refuses to start on two
-// different CA keys (#495). No other backend reads that file.
+// in any other, where the backend then refuses to start on two different CA
+// keys (#495). No other backend reads that file.
 const reservedKeySubject = "ca"
 
 // ErrReservedSubject is returned by every path that generates a private key

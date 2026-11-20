@@ -31,9 +31,9 @@ import (
 // AIX and Solaris, where it is not declared and this file would not build.
 // Everything outside the list gets filelock_other.go, which reports the
 // capability as unsupported and leaves WithLock on the process-local mutex.
-// Only Linux is a supported deployment
-// target (see the build targets in magefile.go); darwin and the BSDs are here
-// so a contributor's workstation behaves the same way CI does.
+// Only Linux is a supported deployment target (see the build targets in
+// magefile.go); darwin and the BSDs are here so a contributor's workstation
+// behaves the same way CI does.
 
 // fileLockingSupported reports that this platform has flock(2).
 const fileLockingSupported = true
