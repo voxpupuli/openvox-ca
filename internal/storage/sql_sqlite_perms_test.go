@@ -788,11 +788,16 @@ var _ = Describe("SQLiteFilePermissions", func() {
 
 			// Pins for the advice, because an operator-facing remedy that
 			// silently disappears is its own regression: how the operator finds
-			// the holder, that the record may be stale, and what to do about it.
+			// the holder, that the record may be stale or absent, and what to do
+			// about it.
 			Expect(buf.String()).To(ContainSubstring("find it from the holder record"),
 				"how the operator finds the process")
 			Expect(buf.String()).To(ContainSubstring("the record outlives its process"),
 				"that the record may name a process that has exited")
+			Expect(buf.String()).To(ContainSubstring("wrote no record"),
+				"that an older build left no record to find")
+			Expect(buf.String()).To(ContainSubstring("not this instance"),
+				"that the search must leave the warning instance alone")
 			Expect(buf.String()).To(ContainSubstring("stop it, then remove the stranded directory"),
 				"what the operator has to do about it")
 		})
