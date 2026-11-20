@@ -31,9 +31,10 @@ Despite being a blob, the inventory is only ever used four ways:
    (`StorageService.SubjectForSerial`) — a full scan on **every** backend,
    including `InventoryStore` ones. The unique index on `serial` cannot serve
    it: that index is an exact match over the stored text, while this lookup
-   matches on the normalised value, because an inventory migrated from Puppet
-   Server carries zero-padded sequential serials. An indexed exact match would miss exactly the historical
-   certificates most likely to need retiring. A canonical-first fast path with
+   matches on the normalised value, and a row's text is not guaranteed
+   canonical, because the serial is stored exactly as the writer passed it. An
+   indexed exact match would miss a certificate whose row holds another
+   rendering. A canonical-first fast path with
    fallback to the scan would be sound and is noted as future work in
    `SubjectForSerial`'s own comment.
 
