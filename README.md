@@ -308,10 +308,16 @@ Full build instructions (including the FIPS build) are in
 
 ## Quick start
 
+These commands keep the demo CA in `ca-demo` under the current directory, so
+they run as an ordinary user. A real deployment's CA directory is usually OpenVox
+Server's, `/etc/puppetlabs/puppet/ssl/ca`, which only root and the `puppet` user
+can write: see [running under systemd](docs/systemd.md) and the [migration
+guide](docs/migrating-from-puppet-server.md).
+
 ### Local demo: plain HTTP on loopback, auto-bootstrap CA
 
 ```bash
-./bin/openvox-ca --cadir /etc/puppetlabs/puppet/ssl/ca --host 127.0.0.1 --hostname puppet.example.com
+./bin/openvox-ca --cadir "$PWD/ca-demo" --host 127.0.0.1 --hostname puppet.example.com
 ```
 
 On first run the server bootstraps a new CA under `--cadir` and begins serving
@@ -328,9 +334,9 @@ saying so at every start.
 
 ```bash
 ./bin/openvox-ca \
-  --cadir /etc/puppetlabs/puppet/ssl/ca \
-  --tls-cert /etc/puppetlabs/puppet/ssl/ca/signed/puppet.example.com.pem \
-  --tls-key  /etc/puppetlabs/puppet/ssl/ca/private/puppet.example.com_key.pem \
+  --cadir "$PWD/ca-demo" \
+  --tls-cert "$PWD/ca-demo/signed/puppet.example.com.pem" \
+  --tls-key  "$PWD/ca-demo/private/puppet.example.com_key.pem" \
   --puppet-server puppet.example.com
 ```
 
@@ -344,7 +350,7 @@ certificate:
 ```bash
 # Stop any CA already listening on 8140 first, or this one cannot bind.
 ./bin/openvox-ca --tls-cert= --tls-key= --insecure-allow-plain-http-generate \
-  --cadir /etc/puppetlabs/puppet/ssl/ca --host 127.0.0.1 --hostname puppet.example.com &
+  --cadir "$PWD/ca-demo" --host 127.0.0.1 --hostname puppet.example.com &
 PCA_PID=$!
 
 # Wait for it to serve: a cold cadir generates an RSA-4096 key first. Stop
@@ -363,7 +369,7 @@ wait_for_ca && ./bin/openvox-ca-ctl generate \
   --server-url http://127.0.0.1:8140 \
   --certname   puppet.example.com \
   --dns        puppet.example.com \
-  --out-dir    /etc/puppetlabs/puppet/ssl/ca/private
+  --out-dir    "$PWD/ca-demo/private"
 
 kill $PCA_PID; wait $PCA_PID 2>/dev/null
 ```
@@ -431,13 +437,13 @@ above is one, because that server names it in `--puppet-server`:
 ```bash
 ./bin/openvox-ca-ctl list \
   --server-url  https://puppet.example.com:8140 \
-  --ca-cert     /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
-  --client-cert /etc/puppetlabs/puppet/ssl/ca/signed/puppet.example.com.pem \
-  --client-key  /etc/puppetlabs/puppet/ssl/ca/private/puppet.example.com_key.pem
+  --ca-cert     "$PWD/ca-demo/ca_crt.pem" \
+  --client-cert "$PWD/ca-demo/signed/puppet.example.com.pem" \
+  --client-key  "$PWD/ca-demo/private/puppet.example.com_key.pem"
 ```
 
 `sign` takes the same four flags. Submitting a request needs no client
-certificate: add `--cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem` to the
+certificate: add `--cacert "$PWD/ca-demo/ca_crt.pem"` to the
 `curl` command and change its URL. To stop repeating the flags, set them in
 `/etc/openvox-ca/ctl.yaml` (see [configuration](docs/operator-cli.md#configuration)).
 The [operator CLI reference](docs/operator-cli.md) covers the other subcommands.
