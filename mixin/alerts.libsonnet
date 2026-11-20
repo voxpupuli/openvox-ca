@@ -167,10 +167,23 @@
         rules: [
           {
             alert: 'OpenVoxCACertificateExpiringSoon',
+            // The expiry series carries no common_name; the info series beside
+            // it does, and is published from the same in-memory certificate,
+            // so the join cannot drop an alert the expiry alone would raise.
+            // Without it the description rendered "The CA certificate ()".
+            // ignoring() rather than on(job, instance): it matches on every
+            // label the two series share, whatever the scrape adds (cluster,
+            // namespace, pod), so a ruler that sees two targets with one job
+            // and instance still evaluates the rule instead of refusing the
+            // join as many-to-many.
             expr: |||
-              openvoxca_ca_certificate_not_after_timestamp_seconds{%(selector)s} - time() < %(warn)d
-              and
-              openvoxca_ca_certificate_not_after_timestamp_seconds{%(selector)s} - time() >= %(crit)d
+              (
+                openvoxca_ca_certificate_not_after_timestamp_seconds{%(selector)s} - time() < %(warn)d
+                and
+                openvoxca_ca_certificate_not_after_timestamp_seconds{%(selector)s} - time() >= %(crit)d
+              )
+              * ignoring(common_name, serial, issuer) group_left(common_name)
+              openvoxca_ca_certificate_info{%(selector)s}
             ||| % {
               selector: $._config.openvoxCASelector,
               warn: $._config.caExpiryWarningSeconds,
@@ -185,7 +198,14 @@
           },
           {
             alert: 'OpenVoxCACertificateExpiringCritical',
-            expr: 'openvoxca_ca_certificate_not_after_timestamp_seconds{%(selector)s} - time() < %(crit)d' % {
+            // Joined to the info series for common_name, as above.
+            expr: |||
+              (
+                openvoxca_ca_certificate_not_after_timestamp_seconds{%(selector)s} - time() < %(crit)d
+              )
+              * ignoring(common_name, serial, issuer) group_left(common_name)
+              openvoxca_ca_certificate_info{%(selector)s}
+            ||| % {
               selector: $._config.openvoxCASelector,
               crit: $._config.caExpiryCriticalSeconds,
             },
