@@ -454,7 +454,8 @@ published names, which existing deployments are bound to just as firmly:
 These are the names; the whole public API that semantic versioning covers from
 1.0.0 is declared in
 [releasing.md](docs/development/releasing.md#what-the-version-number-promises).
-From 1.0.0, a breaking change to anything listed there needs a new major version.
+From 1.0.0, a breaking change to anything listed there needs a new major version,
+except as its security-fix reservation allows.
 
 ## Helm chart
 

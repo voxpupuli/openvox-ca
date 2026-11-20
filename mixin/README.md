@@ -191,8 +191,12 @@ waiting to be noticed in an alertmanager that never fires. It skips with a messa
 Vendor the mixin with [jsonnet-bundler](https://github.com/jsonnet-bundler/jsonnet-bundler):
 
 ```sh
-jb install https://github.com/voxpupuli/openvox-ca/mixin@main
+jb install https://github.com/voxpupuli/openvox-ca/mixin@v<version>
 ```
+
+Pin a release tag. `@main` tracks unreleased changes, and the alert names and
+`_config` keys are [promised](../docs/development/releasing.md#what-the-version-number-promises)
+only as published at a release tag.
 
 Then combine it with your overrides:
 

@@ -42,43 +42,64 @@ The public API is what an operator, or a tool an operator runs, builds on:
    `OPENVOX_CA_*` and `OPENVOX_CA_CTL_*` environment variable, the meaning of
    each value, and where the files are read from by default:
    `/etc/openvox-ca/config.yaml` and `/etc/openvox-ca/ctl.yaml`.
-4. **Storage layout, formats and the cross-replica protocol.** What each
+4. **Storage layout, formats and the cross-replica lock protocol.** What each
    backend stores and where, so that a store one 1.x release wrote is one every
    later 1.x release reads; and the lock names and key derivation replicas
-   coordinate through, so that replicas of two 1.x releases can share a store
-   during a rolling upgrade.
-5. **Metrics.** The name and label set of every `openvoxca_*` series.
+   coordinate through, which change only in a major release, so replicas of two
+   1.x releases never fail to exclude one another. A release that must reach
+   every replica before a feature is turned on says so in its release notes.
+5. **Metrics.** The name and label names of every `openvoxca_*` series, and the
+   label values the shipped alerts or the documentation filter on, such as
+   `reason="tampered"` and the `state` values. Renaming or removing such a value
+   is a breaking change; adding one is not.
 6. **The monitoring mixin's alert names and `_config` keys.** Routing and
    silences are keyed on the alert names, and an override is keyed on the
    `_config` key names (`openvoxCASelector`, `caExpiryWarningSeconds` and the
    rest): a renamed key would leave an override silently doing nothing. These
    promises apply to the mixin as published at a release tag.
-7. **The Helm chart's values.**
-8. **Install paths and names.** The image tags and names and the paths in an
-   image an operator mounts or configures; for the packages and tarballs, the
-   systemd unit names (`openvox-ca.service`, `openvox-ca-first-boot.service`)
-   and the binary paths.
-9. **Structured log field names**, such as `client.cn` and `client.domain`,
-   because log-based alerts and SIEM rules select on them; and the message text
-   of the records the documentation tells you to alert on: `Issued certificate
-   carrying a Puppet authorisation extension` and `High rate of destructive
-   operations detected`.
+7. **The Helm chart.** Its values, its OCI reference
+   (`ghcr.io/voxpupuli/openvox-ca-charts/openvox-ca`), and what `helm upgrade`
+   depends on: the names of the objects it renders, the PersistentVolumeClaim
+   and the Service included, and the Deployment's selector labels.
+8. **Install paths, names and identities.** For the images: the tag scheme and
+   image names, the paths an operator mounts or configures, and the UID they
+   run as (65532). For the packages: the systemd units (`openvox-ca.service`,
+   `openvox-ca-first-boot.service`), the binaries under `/usr/bin`, the
+   environment files (`/etc/sysconfig/openvox-ca` on EL, `/etc/default/openvox-ca`
+   on Debian), the debconf question names and defaults (`openvox-ca/ca-name`,
+   `openvox-ca/purge_ca_data`), the `puppet` service account and the packaged CA
+   directory, `/etc/puppetlabs/puppet/ssl/ca`. For the tarballs:
+   `openvox-ca.service` and the `/usr/local/bin` path its `ExecStart` names.
+9. **Logs.** Structured field names, such as `client.cn` and `client.domain`;
+   the field values the documentation tells you to match on, such as
+   `reason="route requires admin access"`, the three shapes of `client.domain`
+   and the `renewal` values; and the message text of every record the
+   documentation tells you to alert on. Those are currently `Issued certificate
+   carrying a Puppet authorisation extension`, `High rate of destructive
+   operations detected` and `Refused a signing request`.
 
 Not covered, so free to change in a minor or patch release:
 
 - **Any other log message text, and the order of fields in a record.** Key an
   alert on a field rather than on the wording of a message.
+- **The HTTP fine print:** error-body wording, response headers other than
+  `Content-Type`, and the order of `certificate_statuses`, the same things the
+  [Puppet-parity contract](../api.md#differences-from-openvox-server) leaves out.
 - **Go packages.** Every package another module could import is under
   `internal/`, which the Go toolchain refuses to let it import; the rest are
   commands and test tools.
 - **The mixin's alert thresholds and durations.** They are tuning. Override
   them through the mixin's `_config`, whose key names are covered above.
-- **The default value of a performance or capacity setting**: an interval, a
-  size, a timeout or a budget. Such a default moves when a better one is found,
-  and a value you set keeps its meaning. A default that grants access, accepts
-  input or relaxes a refusal is covered, and changes only in a major release:
-  `allow_public_status`, `client_revocation_policy`, `allow_subject_alt_names`
-  and the `insecure_*` settings, for example.
+- **The default of a performance or capacity setting**: a refresh or sync
+  interval, a cache or memory size, a timeout or a concurrency budget. Such a
+  default moves when a better one is found, and a value you set keeps its
+  meaning. Every other default is covered and changes only in a major release:
+  one that grants access, accepts input or relaxes a refusal
+  (`allow_public_status`, `client_revocation_policy`, `allow_subject_alt_names`,
+  the `insecure_*` settings), and one that sets how strong a key is or how long
+  a credential or revocation is trusted (key sizes and algorithms, certificate
+  and CRL validity, `superseded_cert_revoke_after_sec`, rate limits that refuse
+  requests).
 
 One reservation. A fix for a security vulnerability may break the public API
 in a minor or patch release when there is no compatible way to fix it, for
