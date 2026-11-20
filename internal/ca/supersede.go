@@ -566,13 +566,14 @@ type drainOutcome struct {
 // survives is handed to the batch.
 //
 // Canonicalisation is storage.NormaliseSerial, the same validator
-// recordSuperseded writes the list through, rather than a bare big.Int parse.
-// Inventory serials are not canonical — a store migrated from Puppet carries
-// zero-padded ones — so "000ABC" and "ABC" are one certificate, and comparing
-// them raw is how a duplicate slips into a batch that appends its entries in
-// one go. NormaliseSerial is also stricter than the parse it replaces, in the
-// two directions that make the pending list and the CRL agree: it accepts a
-// serial with surrounding whitespace, which recordSuperseded already stores
+// recordSuperseded writes the list through, rather than a bare big.Int parse. A
+// serial can reach the batch in a non-canonical spelling — a structured backend
+// returns a row's text as stored, and nothing guarantees that text is canonical
+// — so "000ABC" and "ABC" are one certificate, and comparing them raw is how a
+// duplicate slips into a batch that appends its entries in one go.
+// NormaliseSerial is also stricter than the parse it replaces, in the two
+// directions that make the pending list and the CRL agree: it accepts a serial
+// with surrounding whitespace, which recordSuperseded already stores
 // canonically and which the old check discarded outright, and it rejects a
 // negative one, which the old check handed on as revocable although no
 // certificate can carry it.

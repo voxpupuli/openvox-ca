@@ -940,7 +940,7 @@ func (b *EtcdBackend) decomposeLegacyInventory(ctx context.Context) error {
 			if !recordsArePrefixOf(state.entries, recs) {
 				return fmt.Errorf("etcd inventory holds both a non-empty legacy blob and decomposed entries that do not match it; " +
 					"this usually means a replica still writing the legacy blob format appended to it after another replica converted it. " +
-					"Refusing to guess: stop every replica still writing the legacy format first. The blob then usually holds only issuances made after the conversion, so deleting either inventory/data or inventory/entries/ loses records; reconcile them under the key prefix by hand, or restore from a snapshot taken before the conversion")
+					"Refusing to guess: stop every replica still writing the legacy format first. The blob then usually holds only issuances made after the conversion, so deleting either inventory/data or inventory/entries/ loses records; reconcile them under the key prefix by hand, or restore from a snapshot taken before the conversion, which also rolls back the CRL, so re-revoke every certificate revoked since it was taken")
 			}
 			slog.Info("Resuming interrupted etcd inventory decomposition", "imported", len(state.entries), "total", len(recs))
 		}

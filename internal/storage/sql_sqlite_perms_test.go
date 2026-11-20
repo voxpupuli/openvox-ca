@@ -745,7 +745,12 @@ var _ = Describe("SQLiteFilePermissions", func() {
 
 			Expect(buf.String()).To(ContainSubstring(".ca%20b.db.locks"),
 				"the directory beside the escaped spelling must be named")
-			// The advice has to hold for this branch too: no symlink is involved.
+			// No symlink is involved on this branch, so neither the diagnosis
+			// nor the advice may describe one.
+			Expect(buf.String()).To(ContainSubstring("resolved, decoded database path"),
+				"a diagnosis that holds without a symlink")
+			Expect(buf.String()).NotTo(ContainSubstring("symlink"),
+				"nothing here reached the database through a link")
 			Expect(buf.String()).To(ContainSubstring("stop it, then remove the stranded directory"),
 				"what the operator has to do about it")
 		})
@@ -781,7 +786,10 @@ var _ = Describe("SQLiteFilePermissions", func() {
 				"carrying the mtime, not an empty attribute")
 
 			// One pin for the advice, because an operator-facing remedy that
-			// silently disappears is its own regression.
+			// silently disappears is its own regression. It spans how to find
+			// the holder as well as what to do with it.
+			Expect(buf.String()).To(ContainSubstring("find it from the holder record"),
+				"how the operator finds the process")
 			Expect(buf.String()).To(ContainSubstring("stop it, then remove the stranded directory"),
 				"what the operator has to do about it")
 		})
