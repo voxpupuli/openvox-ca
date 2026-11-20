@@ -155,6 +155,11 @@ type Server struct {
 	// CSRRateLimit refuses, so that the caller can count them. When nil, a
 	// refusal is only logged.
 	OnCSRRateLimited func()
+	// OnDestructiveOperation, when set, is called after each successful
+	// revoke or clean with the operation (one of DestructiveOperations) and
+	// how many subjects it took out of service. The server points it at
+	// openvoxca_destructive_operations_total.
+	OnDestructiveOperation func(operation string, subjects int)
 
 	// OCSPEnabled registers the OCSP responder's routes, POST /ocsp and
 	// GET /ocsp/{request}. The zero value leaves them unregistered, so a
@@ -462,10 +467,7 @@ func (s *Server) handlePutStatus(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "conflict", http.StatusConflict)
 			return
 		}
-		if p := clientOf(r); p.cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(p.Key()) {
-			slog.Warn("High rate of destructive operations detected",
-				"client", p, "operation", "revoke")
-		}
+		s.recordDestructive(clientOf(r), OperationRevoke, 1)
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -676,10 +678,7 @@ func (s *Server) handlePutStatusBySerial(w http.ResponseWriter, r *http.Request)
 	// may each have an "ops-admin", and a bare CN would put them in one bucket
 	// and one audit identity. This route was missed when the rest of the handler
 	// set moved to principals.
-	if p := clientOf(r); p.cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(p.Key()) {
-		slog.Warn("High rate of destructive operations detected",
-			"client", p, "operation", "revoke")
-	}
+	s.recordDestructive(clientOf(r), OperationRevoke, 1)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1446,10 +1445,7 @@ func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if p := clientOf(r); p.cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(p.Key()) {
-		slog.Warn("High rate of destructive operations detected",
-			"client", p, "operation", "clean")
-	}
+	s.recordDestructive(clientOf(r), OperationClean, 1)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -2087,9 +2083,7 @@ func (s *Server) handlePutClean(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("Cleaning certificates", "count", len(body.Certnames),
 		"subjects", sanitiseAllForLog(body.Certnames), "client", client)
 	result := s.CA.CleanMultiple(r.Context(), body.Certnames)
-	if client.cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(client.Key()) {
-		slog.Warn("High rate of destructive operations detected", "client", client, "operation", "bulk-clean")
-	}
+	s.recordDestructive(client, OperationBulkClean, len(result.Cleaned))
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		slog.Warn("encode response failed", "error", err)

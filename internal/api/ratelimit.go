@@ -166,9 +166,42 @@ func rateLimitKey(r *http.Request, prefixLen int) string {
 	return netip.PrefixFrom(addr, prefixLen).Masked().String()
 }
 
+// The destructive operations, as openvoxca_destructive_operations_total's
+// operation label and the high-rate warning's operation attribute both spell
+// them. They are one spelling so an alert on the series can be joined to the
+// record naming the client. Label values the documentation names are public
+// API: renaming one needs a major release.
+const (
+	OperationRevoke    = "revoke"
+	OperationClean     = "clean"
+	OperationBulkClean = "bulk-clean"
+)
+
+// DestructiveOperations lists every operation label value, so the counter can
+// publish each at zero before the first one happens: an increase() over a
+// series that does not exist yet never fires.
+var DestructiveOperations = []string{OperationRevoke, OperationClean, OperationBulkClean}
+
+// recordDestructive accounts for one destructive request by p that took n
+// subjects out of service. Each subject counts towards OnDestructiveOperation,
+// so a bulk clean of five hundred nodes reads as five hundred, not one; the
+// request counts once towards the per-client tracker, whose warning names the
+// client, which a metric label cannot without unbounded cardinality.
+func (s *Server) recordDestructive(p clientPrincipal, operation string, n int) {
+	if s.OnDestructiveOperation != nil && n > 0 {
+		s.OnDestructiveOperation(operation, n)
+	}
+	if p.cn != "" && s.destructiveOps != nil && s.destructiveOps.Record(p.Key()) {
+		slog.Warn("High rate of destructive operations detected",
+			"client", p, "operation", operation)
+	}
+}
+
 // destructiveOpTracker is a fixed-window per-identity counter for destructive
 // operations (revoke, clean). When a single identity exceeds the threshold
-// within the window, a warning is logged for operational awareness.
+// within the window, a warning is logged for operational awareness. It is the
+// log record behind an alert, not the alert: openvoxca_destructive_operations_total
+// is what to alert on, and the warning says who.
 // NIST 800-53: AU-6 (Audit Record Review, Analysis, and Reporting)
 type destructiveOpTracker struct {
 	mu        sync.Mutex
