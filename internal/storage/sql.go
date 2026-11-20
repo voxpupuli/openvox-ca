@@ -382,8 +382,8 @@ func warnOnOneStrandedLockDir(spelling, inUse string) {
 			"in the stranded directory's lock files (pid, host and start time; the record outlives "+
 			"its process, so confirm that pid is still running with that start time, or check with "+
 			"fuser or lsof on the files; a build older still wrote no record and held its locks "+
-			"only briefly, so also look for any other openvox-ca using this database, not this "+
-			"instance, whose processes lock in the in_use directory), stop it, "+
+			"only briefly, so also look for any openvox-ca using this database other than this "+
+			"instance (whose own processes hold the locks in the in_use directory)), stop it, "+
 			"then remove the stranded directory")
 }
 

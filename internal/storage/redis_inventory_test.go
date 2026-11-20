@@ -884,8 +884,9 @@ var _ = Describe("RedisLegacyInventoryDecompose", func() {
 		// The remedy, not just the refusal: deleting either side loses records.
 		Expect(err.Error()).To(ContainSubstring("stop every replica still writing the legacy format"))
 		Expect(err.Error()).To(ContainSubstring("reconcile them under the key prefix by hand"))
-		// The old remedy passes the pins above and fails these two: the first
-		// was not in it, and the second was.
+		// A remedy that offered a snapshot restore could pass the pins above;
+		// these two fail it: the first says why a snapshot does not help, and
+		// the second that none is offered.
 		Expect(err.Error()).To(ContainSubstring("lacks those issuances"))
 		Expect(err.Error()).NotTo(ContainSubstring("restore from a snapshot"))
 	})

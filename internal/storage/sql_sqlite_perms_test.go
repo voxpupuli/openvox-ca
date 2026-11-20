@@ -796,8 +796,10 @@ var _ = Describe("SQLiteFilePermissions", func() {
 				"that the record may name a process that has exited")
 			Expect(buf.String()).To(ContainSubstring("wrote no record"),
 				"that an older build left no record to find")
-			Expect(buf.String()).To(ContainSubstring("not this instance"),
+			Expect(buf.String()).To(ContainSubstring("other than this instance"),
 				"that the search must leave the warning instance alone")
+			Expect(buf.String()).To(ContainSubstring("fuser or lsof"),
+				"the check that works where the record does not")
 			Expect(buf.String()).To(ContainSubstring("stop it, then remove the stranded directory"),
 				"what the operator has to do about it")
 		})
