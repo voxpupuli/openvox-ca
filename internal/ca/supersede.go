@@ -121,9 +121,9 @@ func (c *CA) refuseIfSuperseded(ctx context.Context, presentedCert *x509.Certifi
 		// authorisation decision, the two sides are produced by different code,
 		// and a list not written through recordSuperseded (a hand edit, or a
 		// future caller that appends without it) would otherwise silently fail
-		// to match. An entry whose serial will not
-		// parse cannot be the presented certificate's, since that one came from
-		// a *big.Int; skip it and let the sweep discard it.
+		// to match. An entry whose serial will not parse cannot be the
+		// presented certificate's, since that one came from a *big.Int; skip it
+		// and let the sweep discard it.
 		stored, err := storage.NormaliseSerial(e.Serial)
 		if err != nil {
 			continue

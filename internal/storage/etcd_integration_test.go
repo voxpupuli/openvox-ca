@@ -1555,6 +1555,11 @@ var _ = Describe("EtcdLegacyInventoryDecompose", func() {
 			"the remedy must not be to delete either side")
 		Expect(err.Error()).To(ContainSubstring("reconcile them under the key prefix by hand"),
 			"the remedy that keeps every record")
+		// The shared prefix above was in the old remedy too; these two are not.
+		Expect(err.Error()).To(ContainSubstring("lacks those issuances"),
+			"why a snapshot does not help")
+		Expect(err.Error()).NotTo(ContainSubstring("restore from a snapshot"),
+			"a restore loses the issuances the refusal protects")
 
 		// Neither side may have been destroyed by the refusal.
 		blobResp, err := cli.Get(ctx, prefix+"/inventory/data")

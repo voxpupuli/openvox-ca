@@ -884,6 +884,9 @@ var _ = Describe("RedisLegacyInventoryDecompose", func() {
 		// The remedy, not just the refusal: deleting either side loses records.
 		Expect(err.Error()).To(ContainSubstring("stop every replica still writing the legacy format"))
 		Expect(err.Error()).To(ContainSubstring("reconcile them under the key prefix by hand"))
+		// The shared prefix above was in the old remedy too; these two are not.
+		Expect(err.Error()).To(ContainSubstring("lacks those issuances"))
+		Expect(err.Error()).NotTo(ContainSubstring("restore from a snapshot"))
 	})
 
 	It("fails startup when the legacy blob does not match its stored HMAC", func() {
