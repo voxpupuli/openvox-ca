@@ -2,7 +2,9 @@
 
 > This is a maintainer reference. It describes how to publish a tagged release
 > of OpenVox CA, what the automation does, and how to rehearse the whole thing
-> on a personal fork before touching the upstream repository.
+> on a personal fork before touching the upstream repository. It also declares
+> [what the version number promises](#what-the-version-number-promises): the
+> public API that semantic versioning covers from 1.0.0.
 
 A release is two actions: **land a change setting the release version, then
 push an annotated `v*` tag** pointing at it. Everything else is automation —
@@ -26,34 +28,62 @@ is promised, and a breaking change can land in any release.
 
 The public API is what an operator, or a tool an operator runs, builds on:
 
-1. **The HTTP API.** Every route, its request and response formats and its
-   status codes, as [the API reference](../api.md) documents them.
+1. **The HTTP API.** Every route, its request and response formats, its status
+   codes, and who may reach it (its [authorisation
+   tier](../api.md#authorization-tiers)), as [the API reference](../api.md)
+   documents them. Widening who may reach a route is a breaking change, not an
+   addition.
 2. **Both command lines.** The subcommands, flags and exit statuses of
-   `openvox-ca` and `openvox-ca-ctl`.
-3. **Configuration.** Every key in `config.yaml` and `ctl.yaml`, and every
-   `OPENVOX_CA_*` and `OPENVOX_CA_CTL_*` environment variable, with the meaning
-   of its value.
-4. **Storage layout and formats.** What each backend stores and where, so that
-   a store one 1.x release wrote is one every later 1.x release reads.
+   `openvox-ca` and `openvox-ca-ctl`, and which stream carries what where a
+   command's output is data: `openvox-ca-ctl generate` writes the certificate
+   to standard output and its message to standard error, so `> cert.pem` yields
+   a usable file.
+3. **Configuration.** Every key in `config.yaml` and `ctl.yaml`, every
+   `OPENVOX_CA_*` and `OPENVOX_CA_CTL_*` environment variable, the meaning of
+   each value, and where the files are read from by default:
+   `/etc/openvox-ca/config.yaml` and `/etc/openvox-ca/ctl.yaml`.
+4. **Storage layout, formats and the cross-replica protocol.** What each
+   backend stores and where, so that a store one 1.x release wrote is one every
+   later 1.x release reads; and the lock names and key derivation replicas
+   coordinate through, so that replicas of two 1.x releases can share a store
+   during a rolling upgrade.
 5. **Metrics.** The name and label set of every `openvoxca_*` series.
-6. **The mixin's alert names.** Routing and silences are keyed on them.
+6. **The monitoring mixin's alert names and `_config` keys.** Routing and
+   silences are keyed on the alert names, and an override is keyed on the
+   `_config` key names (`openvoxCASelector`, `caExpiryWarningSeconds` and the
+   rest): a renamed key would leave an override silently doing nothing. These
+   promises apply to the mixin as published at a release tag.
 7. **The Helm chart's values.**
-8. **Image tags and paths.** The tag scheme, the image names, and the paths in
-   the image an operator mounts or configures.
-9. **Structured log field names**, such as `client.cn`, because log-based
-   alerts and SIEM rules select on them.
+8. **Install paths and names.** The image tags and names and the paths in an
+   image an operator mounts or configures; for the packages and tarballs, the
+   systemd unit names (`openvox-ca.service`, `openvox-ca-first-boot.service`)
+   and the binary paths.
+9. **Structured log field names**, such as `client.cn` and `client.domain`,
+   because log-based alerts and SIEM rules select on them; and the message text
+   of the records the documentation tells you to alert on: `Issued certificate
+   carrying a Puppet authorisation extension` and `High rate of destructive
+   operations detected`.
 
 Not covered, so free to change in a minor or patch release:
 
-- **Log message text, and the order of fields in a record.** Key an alert on
-  a field rather than on the wording of a message.
+- **Any other log message text, and the order of fields in a record.** Key an
+  alert on a field rather than on the wording of a message.
 - **Go packages.** Every package another module could import is under
   `internal/`, which the Go toolchain refuses to let it import; the rest are
   commands and test tools.
-- **The mixin's alert thresholds and durations.** They are tuning, and an
-  override in your own Prometheus rules outlives a change to them.
-- **The default value of a tunable.** A default moves when a better one is
-  found. A value you set keeps its meaning.
+- **The mixin's alert thresholds and durations.** They are tuning. Override
+  them through the mixin's `_config`, whose key names are covered above.
+- **The default value of a performance or capacity setting**: an interval, a
+  size, a timeout or a budget. Such a default moves when a better one is found,
+  and a value you set keeps its meaning. A default that grants access, accepts
+  input or relaxes a refusal is covered, and changes only in a major release:
+  `allow_public_status`, `client_revocation_policy`, `allow_subject_alt_names`
+  and the `insecure_*` settings, for example.
+
+One reservation. A fix for a security vulnerability may break the public API
+in a minor or patch release when there is no compatible way to fix it, for
+example by refusing a request or a configuration value that used to be
+accepted. The release notes say so and name the change.
 
 [AGENTS.md's compatibility contracts](../../AGENTS.md#compatibility-contracts-do-not-rename)
 are a subset of this list: the names that must not be rebranded.

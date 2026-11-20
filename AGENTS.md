@@ -451,6 +451,11 @@ published names, which existing deployments are bound to just as firmly:
 - Storage key prefixes `puppet-ca`, kept so existing stores stay readable
 - Config-file location `/etc/openvox-ca`
 
+These are the names; the whole public API that semantic versioning covers from
+1.0.0 is declared in
+[releasing.md](docs/development/releasing.md#what-the-version-number-promises).
+From 1.0.0, a breaking change to anything listed there needs a new major version.
+
 ## Helm chart
 
 The chart in `charts/openvox-ca/` releases in lockstep with the binaries: its
