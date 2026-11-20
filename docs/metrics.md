@@ -100,8 +100,10 @@ the frontend logs `Could not read another process's Go runtime metrics` each
 time. Nothing else reports that state soon: readiness does not consult the
 signer, and a signature it does not answer fails only after two minutes.
 `OpenVoxCASignerUnresponsive` pages once the signer's process has had no
-`go_*` series for five minutes. A signer that exits instead takes the frontend
-down with it, through the launcher.
+`go_*` series for five minutes. It matches the two by `instance`, so it relies
+on each replica being its own target, as the chart's ServiceMonitor makes it
+unless `relabelings` collapse them. A signer that exits instead takes the
+frontend down with it, through the launcher.
 
 Aggregate by what the series measures:
 

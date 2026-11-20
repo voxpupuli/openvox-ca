@@ -139,6 +139,11 @@
             // For every key backend. Silent under --single-process, which has
             // no signer role, and on a frontend started without the
             // launcher, which has no signer PID to read /proc from.
+            //
+            // It joins on instance, so it assumes one instance per pod or
+            // process, as the chart's ServiceMonitor gives by default.
+            // Relabelling that collapses replicas onto one instance would let
+            // a healthy replica's signer mask another's.
             expr: |||
               process_start_time_seconds{%(selector)s,role="signer"}
                 unless on(job, instance)
