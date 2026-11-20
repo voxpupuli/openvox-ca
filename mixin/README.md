@@ -194,8 +194,10 @@ Vendor the mixin with [jsonnet-bundler](https://github.com/jsonnet-bundler/jsonn
 jb install https://github.com/voxpupuli/openvox-ca/mixin@v<version>
 ```
 
-Pin a release tag. `@main` tracks unreleased changes, and the alert names and
-`_config` keys are [promised](../docs/development/releasing.md#what-the-version-number-promises)
+Pin the same release tag as the server you run, and move it with each server
+upgrade: the thresholds are tuned to that release's defaults. `@main` tracks
+unreleased changes, and the alert names and `_config` keys are
+[promised](../docs/development/releasing.md#what-the-version-number-promises)
 only as published at a release tag.
 
 Then combine it with your overrides:

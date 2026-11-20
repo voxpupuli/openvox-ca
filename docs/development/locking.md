@@ -700,7 +700,9 @@ path — still provides no cross-replica guarantee anyway.
     breaking change for a *running* cluster — during a rolling upgrade, nodes
     on either side of it derive different keys and do not exclude one another
     for the length of the rollout, so it needs a full restart rather than a
-    rolling one.
+    rolling one. From 1.0.0 it also needs a major release, as does renaming a
+    lock or changing the order in which two nest; see [what the version number
+    promises](releasing.md#what-the-version-number-promises).
 
 12. **A new nesting is protocol too, not only a new name.** Rule 7 covers
     defining and documenting a lock *name*; this covers holding two of them at

@@ -279,7 +279,8 @@ the inventory, in-memory caches) must follow
   backend-internal name like etcd's `inventory-decompose` must *not* be
   registered, since that would claim a key nothing uses. The ordinals and the
   derivation are protocol; changing either needs a full cluster restart, not a
-  rolling one.
+  rolling one, and from 1.0.0 a major release
+  ([what the version number promises](docs/development/releasing.md#what-the-version-number-promises)).
 - Lock ordering is `subject:<name>` → `crl` → `c.mu`, plus `bootstrap` → `crl`
   on the CA-import path and `bootstrap` → `hmac-key` on the migration path; all
   are one-way and `bootstrap` is never held with a subject lock. Lock names are a stable cross-replica protocol — never invent or
