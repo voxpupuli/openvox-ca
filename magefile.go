@@ -5688,12 +5688,57 @@ func (Chart) Test() error {
 			wants: []string{"enableServiceLinks: true"},
 		},
 		{
-			// The recipe values.yaml documents for a provider-held key. It is a
-			// merge-precedence claim, which this repository requires be pinned.
+			// A merge-precedence claim, which this repository requires be
+			// pinned: an empty string survives the merge rather than falling
+			// back to the computed path. ca.certificateOnly is the value for a
+			// provider-held key; this is the general rule beneath it, and an
+			// operator may still use it for that case.
 			name:     "an empty config value clears a path the ca block computed",
 			sets:     []string{tls, "ca.existingSecret=ca-material", "config.ca_key_provider=openbao", "config.ca_key_file="},
 			wants:    []string{`ca_key_file: ""`, "ca_cert_file: /run/secrets/openvox-ca-ca/tls.crt"},
 			notWants: []string{"ca_key_file: /run/secrets/openvox-ca-ca/tls.key"},
+		},
+		{
+			// The default branch, which every ca.existingSecret user takes, and
+			// the must-fail twin of the certificateOnly case below. Without it a
+			// change that stopped computing the key path would pass every case
+			// here: the fixtures that render this branch are only linted,
+			// schema-checked and strict-decoded, and none of those needs a key.
+			name:  "ca.existingSecret alone sets both the certificate and key paths",
+			sets:  []string{tls, "ca.existingSecret=ca-material"},
+			wants: []string{"ca_cert_file: /run/secrets/openvox-ca-ca/tls.crt", "ca_key_file: /run/secrets/openvox-ca-ca/tls.key"},
+		},
+		{
+			// The value values.yaml documents for a provider-held key. The
+			// Secret is still mounted: only the key path goes, so the notWant
+			// is the key name rather than one path, and would also catch a
+			// key path computed from ca.keyKey under another mountPath.
+			name: "ca.certificateOnly sets the certificate path and no key path",
+			sets: []string{tls, "ca.existingSecret=ca-material", "ca.certificateOnly=true", "config.ca_key_provider=openbao"},
+			wants: []string{
+				"ca_cert_file: /run/secrets/openvox-ca-ca/tls.crt",
+				"secretName: \"ca-material\"",
+				"mountPath: \"/run/secrets/openvox-ca-ca\"",
+			},
+			notWants: []string{"ca_key_file"},
+		},
+		{
+			// certificateOnly stops the chart computing a key path; it does not
+			// stop the operator naming one, which config still wins for.
+			name:     "an explicit config.ca_key_file wins over ca.certificateOnly",
+			sets:     []string{tls, "ca.existingSecret=ca-material", "ca.certificateOnly=true", "config.ca_key_file=/custom/ca_key.pem"},
+			wants:    []string{"ca_key_file: /custom/ca_key.pem", "ca_cert_file: /run/secrets/openvox-ca-ca/tls.crt"},
+			notWants: []string{"ca_key_file: /run/secrets/openvox-ca-ca/tls.key"},
+		},
+		{
+			// It qualifies ca.existingSecret and does nothing on its own: no
+			// Secret to mount, so no CA paths at all and the CA bootstraps
+			// into cadir as usual. Positive control first: a config that
+			// stopped rendering would satisfy the absences on its own.
+			name:     "ca.certificateOnly without ca.existingSecret renders no CA material",
+			sets:     []string{tls, "ca.certificateOnly=true"},
+			wants:    []string{"cadir: /var/lib/openvox-ca\n"},
+			notWants: []string{"ca_cert_file", "ca_key_file", "/run/secrets/openvox-ca-ca"},
 		},
 		{
 			name:     "an explicit RollingUpdate is honoured while persistence is on",
@@ -8681,6 +8726,15 @@ config:
 				"    scope: ClusterRole\n    allowClusterWideSecretCreate: \"false\"\n",
 			skipSchema: true,
 			wantErr:    "kube-system included",
+		},
+		{
+			// The same hazard for ca.certificateOnly, where a string read as
+			// true would drop ca_key_file. The schema is the only refusal:
+			// there is deliberately no template-side twin.
+			name: "a quoted \"false\" for ca.certificateOnly",
+			valuesYAML: "tls:\n  existingSecret: s\nca:\n  existingSecret: c\n" +
+				"  certificateOnly: \"false\"\n",
+			wantErr: "certificateOnly': got string, want boolean",
 		},
 	}
 

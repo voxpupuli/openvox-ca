@@ -250,16 +250,17 @@ tls:
 #
 # Both ca_cert_file and ca_key_file are set from this block. Under a provider
 # that holds the key itself (config.ca_key_provider: openbao) there is no key
-# file, so clear that one — an empty string is honoured all the way through, and
-# the server treats an empty ca_key_file as unset:
+# file, so set certificateOnly: the Secret is still mounted, only ca_cert_file
+# is set, and keyKey is ignored. An explicit config.ca_key_file still wins.
 #
 #   ca:
-#     existingSecret: openvox-ca-cert   # certificate only
+#     existingSecret: openvox-ca-cert
+#     certificateOnly: true
 #   config:
 #     ca_key_provider: openbao
-#     ca_key_file: ""
 ca:
   existingSecret: ""
+  certificateOnly: false
   certKey: tls.crt
   keyKey: tls.key
   mountPath: /run/secrets/openvox-ca-ca

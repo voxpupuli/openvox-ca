@@ -26,6 +26,14 @@ config:
   redis_addrs:
     - valkey.ca-edge.svc:6379
 
+# A Secret holding only the CA certificate, the shape a provider-held key
+# (config.ca_key_provider: openbao) needs: ca_cert_file is set and ca_key_file
+# is not. No provider is configured here, because this fixture exists to render
+# the branch rather than to describe a deployment.
+ca:
+  existingSecret: ca-edge-cert
+  certificateOnly: true
+
 # Node-backed disk with an explicit cap: medium cleared, sizeLimit set. (The
 # both-cleared case is a chart:test render assertion rather than a fixture,
 # since it is about the volume source not going null.)
