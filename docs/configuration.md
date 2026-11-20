@@ -2465,13 +2465,18 @@ csr_pem=$(cat)
 **What the executable is given.** Its only argument is the certname, and the
 CSR arrives in PEM form on standard input. Its environment is not the CA's: it
 gets a fixed `PATH` (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`),
-the CA's `HOME`, and `LANG` when the CA has one, and nothing else. So a
-credential in the CA's environment, such as `OPENVOX_CA_KEY_PASSPHRASE` or a
-database DSN, never reaches it, and a script that needs settings or secrets of
-its own reads them from a file. It runs as the CA's own user, in the CA's working
-directory, and whatever it writes to standard output or standard error is
-discarded. It has 30 seconds: one still running after that is killed, and the
-CSR waits for an operator, as it does after a non-zero exit.
+the CA's `HOME`, and `LANG` when the CA has one, and nothing else, so a script
+that needs settings or secrets of its own reads them from a file. That stops the
+CA's credentials being passed on by accident, to a tool that logs or forwards its
+environment. It is not a sandbox: the executable runs as the CA's own user, so
+it can read whatever the CA can, its configuration, its key files and the
+environment of the CA's own processes included. Trust it as you trust the CA
+key. It runs in the CA's working directory, and whatever it writes to standard
+output or standard error is discarded. It has 30 seconds: one still running
+after that is killed, and the CSR waits for an operator, as it does after a
+non-zero exit. Only the executable is killed, not processes it started, so a
+script should not leave children running
+([#660](https://github.com/voxpupuli/openvox-ca/issues/660)).
 
 ### The autosign executable's path
 

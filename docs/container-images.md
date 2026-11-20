@@ -34,8 +34,17 @@ Until then, pull `edge`. The pre-releases so far predate the configuration
 the examples below rely on, so their own documentation applies to them.
 `edge` moves with every merge to `main`, so pin it by digest
 (`ghcr.io/voxpupuli/openvox-ca@sha256:…`, which `docker image inspect --format
-'{{index .RepoDigests 0}}'` prints after a pull) and read what changed before
-moving the pin.
+'{{index .RepoDigests 0}}'` prints after a pull) and read the commits on `main`
+before moving the pin: each image's `org.opencontainers.image.revision` label
+names the commit it was built from. Verify the digest before you pin it.
+`edge` is built from `main`, not a tag, so its certificate identity ends
+`@refs/heads/main` rather than matching the release pattern below:
+
+```console
+$ cosign verify ghcr.io/voxpupuli/openvox-ca@sha256:… \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-identity https://github.com/voxpupuli/openvox-ca/.github/workflows/container-images.yml@refs/heads/main
+```
 
 ## Available tags
 
