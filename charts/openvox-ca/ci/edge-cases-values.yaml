@@ -58,6 +58,10 @@ metrics:
   enabled: true
   serviceMonitor:
     enabled: true
+    # Set only so the jobLabel branch renders. It is not a recommendation:
+    # every release shares app.kubernetes.io/name, so two concurrent releases
+    # would report one job. See metrics.serviceMonitor.jobLabel in the chart's
+    # README.
     jobLabel: app.kubernetes.io/name
     targetLabels:
       - app.kubernetes.io/part-of
