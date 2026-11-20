@@ -283,11 +283,13 @@ the inventory, in-memory caches) must follow
   ([what the version number promises](docs/development/releasing.md#what-the-version-number-promises)).
 - Lock ordering is `subject:<name>` → `crl` → `c.mu`, plus `bootstrap` → `crl`
   on the CA-import path and `bootstrap` → `hmac-key` on the migration path; all
-  are one-way and `bootstrap` is never held with a subject lock. Lock names are a stable cross-replica protocol — never invent or
-  rename one casually.
+  are one-way and `bootstrap` is never held with a subject lock. Lock names are a
+  stable cross-replica protocol — never invent or rename one casually, and from
+  1.0.0 renaming one needs a major release.
 - Holding two *different* named locks at once is protocol as well, not just the
   names. Such a pair must appear in locking.md's **Lock ordering** section and
-  in `allowedLockNesting` (`internal/ca/lockorder_test.go`), added together. A
+  in `allowedLockNesting` (`internal/ca/lockorder_test.go`), added together, and
+  from 1.0.0 reversing a listed pair's order needs a major release. A
   spec catches an unlisted pair *when it drives the caller that takes it* — it
   drives a minority of them, so a green suite is not confirmation you had
   nothing to add. One documented exception: `bootstrap` → `hmac-key` is taken
@@ -455,8 +457,9 @@ published names, which existing deployments are bound to just as firmly:
 These are the names; the whole public API that semantic versioning covers from
 1.0.0 is declared in
 [releasing.md](docs/development/releasing.md#what-the-version-number-promises).
-From 1.0.0, a breaking change to anything listed there needs a new major version,
-except as its security-fix reservation allows.
+From 1.0.0, a breaking change to anything that declaration covers (whatever the
+documentation tells an operator to depend on, not only what its list names)
+needs a new major version, except as its security-fix reservation allows.
 
 ## Helm chart
 

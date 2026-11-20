@@ -28,10 +28,9 @@ is promised, and a breaking change can land in any release.
 
 **The rule.** The public API is whatever this documentation tells an operator,
 or a tool an operator runs, to depend on: a setting to set, a path to mount or
-read, a name or identity to pin or verify against, a value to match on, a
-message to alert on or grep for. A change that breaks something the
-documentation describes that way needs a new major version, unless it is listed
-below as not covered. The list that follows names what that means today; it is
+read, a name or identity to pin or verify against, a metric or a value to alert
+or match on. A change that breaks something the documentation describes that
+way needs a new major version, unless it is listed below as not covered. The list that follows names what that means today; it is
 a set of examples, and where it and the rest of the documentation disagree, the
 rule wins.
 
@@ -61,10 +60,10 @@ rule wins.
    runs at start, or another storage change, is one an older replica cannot
    work against), or that must reach every replica before a feature is turned
    on, says so in its release notes.
-5. **Metrics.** The name and label names of every `openvoxca_*` series, and the
-   label values the shipped alerts or the documentation filter on, such as
-   `reason="tampered"` and the `state` values. Renaming or removing such a value
-   is a breaking change; adding one is not.
+5. **Metrics**, which are what to alert on. The name and label names of every
+   `openvoxca_*` series, and the label values the shipped alerts or the
+   documentation filter on, such as `reason="tampered"` and the `state` values.
+   Renaming or removing such a value is a breaking change; adding one is not.
 6. **The monitoring mixin's alert names and `_config` keys**, as published at a
    release tag. Routing and silences are keyed on the alert names, and an
    override on the `_config` key names: a renamed key would leave an override
@@ -82,25 +81,27 @@ rule wins.
    defaults, the `puppet` service account and the packaged CA directory,
    `/etc/puppetlabs/puppet/ssl/ca`. For the tarballs: `openvox-ca.service` and
    the `/usr/local/bin` path its `ExecStart` names. For every release: the
-   artefact names (tarballs, packages, `checksums.txt`,
-   `provenance.sigstore.json`) and the signing identities and provenance type
-   the [verification steps](../../README.md#verifying-what-you-downloaded) pin.
-9. **Logs.** Structured field names, such as `client.cn` and `client.domain`;
-   the field values the documentation tells you to match on, such as
-   `reason="route requires admin access"`, the three shapes of `client.domain`
-   and the `renewal` values; and the message text of every record the
-   documentation tells you to alert on, grep for or read as the signal of a
-   failure. Today those are `Issued certificate carrying a Puppet authorisation
-   extension`, `High rate of destructive operations detected`, `Refused a
-   signing request`, the failed-revocation family (`failed to retire replaced
-   certificate`, `Discarding superseded-certificate entry`, `Could not revoke
-   superseded certificates` and the `Clean:` warnings), `SaveRequest refused: duplicate certificate request`
-   and `OpenBao re-authentication failed`.
+   artefact names (tarballs, packages, `checksums.txt`, the `.spdx.json` and
+   `.cdx.json` SBOMs, `provenance.sigstore.json`) and the signing identities and
+   provenance type the
+   [verification steps](../../README.md#verifying-what-you-downloaded) pin.
+9. **Log fields.** Structured field names, such as `client.cn` and
+   `client.domain`; the field values the documentation tells you to match on,
+   such as `reason="route requires admin access"`, the three shapes of
+   `client.domain` and the `renewal` values; and the `event` value of each
+   audit record, from the closed set
+   [#666](https://github.com/voxpupuli/openvox-ca/issues/666) documents. Fields
+   are how you find and join the records behind an alert.
 
 Not covered, so free to change in a minor or patch release:
 
-- **Any other log message text, and the order of fields in a record.** Key an
-  alert on a field rather than on the wording of a message.
+- **Log message text, and the order of fields in a record**, even where the
+  documentation quotes a message or tells you to look for one. Logs are for a
+  human to learn more once something has fired. Alert on a metric, or on an
+  audit record's `event` field; where a condition the documentation tells you
+  to watch for has neither yet,
+  [#666](https://github.com/voxpupuli/openvox-ca/issues/666) adds one before
+  1.0.0.
 - **The HTTP fine print:** error-body wording, response headers other than
   `Content-Type`, the order of `certificate_statuses`, and the body and media
   type of a request no route serves, the same things the [Puppet-parity
@@ -111,21 +112,27 @@ Not covered, so free to change in a minor or patch release:
 - **The mixin's alert thresholds and durations.** They are tuning. Override
   them through the mixin's `_config`, whose key names are covered above, and
   vendor the mixin at the same release tag as the server you run.
+- **SBOM and attestation formats.** The SBOMs' document format and version,
+  hence the SPDX predicate type an image attestation carries, and the Sigstore
+  bundle format follow the tools that generate them and may change in any
+  release. Read `spdxVersion` from the document rather than hard-coding it.
 - **The default of a performance or capacity setting**: a cache or memory size,
   a timeout, a concurrency budget, or an interval that bounds only how fresh a
   report or a display is. Such a default moves when a better one is found, and a
   value you set keeps its meaning. Every other default is covered and changes
-  only in a major release: one that grants access, accepts input or relaxes a
-  refusal (`allow_public_status`, `client_revocation_policy`,
-  `allow_subject_alt_names`, the `insecure_*` settings), one that sets how
-  strong a key is (key sizes and algorithms), and one that sets how long a
-  credential or a revocation is trusted or takes to take effect: certificate and
-  CRL validity, the OCSP response lifetime, `superseded_cert_revoke_after_sec`,
-  `superseded_cert_sweep_interval_sec`, `crl_sync_interval_sec`,
+  only in a major release. That includes one that grants access, accepts input
+  or relaxes a refusal (`allow_public_status`, `client_revocation_policy`,
+  `allow_subject_alt_names`, the `insecure_*` settings, rate limits that refuse
+  requests); one that sets how strong a key is (key sizes and algorithms); one
+  that sets how long a credential or a CRL is valid (certificate and CRL
+  validity, the OCSP response lifetime, `superseded_cert_revoke_after_sec`),
+  which is breaking in either direction; and one that bounds how long a
+  revocation, or tampering with the inventory, takes to be acted on or reported,
+  such as `crl_sync_interval_sec`, `crl_chain_refresh_interval_sec`,
   `client_crl_refresh_interval_sec`, `ocsp_index_sync_interval_sec`,
-  `inventory_verify_interval_sec` and rate limits
-  that refuse requests. Lengthening one of those intervals is breaking;
-  shortening it is not.
+  `superseded_cert_sweep_interval_sec`, `file_export`'s `interval_sec` and
+  `inventory_verify_interval_sec`, where lengthening is breaking and shortening
+  is not.
 
 One reservation. A fix for a security vulnerability may break the public API
 in a minor or patch release when there is no compatible way to fix it, for
@@ -133,7 +140,7 @@ example by refusing a request or a configuration value that used to be
 accepted. The release notes say so and name the change.
 
 [AGENTS.md's compatibility contracts](../../AGENTS.md#compatibility-contracts-do-not-rename)
-are a subset of this list: the names that must not be rebranded.
+are a subset of what this covers: the names that must not be rebranded.
 
 ## What a release produces
 
