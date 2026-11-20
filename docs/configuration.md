@@ -2473,8 +2473,9 @@ it can read whatever the CA can, its configuration, its key files and the
 environment of the CA's own processes included. Trust it as you trust the CA
 key. It runs in the CA's working directory, and whatever it writes to standard
 output or standard error is discarded. It has 30 seconds: one still running
-after that is killed, and the CSR waits for an operator, as it does after a
-non-zero exit. Only the executable is killed, not processes it started, so a
+after that is killed, the CSR stays pending for an operator, the agent gets a
+`500` that ends its run, and the CA logs the timeout at `ERROR`. Only the
+executable is killed, not processes it started, so a
 script should not leave children running
 ([#660](https://github.com/voxpupuli/openvox-ca/issues/660)).
 

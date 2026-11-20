@@ -108,6 +108,12 @@ $ docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/voxpupuli/ope
 ghcr.io/voxpupuli/openvox-ca@sha256:…
 ```
 
+Read the digest straight after the pull, since the local tag moves with every
+later one, and verify it before you pin it. `edge` is signed from `main`, so its
+identity ends `@refs/heads/main` and the release pattern under [verifying what
+you downloaded](#verifying-what-you-downloaded) rejects it; [container
+images](docs/container-images.md#pulling) has the command for `edge`.
+
 Every tag comes in two variants: distroless (the unsuffixed tags, also
 published with a `-distroless` suffix) and Alpine (`-alpine`). See [container
 images](docs/container-images.md) for how they differ, the available tags and
@@ -317,9 +323,9 @@ Full build instructions (including the FIPS build) are in
 
 ## Quick start
 
-These commands keep the demo CA, private key included, in `tmp/ca-demo` under
-the current directory, which the repository's `.gitignore` already excludes, so
-they run as an ordinary user. On a host with openvox-ca's package installed they
+These commands keep everything they write, private keys included, under `tmp/`
+in the current directory, which the repository's `.gitignore` already excludes,
+so they run as an ordinary user. On a host with openvox-ca's package installed they
 do not: the server reads `/etc/openvox-ca/config.yaml` by default, which only
 root and the `puppet` group can read. A real deployment's CA directory is
 usually OpenVox Server's, `/etc/puppetlabs/puppet/ssl/ca`, which an ordinary
@@ -428,8 +434,8 @@ Against the local demo above:
 
 ```bash
 openssl req -new -newkey rsa:2048 -nodes -subj /CN=agent.example.com \
-  -keyout agent.example.com_key.pem -out agent.example.com_csr.pem
-curl -fsS -X PUT -H 'Content-Type: text/plain' --data-binary @agent.example.com_csr.pem \
+  -keyout tmp/agent.example.com_key.pem -out tmp/agent.example.com_csr.pem
+curl -fsS -X PUT -H 'Content-Type: text/plain' --data-binary @tmp/agent.example.com_csr.pem \
   http://127.0.0.1:8140/puppet-ca/v1/certificate_request/agent.example.com
 
 ./bin/openvox-ca-ctl list --server-url http://127.0.0.1:8140
@@ -456,7 +462,9 @@ above is one, because that server names it in `--puppet-server`:
 
 `sign` takes the same four flags. Submitting a request needs no client
 certificate: add `--cacert "$PWD/tmp/ca-demo/ca_crt.pem"` to the
-`curl` command and change its URL. To stop repeating the flags, set them in
+`curl` command and change its URL. To stop repeating the flags, export
+`OPENVOX_CA_CTL_SERVER_URL`, `OPENVOX_CA_CTL_CA_CERT`, `OPENVOX_CA_CTL_CLIENT_CERT`
+and `OPENVOX_CA_CTL_CLIENT_KEY`; a deployment sets them in
 `/etc/openvox-ca/ctl.yaml` (see [configuration](docs/operator-cli.md#configuration)).
 The [operator CLI reference](docs/operator-cli.md) covers the other subcommands.
 
