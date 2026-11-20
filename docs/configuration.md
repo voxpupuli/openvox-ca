@@ -2462,6 +2462,17 @@ csr_pem=$(cat)
 [[ "$subject" == web-* ]] && exit 0 || exit 1
 ```
 
+**What the executable is given.** Its only argument is the certname, and the
+CSR arrives in PEM form on standard input. Its environment is not the CA's: it
+gets a fixed `PATH` (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`),
+the CA's `HOME`, and `LANG` when the CA has one, and nothing else. So a
+credential in the CA's environment, such as `OPENVOX_CA_KEY_PASSPHRASE` or a
+database DSN, never reaches it, and a script that needs settings or secrets of
+its own reads them from a file. It runs as the CA's own user, in the CA's working
+directory, and whatever it writes to standard output or standard error is
+discarded. It has 30 seconds: one still running after that is killed, and the
+CSR waits for an operator, as it does after a non-zero exit.
+
 ### The autosign executable's path
 
 Whoever can replace the autosign executable decides which certificates the CA
