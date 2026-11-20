@@ -722,6 +722,128 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 	return nil
 }
 
+// attestationIdentity is one signing identity README.md's verification steps
+// pin: the workflow that signs, the text README.md pins it by, and the
+// attestations it makes, counted exactly. Covered by the 1.0.0 public API
+// (releasing.md, item 8): renaming the workflow, moving or dropping an
+// attestation, or changing the predicate one carries breaks every verification
+// an operator has scripted, and needs a major release.
+type attestationIdentity struct {
+	workflow   string // file under .github/workflows
+	readme     string // what README.md pins the identity by
+	provenance int    // actions/attest steps that keep the default SLSA v1 provenance predicate
+	sboms      int    // actions/attest steps that attest an SBOM (sbom-path)
+}
+
+// attestationIdentities are the signing identities README.md pins. The release
+// tarballs and packages carry one provenance bundle (`gh attestation verify
+// --signer-workflow`, and cosign's slsaprovenance1); each image carries
+// provenance per platform and for its index, and an SPDX and a CycloneDX SBOM
+// (`--predicate-type`); the chart carries provenance.
+var attestationIdentities = []attestationIdentity{
+	{"release.yml", "--signer-workflow voxpupuli/openvox-ca/.github/workflows/release.yml", 1, 0},
+	{"container-images.yml", "--signer-workflow voxpupuli/openvox-ca/.github/workflows/container-images.yml", 2, 2},
+	{"helm-chart.yml", `^https://github\.com/voxpupuli/openvox-ca/\.github/workflows/helm-chart\.yml@refs/tags/v`, 1, 0},
+}
+
+// attestInputs are the actions/attest inputs that choose subjects or how the
+// bundle is stored, plus sbom-path, which the attestationIdentity counts
+// separately. Anything else may change the predicate, which is public API, so
+// it is refused rather than guessed about: an allowlist, because the action's
+// predicate inputs have grown before.
+var attestInputs = map[string]bool{
+	"subject-checksums": true, "subject-path": true, "subject-digest": true, "subject-name": true,
+	"push-to-registry": true, "show-summary": true, "github-token": true, "sbom-path": true,
+}
+
+// verifyAttestations asserts that each workflow README.md tells operators to
+// verify against still makes the attestations they verify: for each identity in
+// attestationIdentities, README.md still pins it, the workflow runs exactly the
+// counted actions/attest steps, every such step uses only attestInputs (so a
+// provenance step keeps the action's default SLSA v1 predicate,
+// https://slsa.dev/provenance/v1, which `cosign --type slsaprovenance1`
+// selects), and every job that attests grants the id-token and attestations
+// permissions it signs with. The release read-back checks a published bundle
+// after the fact; this catches the change before a tag is cut. Wired into
+// dev:check.
+func verifyAttestations() error {
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		return err
+	}
+	sources := map[string][]byte{}
+	for _, id := range attestationIdentities {
+		src, err := os.ReadFile(filepath.Join(".github", "workflows", id.workflow))
+		if err != nil {
+			return err
+		}
+		sources[id.workflow] = src
+	}
+	return verifyAttestationsIn(attestationIdentities, sources, readme)
+}
+
+// verifyAttestationsIn is verifyAttestations over caller-supplied content, so
+// its refusals are testable without touching the real files.
+func verifyAttestationsIn(identities []attestationIdentity, sources map[string][]byte, readme []byte) error {
+	for _, id := range identities {
+		where := ".github/workflows/" + id.workflow
+		if !bytes.Contains(readme, []byte(id.readme)) {
+			return fmt.Errorf("README.md no longer pins %s by %q; the signing identity is public API "+
+				"(docs/development/releasing.md), so changing it needs a major release", where, id.readme)
+		}
+		var doc struct {
+			Jobs map[string]struct {
+				Permissions map[string]string `yaml:"permissions"`
+				Steps       []struct {
+					Name string            `yaml:"name"`
+					Uses string            `yaml:"uses"`
+					With map[string]string `yaml:"with"`
+				} `yaml:"steps"`
+			} `yaml:"jobs"`
+		}
+		if err := yaml.Unmarshal(sources[id.workflow], &doc); err != nil {
+			return fmt.Errorf("parsing %s: %w", where, err)
+		}
+		provenance, sboms := 0, 0
+		for name, job := range doc.Jobs {
+			attests := false
+			for _, step := range job.Steps {
+				if !strings.HasPrefix(step.Uses, "actions/attest@") {
+					continue
+				}
+				attests = true
+				for key := range step.With {
+					if !attestInputs[key] {
+						return fmt.Errorf("%s job %s step %q sets %s, which may change the predicate its "+
+							"bundle carries; the predicate type README.md verifies is public API "+
+							"(docs/development/releasing.md)", where, name, step.Name, key)
+					}
+				}
+				if _, sbom := step.With["sbom-path"]; sbom {
+					sboms++
+				} else {
+					provenance++
+				}
+			}
+			if !attests {
+				continue
+			}
+			for _, perm := range []string{"id-token", "attestations"} {
+				if job.Permissions[perm] != "write" {
+					return fmt.Errorf("%s job %s does not grant %s: write, so it cannot sign the "+
+						"attestations README.md tells operators to verify", where, name, perm)
+				}
+			}
+		}
+		if provenance != id.provenance || sboms != id.sboms {
+			return fmt.Errorf("%s makes %d provenance and %d SBOM attestations, not the %d and %d README.md "+
+				"has operators verify; the attestations are public API (docs/development/releasing.md)",
+				where, provenance, sboms, id.provenance, id.sboms)
+		}
+	}
+	return nil
+}
+
 // verifyReleaseJobConfinement asserts that release.yml's `release` job runs no
 // repository code. It is the one job granted contents: write, id-token: write
 // and attestations: write, so anything executing there does so beside the
@@ -1947,9 +2069,13 @@ var (
 // only, so an edit that moves one site and not the others passes all of them.
 // The fixture shares no data with a published image, but it is what the
 // compose suites run, so a fixture left on an old uid stops them exercising the
-// one shipped. The values are compared with each other rather than with a
-// literal, so moving the uid means editing the sites and not this check. Wired
-// into dev:check.
+// one shipped. The values are compared with each other first, so an edit that
+// moves one site names the site, and then with publishedImageUID: the uid the
+// images run as is covered by the 1.0.0 public API (releasing.md, item 8),
+// because operators set file ownership and security contexts by it. Moving it
+// everywhere at once is therefore a major-release change, which means editing
+// that constant, releasing.md and the docs that state it, not only the sites.
+// Wired into dev:check.
 func verifyImageUIDs() error {
 	alpine, err := os.ReadFile(alpineDockerfilePath)
 	if err != nil {
@@ -1969,6 +2095,10 @@ func verifyImageUIDs() error {
 	}
 	return verifyImageUIDsIn(alpine, distroless, values, fixture)
 }
+
+// publishedImageUID is the uid and gid the published images run the CA as.
+// See verifyImageUIDs: changing it needs a major release.
+const publishedImageUID = 65532
 
 // verifyImageUIDsIn is verifyImageUIDs over caller-supplied content, split out
 // so the refusal branches are testable without touching the real files.
@@ -2039,6 +2169,12 @@ func verifyImageUIDsIn(alpine, distroless, values, fixture []byte) error {
 				"each can read data another wrote, but they disagree: %s",
 				strings.Join(all, ", "))
 		}
+	}
+	if want := strconv.Itoa(publishedImageUID); sites[0].value != want {
+		return fmt.Errorf("the images and the chart run the CA as uid and gid %s, not the published %s: "+
+			"the uid is public API (docs/development/releasing.md), so moving it needs a major release, "+
+			"and publishedImageUID, releasing.md and the docs that state it change with it",
+			sites[0].value, want)
 	}
 	return nil
 }
@@ -5383,8 +5519,11 @@ type chartRenderCase struct {
 	// valuesYAML supplies values a --set cannot express, as on chartRejectCase:
 	// a key containing a dot, or one that has to keep surrounding whitespace.
 	valuesYAML string
-	wants      []string
-	notWants   []string
+	// release is the release name to render under; empty means openvox-ca,
+	// the chart's own name, which takes fullname's short branch.
+	release  string
+	wants    []string
+	notWants []string
 }
 
 // inlineCredentialSources are the files that declare the server's config keys,
@@ -5557,6 +5696,11 @@ data:
 // helmRender renders the chart, optionally including the post-install notes,
 // and optionally with an extra values file and extra helm arguments.
 func helmRender(notes bool, sets []string, valuesYAML string, extra ...string) (string, error) {
+	return helmRenderAs("openvox-ca", notes, sets, valuesYAML, extra...)
+}
+
+// helmRenderAs is helmRender under the given release name.
+func helmRenderAs(release string, notes bool, sets []string, valuesYAML string, extra ...string) (string, error) {
 	dir := chartDir
 	if notes {
 		tmp, err := os.MkdirTemp("", "openvox-ca-notes")
@@ -5574,7 +5718,7 @@ func helmRender(notes bool, sets []string, valuesYAML string, extra ...string) (
 		}
 	}
 
-	args := []string{"template", "openvox-ca", dir}
+	args := []string{"template", release, dir}
 	for _, s := range sets {
 		args = append(args, "--set", s)
 	}
@@ -5637,6 +5781,42 @@ func (Chart) Test() error {
 	}
 
 	renders := []chartRenderCase{
+		{
+			// What `helm upgrade` depends on, which releasing.md covers. The
+			// Deployment's selector is immutable, so a label added to
+			// openvox-ca.selectorLabels fails every upgrade; it is anchored on
+			// the key after it so that an addition fails here too. Renaming the
+			// claim orphans the CA's volume, and renaming the Deployment or the
+			// Service leaves the old ones behind. Changing any of these needs a
+			// major release.
+			name: "the upgrade surface: object names, the Deployment's selector and the claim",
+			sets: []string{tls, "persistence.enabled=true"},
+			wants: []string{
+				"kind: Deployment\nmetadata:\n  name: \"openvox-ca\"\n",
+				"kind: Service\nmetadata:\n  name: \"openvox-ca\"\n",
+				"kind: PersistentVolumeClaim\nmetadata:\n  name: \"openvox-ca\"\n",
+				"  selector:\n    matchLabels:\n      app.kubernetes.io/name: \"openvox-ca\"\n" +
+					"      app.kubernetes.io/instance: \"openvox-ca\"\n  strategy:\n",
+				"persistentVolumeClaim:\n            claimName: \"openvox-ca\"\n",
+			},
+		},
+		{
+			// The same surface under a release name that does not contain the
+			// chart's, which every other case cannot reach: fullname takes its
+			// <release>-<chart> branch, and the two selector labels differ, so
+			// swapping one for the other, or for fullname, shows.
+			name:    "the upgrade surface under another release name",
+			release: "ca",
+			sets:    []string{tls, "persistence.enabled=true"},
+			wants: []string{
+				"kind: Deployment\nmetadata:\n  name: \"ca-openvox-ca\"\n",
+				"kind: Service\nmetadata:\n  name: \"ca-openvox-ca\"\n",
+				"kind: PersistentVolumeClaim\nmetadata:\n  name: \"ca-openvox-ca\"\n",
+				"  selector:\n    matchLabels:\n      app.kubernetes.io/name: \"openvox-ca\"\n" +
+					"      app.kubernetes.io/instance: \"ca\"\n  strategy:\n",
+				"persistentVolumeClaim:\n            claimName: \"ca-openvox-ca\"\n",
+			},
+		},
 		{
 			name:  "an unset tag resolves to the unsuffixed (distroless) tag of the appVersion",
 			sets:  []string{tls, "image.tag=", "image.digest="},
@@ -8756,7 +8936,11 @@ config:
 	}
 
 	for _, tc := range renders {
-		out, err := helmRender(tc.notes, tc.sets, tc.valuesYAML)
+		release := tc.release
+		if release == "" {
+			release = "openvox-ca"
+		}
+		out, err := helmRenderAs(release, tc.notes, tc.sets, tc.valuesYAML)
 		if err != nil {
 			fmt.Printf("FAIL  %s\n      render failed: %v\n", tc.name, err)
 			failures++
@@ -8971,6 +9155,152 @@ func (Test) Unit() error {
 	return tparseErr
 }
 
+// publishedMixinAlerts and publishedMixinConfigKeys are the monitoring mixin's
+// alert names and _config keys as published. releasing.md (item 6 of "What the
+// version number promises") covers both: routing and silences are keyed on the
+// alert names, and an override on a renamed _config key silently does nothing.
+// So a name here that the mixin no longer renders is a rename or a removal,
+// and needs a major release. A name the mixin renders and these lists lack is
+// an addition, which is allowed; add it here when it ships, so that it is
+// protected from then on.
+var publishedMixinAlerts = []string{
+	"OpenVoxCAExporterDown",
+	"OpenVoxCAScrapeFailing",
+	"OpenVoxCANotReady",
+	"OpenVoxCADestructiveOperationsHigh",
+	"OpenVoxCACleanIncomplete",
+	"OpenVoxCAOpenBaoUnauthenticated",
+	"OpenVoxCASignerUnresponsive",
+	"OpenVoxCACertificateExpiringSoon",
+	"OpenVoxCACertificateExpiringCritical",
+	"OpenVoxCACRLExpiringSoon",
+	"OpenVoxCACRLExpired",
+	"OpenVoxCAUpstreamCRLExpiringSoon",
+	"OpenVoxCAUpstreamCRLExpired",
+	"OpenVoxCAUpstreamCRLDiscarded",
+	"OpenVoxCAUpstreamCRLRegressed",
+	"OpenVoxCAUpstreamCRLRemoved",
+	"OpenVoxCAUpstreamCRLNeverRead",
+	"OpenVoxCAUpstreamCRLRefreshFailing",
+	"OpenVoxCAClientCRLUnusable",
+	"OpenVoxCAClientCRLStale",
+	"OpenVoxCAClientCRLRefusals",
+	"OpenVoxCALeafCertificateExpiringSoon",
+	"OpenVoxCALeafCertificateExpiringCritical",
+	"OpenVoxCALeafCertificateExpired",
+	"OpenVoxCACertificateRequestPending",
+	"OpenVoxCACRLUpdateFailing",
+	"OpenVoxCASupersedeFailing",
+	"OpenVoxCACRLSyncFailing",
+	"OpenVoxCAOCSPIndexSyncFailing",
+	"OpenVoxCAInventoryTampered",
+	"OpenVoxCAInventoryUnreadable",
+	"OpenVoxCACRLStale",
+	"OpenVoxCAKubernetesExportFailing",
+	"OpenVoxCAKubernetesExportNotRunning",
+	"OpenVoxCAFileExportStale",
+	"OpenVoxCAManagedCertificateNeverIssued",
+}
+
+var publishedMixinConfigKeys = []string{
+	"alertLabels",
+	"caExpiryCriticalSeconds",
+	"caExpiryWarningSeconds",
+	"cleanFailureWindow",
+	"clientCRLRefusalWindow",
+	"clientCRLStaleSeconds",
+	"clientCRLUnusableFor",
+	"crlChainFor",
+	"crlChainWindow",
+	"crlExpiryWarningSeconds",
+	"crlLagFor",
+	"crlSyncFor",
+	"crlSyncThreshold",
+	"crlSyncWindow",
+	"crlUpdateFor",
+	"crlUpdateThreshold",
+	"crlUpdateWindow",
+	"destructiveOpsThreshold",
+	"destructiveOpsWindow",
+	"downFor",
+	"expiryFor",
+	"fileExportStaleAfterSeconds",
+	"fileExportStaleFor",
+	"inventoryTamperWindow",
+	"inventoryUnreadableFor",
+	"inventoryUnreadableThreshold",
+	"inventoryUnreadableWindow",
+	"k8sExportFailingFor",
+	"k8sExportNotRunningFor",
+	"leafExpiryCriticalSeconds",
+	"leafExpiryWarningSeconds",
+	"managedCertNeverIssuedFor",
+	"ocspIndexSyncFor",
+	"ocspIndexSyncThreshold",
+	"ocspIndexSyncWindow",
+	"openBaoUnauthenticatedFor",
+	"openvoxCASelector",
+	"pendingFor",
+	"readyFor",
+	"scrapeFor",
+	"signerUnresponsiveFor",
+	"supersedeFor",
+	"supersedeWindow",
+	"upstreamCRLExpiryWarningSeconds",
+}
+
+// verifyMixinPublishedNames refuses a published alert name or _config key the
+// rendered mixin no longer has. Additions pass. Called from Test.Mixin, which
+// renders the mixin; it needs jsonnet, so it is not part of dev:check.
+func verifyMixinPublishedNames(alerts, configKeys []string) error {
+	var problems []string
+	for _, pub := range []struct {
+		what      string
+		published []string
+		rendered  []string
+	}{
+		{"alert", publishedMixinAlerts, alerts},
+		{"_config key", publishedMixinConfigKeys, configKeys},
+	} {
+		have := make(map[string]bool, len(pub.rendered))
+		for _, n := range pub.rendered {
+			have[n] = true
+		}
+		for _, n := range pub.published {
+			if !have[n] {
+				problems = append(problems, fmt.Sprintf("published %s %s is gone", pub.what, n))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%s: renaming or removing a published mixin alert or _config key is a breaking "+
+			"change and needs a major release (docs/development/releasing.md); if this one is deliberate, "+
+			"remove it from publishedMixinAlerts or publishedMixinConfigKeys in that release",
+			strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// mixinNames renders the mixin's alert names and _config keys with jsonnet.
+func mixinNames() (alerts, configKeys []string, err error) {
+	for _, q := range []struct {
+		expr string
+		into *[]string
+	}{
+		{"[r.alert for g in (import 'mixin/mixin.libsonnet').prometheusAlerts.groups for r in g.rules if std.objectHas(r, 'alert')]", &alerts},
+		{"std.objectFields((import 'mixin/mixin.libsonnet')._config)", &configKeys},
+	} {
+		out, err := sh.Output("jsonnet", "-J", "mixin", "-e", q.expr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("rendering the mixin's names: %w", err)
+		}
+		if err := json.Unmarshal([]byte(out), q.into); err != nil {
+			return nil, nil, fmt.Errorf("decoding the mixin's names: %w", err)
+		}
+	}
+	return alerts, configKeys, nil
+}
+
 // Mixin renders the Jsonnet monitoring mixin and checks the alerting rules it
 // produces: `promtool check rules` for syntax, then `promtool test rules` for
 // the behaviour of the ones whose expressions are not simple thresholds (see
@@ -9007,6 +9337,13 @@ func (Test) Mixin() error {
 	}
 
 	if err := sh.RunV("promtool", "check", "rules", rendered); err != nil {
+		return err
+	}
+	alerts, configKeys, err := mixinNames()
+	if err != nil {
+		return err
+	}
+	if err := verifyMixinPublishedNames(alerts, configKeys); err != nil {
 		return err
 	}
 	return sh.RunV("promtool", "test", "rules", filepath.Join("mixin", "tests.yaml"))
@@ -9641,6 +9978,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking the release job's confinement...")
 	if err := verifyReleaseJobConfinement(); err != nil {
+		return err
+	}
+	fmt.Println("Checking the workflows make the attestations README.md verifies...")
+	if err := verifyAttestations(); err != nil {
 		return err
 	}
 	fmt.Println("Checking the release is published only after its asset names are checked...")

@@ -2929,13 +2929,18 @@ var _ = Describe("verifyImageUIDs", func() {
 		Expect(verifyImageUIDsIn(goodAlpine, goodDistroless, goodValues, goodFixture)).To(Succeed())
 	})
 
-	// Compared with each other, not with a literal: moving every site together
-	// is the change the check must allow.
-	It("accepts the uid moving everywhere at once", func() {
+	// The sites are compared with each other and then with publishedImageUID,
+	// so moving every site together is refused: the uid is public API, and
+	// moving it needs a major release and a releasing.md update.
+	It("refuses the uid moving everywhere at once, which is a major-release change", func() {
+		// Consistent, so the agreement check passes; the published uid is what
+		// refuses it.
 		Expect(verifyImageUIDsIn(alpine("USER 4242:4242"),
 			distroless("ARG CA_UID=4242", "USER ${CA_UID}:${CA_UID}"),
 			values("  runAsUser: 4242\n", "  runAsGroup: 4242\n", "  fsGroup: 4242\n"),
-			fixture("USER 4242:4242"))).To(Succeed())
+			fixture("USER 4242:4242"))).To(MatchError(SatisfyAll(
+			ContainSubstring("not the published 65532"),
+			ContainSubstring("needs a major release"))))
 	})
 
 	DescribeTable("refuses one site that disagrees",
@@ -11567,4 +11572,122 @@ var _ = Describe("the packaged configuration path", func() {
 		Entry("first-boot", "first-boot"),
 		Entry("postinstall", "postinstall"),
 	)
+})
+
+var _ = Describe("verifyMixinPublishedNames", func() {
+	// Fresh copies, so a spec that drops or adds a name cannot reach the
+	// published lists themselves.
+	alerts := func() []string { return append([]string(nil), publishedMixinAlerts...) }
+	keys := func() []string { return append([]string(nil), publishedMixinConfigKeys...) }
+	without := func(names []string, drop string) []string {
+		out := names[:0]
+		for _, n := range names {
+			if n != drop {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+
+	It("accepts the mixin as published", func() {
+		Expect(verifyMixinPublishedNames(alerts(), keys())).To(Succeed())
+	})
+
+	It("accepts an alert or a _config key the lists do not have yet", func() {
+		Expect(verifyMixinPublishedNames(append(alerts(), "OpenVoxCASomethingNew"),
+			append(keys(), "somethingNewFor"))).To(Succeed())
+	})
+
+	It("refuses a published alert renamed", func() {
+		renamed := append(without(alerts(), "OpenVoxCANotReady"), "OpenVoxCANotYetReady")
+		Expect(verifyMixinPublishedNames(renamed, keys())).To(MatchError(SatisfyAll(
+			ContainSubstring("published alert OpenVoxCANotReady is gone"),
+			ContainSubstring("needs a major release"))))
+	})
+
+	It("refuses a published _config key removed", func() {
+		Expect(verifyMixinPublishedNames(alerts(), without(keys(), "pendingFor"))).To(MatchError(
+			ContainSubstring("published _config key pendingFor is gone")))
+	})
+
+	It("has a floor: both lists are populated", func() {
+		// An empty list would pass every check above vacuously.
+		Expect(publishedMixinAlerts).NotTo(BeEmpty())
+		Expect(publishedMixinConfigKeys).NotTo(BeEmpty())
+	})
+})
+
+var _ = Describe("verifyAttestations", func() {
+	const pin = "--signer-workflow voxpupuli/openvox-ca/.github/workflows/x.yml"
+	readme := []byte("gh attestation verify x --repo voxpupuli/openvox-ca \\\n  " + pin + " \\\n")
+
+	// workflow builds one attesting job from the given permissions and steps.
+	workflow := func(perms, steps string) []byte {
+		return []byte("on: push\njobs:\n  publish:\n    runs-on: ubuntu-latest\n" +
+			"    permissions:\n" + perms + "    steps:\n" + steps)
+	}
+	const goodPerms = "      contents: write\n      id-token: write\n      attestations: write\n"
+	const provenance = "      - name: Attest build provenance\n" +
+		"        uses: actions/attest@0000000000000000000000000000000000000000 # v4\n" +
+		"        with:\n          subject-checksums: dist/checksums.txt\n"
+	const sbom = "      - name: Attest the SBOM\n" +
+		"        uses: actions/attest@0000000000000000000000000000000000000000 # v4\n" +
+		"        with:\n          subject-name: x\n          subject-digest: sha256:00\n" +
+		"          sbom-path: /tmp/x.spdx.json\n"
+	const other = "      - name: Download\n        uses: actions/download-artifact@0000000000000000000000000000000000000000\n"
+
+	check := func(prov, sboms int, src []byte, rm []byte) error {
+		return verifyAttestationsIn([]attestationIdentity{{"x.yml", pin, prov, sboms}},
+			map[string][]byte{"x.yml": src}, rm)
+	}
+
+	It("passes against the repository as it stands", func() {
+		Expect(verifyAttestations()).To(Succeed())
+	})
+
+	It("accepts the counted attestations with the default predicate", func() {
+		Expect(check(1, 0, workflow(goodPerms, other+provenance), readme)).To(Succeed())
+		Expect(check(1, 1, workflow(goodPerms, provenance+sbom), readme)).To(Succeed())
+	})
+
+	DescribeTable("refuses",
+		func(src, rm []byte, prov, sboms int, want string) {
+			Expect(check(prov, sboms, src, rm)).To(MatchError(ContainSubstring(want)))
+		},
+		Entry("a workflow that no longer attests",
+			workflow(goodPerms, other), readme, 1, 0, "makes 0 provenance and 0 SBOM attestations, not the 1 and 0"),
+		Entry("a workflow that attests twice",
+			workflow(goodPerms, provenance+provenance), readme, 1, 0, "makes 2 provenance"),
+		Entry("a provenance step turned into an SBOM",
+			workflow(goodPerms, sbom), readme, 1, 0, "makes 0 provenance and 1 SBOM"),
+		Entry("a predicate type of its own",
+			workflow(goodPerms, provenance+"          predicate-type: https://example.com/custom/v1\n"), readme, 1, 0,
+			"sets predicate-type,"),
+		Entry("a predicate of its own",
+			workflow(goodPerms, provenance+"          predicate: '{}'\n"), readme, 1, 0, "sets predicate,"),
+		Entry("a predicate file of its own",
+			workflow(goodPerms, provenance+"          predicate-path: custom.json\n"), readme, 1, 0, "sets predicate-path,"),
+		Entry("an input the allowlist does not know",
+			workflow(goodPerms, provenance+"          some-new-input: x\n"), readme, 1, 0, "sets some-new-input,"),
+		Entry("no id-token permission",
+			workflow("      contents: write\n      attestations: write\n", provenance), readme, 1, 0,
+			"does not grant id-token: write"),
+		Entry("no attestations permission",
+			workflow("      contents: write\n      id-token: write\n", provenance), readme, 1, 0,
+			"does not grant attestations: write"),
+		Entry("a README that no longer pins the identity",
+			workflow(goodPerms, provenance),
+			[]byte("--signer-workflow voxpupuli/openvox-ca/.github/workflows/publish.yml"), 1, 0,
+			"README.md no longer pins"),
+	)
+
+	It("covers every workflow README.md verifies against", func() {
+		// The floor under the table: the three identities README.md pins
+		// are all rows, so a row dropped from attestationIdentities fails.
+		var workflows []string
+		for _, id := range attestationIdentities {
+			workflows = append(workflows, id.workflow)
+		}
+		Expect(workflows).To(ConsistOf("release.yml", "container-images.yml", "helm-chart.yml"))
+	})
 })

@@ -18,6 +18,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 
@@ -141,5 +142,48 @@ var _ = Describe("generate subcommand --dns", func() {
 
 		Expect(gotDNS).To(Equal([]string{hostile}),
 			"one --dns must yield one name; raw query was %q", gotQuery)
+	})
+})
+
+// The output split releasing.md promises as public API: the certificate on
+// standard output, exactly as the server returned it, and the message on
+// standard error, so that `openvox-ca-ctl generate ... > cert.pem` yields a
+// usable file. The specs above discard stdout, and the compose suite only
+// hands it to `openssl verify`, which skips lines that are not PEM, so a
+// message moved onto stdout would pass both.
+var _ = Describe("generate subcommand output streams", func() {
+	const certPEM = "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIBAjAKBggqhkjOPQQDAjAA\n-----END CERTIFICATE-----\n"
+
+	var (
+		srv    *httptest.Server
+		cfg    string
+		outDir string
+	)
+
+	BeforeEach(func() {
+		saveCtlGlobals()
+		clearCtlEnv()
+		cfg = writeTempCtlConfig("")
+		outDir = GinkgoT().TempDir()
+		body, err := json.Marshal(map[string]string{"private_key": "KEY", "certificate": certPEM})
+		Expect(err).NotTo(HaveOccurred())
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write(body)
+		}))
+		DeferCleanup(srv.Close)
+	})
+
+	It("writes the certificate alone to stdout and the message to stderr", func() {
+		// Through captureStreams, which sets no writer of cobra's own, so a
+		// message moved onto cmd.OutOrStdout() reaches stdout here exactly as
+		// it would in the binary.
+		gotOut, gotErr, err := captureStreams([]string{"generate", "--config", cfg, "--server-url", srv.URL,
+			"--out-dir", outDir, "--certname", "node1.example.com"})
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(gotOut).To(Equal(certPEM),
+			"stdout must be the certificate and nothing else: `> cert.pem` is a promised contract")
+		Expect(gotErr).To(ContainSubstring("Private key saved to"),
+			"the human-readable line belongs on stderr")
 	})
 })
