@@ -2482,10 +2482,11 @@ exit, whatever it reads, the CA holds its CA-wide lock, and everything that
 reads the CA's in-memory state waits for it
 ([#664](https://github.com/voxpupuli/openvox-ca/issues/664)). That includes
 every request authenticated with a certificate this CA issued, every readiness
-probe, `certificate_statuses`, and, with `enable_ocsp` set, every OCSP request
-and metrics scrape. Any CSR submission starts a run, and submitting one needs no
-authentication; the per-address [`csr_rate_limit`](#rate-limit) bounds how
-often a client can start one, not how long it holds the lock. So keep the script
+probe and metrics scrape, `certificate_statuses`, and, with
+[`enable_ocsp`](#serving-ocsp) set, every OCSP request. Any CSR submission
+starts a run, and submitting one needs no authentication; the per-address
+[`csr_rate_limit`](#rate-limit) bounds how often a client can start one, not
+how long it holds the lock. So keep the script
 fast, and give anything whose duration an outside party can influence, such as a
 lookup keyed on the certname or a call to an external service, a short timeout
 of its own. Read standard input to the end first, as the example's
