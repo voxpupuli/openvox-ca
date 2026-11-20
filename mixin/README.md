@@ -4,6 +4,16 @@ A [monitoring mixin](https://monitoring.mixins.dev/) providing Prometheus
 alerting rules for the openvox-ca exporter. It alerts on:
 
 - the exporter being down or unable to read CA state, and the CA not being ready;
+- **administrative activity**: more than 25 subjects revoked or cleaned across
+  the CA in five minutes, which is a compromised administrator credential or an
+  operational mistake (`OpenVoxCADestructiveOperationsHigh`, a warning; a bulk
+  clean counts every subject it removes), and a clean that reported success
+  while one of its steps failed (`OpenVoxCACleanIncomplete`, a warning, by
+  step);
+- an **OpenBao Transit** signer that has been unable to log in for five minutes
+  (`OpenVoxCAOpenBaoUnauthenticated`, critical, and only where the CA key is in
+  [OpenBao](../docs/openbao-transit.md)). Once the token in hand expires, the CA
+  can sign nothing;
 - the **CA certificate** nearing expiry (warning) or expiring imminently (critical);
 - the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical).
   This covers **this CA's own CRL only** — block 0 of the stored blob, which the
@@ -58,10 +68,11 @@ alerting rules for the openvox-ca exporter. It alerts on:
   every hourly refresh pass and warns by the second, 15 minutes after it. A
   CRL that reads but cannot be signed or written counts only when the CA
   tries to amend it, because the refresh pass writes only when the CRL is due.
-  A best-effort revocation the CA does not retry — in a clean, or of a
-  certificate a renewal or managed-certificate reissue replaced with immediate
-  revocation — failing once is left to its log warning. See
-  [storage-retry alerts](../docs/metrics.md#storage-retry-alerts).
+  A best-effort revocation the CA does not retry, of a certificate a renewal or
+  managed-certificate reissue replaced with immediate revocation, failing once
+  is left to its log warning. See
+  [storage-retry alerts](../docs/metrics.md#storage-retry-alerts). The same
+  failure in a clean raises `OpenVoxCACleanIncomplete`, above.
 - **CRL propagation** — a replica that cannot reload the stored CRL, or that
   keeps enforcing one behind it. On a shared backend each replica decides
   revocation from its own copy, so a replica left behind still accepts
@@ -238,6 +249,10 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `leafExpiryWarningSeconds` | 7 days | Leaf certificate expiry warning threshold. |
 | `leafExpiryCriticalSeconds` | 1 day | Leaf certificate expiry critical threshold. |
 | `pendingFor` | `1h` | How long a request may stay pending before alerting. |
+| `destructiveOpsWindow` | `5m` | Window over which `OpenVoxCADestructiveOperationsHigh` sums revocations and cleans across the CA's replicas. |
+| `destructiveOpsThreshold` | `25` | Subjects revoked or cleaned within `destructiveOpsWindow` above which `OpenVoxCADestructiveOperationsHigh` fires: the server's per-client warning rate (more than 5 a minute) carried over to the whole CA on average. A burst of up to 25 in one minute stays under it, where the per-client warning fires at the sixth; lower it, or shorten `destructiveOpsWindow`, if that matters. Raise it where routine work cleans nodes in bulk. |
+| `cleanFailureWindow` | `1h` | How long one failed clean step keeps `OpenVoxCACleanIncomplete` firing. |
+| `openBaoUnauthenticatedFor` | `5m` | `for:` dwell for `OpenVoxCAOpenBaoUnauthenticated`. The signer retries a failed login every five seconds, whether the login was its own or one a request prompted, so this is about sixty attempts. |
 | `crlUpdateWindow` | `3h` | Window over which CRL-update failures are counted (the metric is a restart-resetting counter). The CRL refresh job takes the CRL lock and reads the stored CRL on every pass, so a CRL that stays unreadable, or whose lock cannot be taken, fails at least once per `crl_refresh_interval_sec` (1h by default); one that reads but cannot be written counts only when the CA tries to amend it. Keep the window at least `crlUpdateThreshold` + 1 intervals: at exactly the threshold a persistent fault flaps, and below it the alert never fires. Raise it alongside that setting. |
 | `crlUpdateThreshold` | `2` | Failures within `crlUpdateWindow` before the CRL-update-failure alert fires. Above one so that a backend restart costing a single amendment stays silent. With `crl_chain_file` set, the upstream chain refresh counts into the same counter on its own hourly pass, so a restart that overlaps both passes counts two and fires; set this to `3`, and `crlUpdateWindow` to `4h`, if you want those silent. |
 | `crlUpdateFor` | `15m` | `for:` debounce for the CRL-update-failure alert. Once the threshold is crossed `increase()` stays above it until the window passes the older failures, so this delays the alert rather than filtering a transient. |

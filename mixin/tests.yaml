@@ -1,6 +1,7 @@
 # promtool rule tests for the CRL-propagation, upstream-chain,
 # Kubernetes-export, file-export, delayed-supersession, leaf- and CRL-expiry,
-# managed-certificate, OCSP index sync and inventory-verification alerts.
+# managed-certificate, OCSP index sync, inventory-verification,
+# administrative-activity and OpenBao session alerts.
 #
 # Run with `mage test:mixin` from the repository root, which renders the mixin
 # to the path below and then runs both promtool checks over it.
@@ -48,6 +49,14 @@
 #     the exporter rather than for their shape: a failed gather holds the series
 #     they read for an hour, so their `for:` clocks run on through the failure,
 #     but only while they stay ungated on scrape_success.
+#   * OpenVoxCADestructiveOperationsHigh, OpenVoxCACleanIncomplete and
+#     OpenVoxCAOpenBaoUnauthenticated, which replace log lines the docs used
+#     to tell operators to alert on (#666). The cases pin that a bulk clean
+#     counts per subject, that the destructive-operations threshold is more
+#     than 25 and judged across replicas and per job and namespace, that one
+#     failed clean step fires, names its step and holds for the hour, and that
+#     the OpenBao alert waits out its dwell and stays silent on a CA with no
+#     OpenBao key.
 #   * OpenVoxCAManagedCertificateNeverIssued, whose two sides come from different
 #     places -- the configured series from the in-process configuration, the
 #     leaf series from storage -- so they disagree once a gather has been
@@ -75,6 +84,155 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
+
+  # A bulk clean of thirty subjects is thirty destructive operations, not one,
+  # and over the threshold of 25 in 5m. It fires while the burst is in the
+  # window and clears once the window has rolled past it, with no dwell.
+  - interval: 1m
+    name: a burst of destructive operations fires, then clears
+    input_series:
+      - series: 'openvoxca_destructive_operations_total{job="openvox-ca",instance="ca-1:9140",operation="bulk-clean"}'
+        values: "0x10 30+0x30"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: OpenVoxCADestructiveOperationsHigh
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: OpenVoxCADestructiveOperationsHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+            exp_annotations:
+              summary: "Many certificates are being revoked or cleaned."
+              description: "The OpenVox CA (openvox-ca) revoked or cleaned 30 subjects in the last 5m (openvoxca_destructive_operations_total). That is a compromised administrator credential or an operational mistake. The \"High rate of destructive operations detected\" warnings in the CA log name the client; see docs/ca-key-security.md."
+      - eval_time: 20m
+        alertname: OpenVoxCADestructiveOperationsHigh
+        exp_alerts: []
+
+  # Summed across replicas: fifteen revocations on each of two is thirty on
+  # the CA, which no single replica's series shows. A second CA under the same
+  # selector, in another namespace, is judged on its own, so its twenty stay
+  # under the threshold rather than adding to the first CA's thirty.
+  - interval: 1m
+    name: destructive operations are counted across the CA, not per replica
+    input_series:
+      - series: 'openvoxca_destructive_operations_total{job="openvox-ca",namespace="pki",instance="ca-1:9140",operation="revoke"}'
+        values: "0x10 15+0x30"
+      - series: 'openvoxca_destructive_operations_total{job="openvox-ca",namespace="pki",instance="ca-2:9140",operation="revoke"}'
+        values: "0x10 15+0x30"
+      - series: 'openvoxca_destructive_operations_total{job="openvox-ca",namespace="lab",instance="ca-3:9140",operation="clean"}'
+        values: "0x10 20+0x30"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: OpenVoxCADestructiveOperationsHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              namespace: pki
+            exp_annotations:
+              summary: "Many certificates are being revoked or cleaned."
+              description: "The OpenVox CA (openvox-ca) revoked or cleaned 30 subjects in the last 5m (openvoxca_destructive_operations_total). That is a compromised administrator credential or an operational mistake. The \"High rate of destructive operations detected\" warnings in the CA log name the client; see docs/ca-key-security.md."
+
+  # The threshold is "more than 25", which docs/metrics.md and the mixin's
+  # README publish: exactly 25 stays silent and 26 fires.
+  - interval: 1m
+    name: the destructive-operations threshold is more than 25
+    input_series:
+      - series: 'openvoxca_destructive_operations_total{job="openvox-ca",namespace="at",instance="ca-1:9140",operation="revoke"}'
+        values: "0x10 25+0x30"
+      - series: 'openvoxca_destructive_operations_total{job="openvox-ca",namespace="over",instance="ca-2:9140",operation="revoke"}'
+        values: "0x10 26+0x30"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: OpenVoxCADestructiveOperationsHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              namespace: over
+            exp_annotations:
+              summary: "Many certificates are being revoked or cleaned."
+              description: "The OpenVox CA (openvox-ca) revoked or cleaned 26 subjects in the last 5m (openvoxca_destructive_operations_total). That is a compromised administrator credential or an operational mistake. The \"High rate of destructive operations detected\" warnings in the CA log name the client; see docs/ca-key-security.md."
+
+  # One failed step is enough, since the clean itself reported success. The
+  # step is kept, because the remedy depends on it, and a step that has not
+  # failed does not fire. The window holds the alert for an hour.
+  - interval: 1m
+    name: a clean that left something behind fires on one failure
+    input_series:
+      - series: 'openvoxca_clean_failures_total{job="openvox-ca",instance="ca-1:9140",step="revoke"}'
+        values: "0x10 1+0x120"
+      - series: 'openvoxca_clean_failures_total{job="openvox-ca",instance="ca-1:9140",step="delete_cert"}'
+        values: "0x130"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: OpenVoxCACleanIncomplete
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: OpenVoxCACleanIncomplete
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              step: revoke
+            exp_annotations:
+              summary: "A clean left something behind."
+              description: "The OpenVox CA on ca-1:9140 reported a clean as successful while its revoke step failed (openvoxca_clean_failures_total). After a failed revoke the deleted certificate stays a valid credential until it expires: revoke it by serial. After a failed delete the subject cannot enrol again: clean it once more. The \"Clean:\" warnings in the CA log name the subject; see docs/api.md."
+      # Still up just inside the hour cleanFailureWindow holds it for.
+      - eval_time: 69m
+        alertname: OpenVoxCACleanIncomplete
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              step: revoke
+            exp_annotations:
+              summary: "A clean left something behind."
+              description: "The OpenVox CA on ca-1:9140 reported a clean as successful while its revoke step failed (openvoxca_clean_failures_total). After a failed revoke the deleted certificate stays a valid credential until it expires: revoke it by serial. After a failed delete the subject cannot enrol again: clean it once more. The \"Clean:\" warnings in the CA log name the subject; see docs/api.md."
+      - eval_time: 75m
+        alertname: OpenVoxCACleanIncomplete
+        exp_alerts: []
+
+  # The signer retries a failed OpenBao login every five seconds, so a
+  # failure that outlasts openBaoUnauthenticatedFor (5m) is one retrying will
+  # not fix. Quiet at 4m, paging at 6m, quiet again once a login succeeds.
+  - interval: 1m
+    name: a signer that cannot log in to OpenBao pages after the dwell
+    input_series:
+      - series: 'openvoxca_openbao_authenticated{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1x10 0x20 1x10"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: OpenVoxCAOpenBaoUnauthenticated
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: OpenVoxCAOpenBaoUnauthenticated
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openvox-ca
+              instance: ca-1:9140
+            exp_annotations:
+              summary: "The OpenVox CA cannot log in to OpenBao."
+              description: "The OpenVox CA signer on ca-1:9140 has been unable to log in to OpenBao for 5m (openvoxca_openbao_authenticated=0). Once its current token expires it cannot sign certificates, CRLs or OCSP responses. Check that OpenBao is reachable and that the source credential (AppRole secret_id, Kubernetes service account or token file) is still valid; see docs/openbao-transit.md."
+      - eval_time: 35m
+        alertname: OpenVoxCAOpenBaoUnauthenticated
+        exp_alerts: []
+
+  # A CA whose key is not in OpenBao exports no such series, and must not page.
+  - interval: 1m
+    name: a CA without OpenBao never pages for it
+    input_series:
+      - series: 'openvoxca_ca_ready{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: OpenVoxCAOpenBaoUnauthenticated
+        exp_alerts: []
 
   # A replica whose cached CRL trails the stored one is stale, and pages once
   # the lag outlives crlLagFor (10m). A gap shorter than that is just the sync

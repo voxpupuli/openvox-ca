@@ -64,6 +64,36 @@
     // larger value (or silence the alert) on CAs that sign manually by policy.
     pendingFor: '1h',
 
+    // --- Destructive operations ---
+    // OpenVoxCADestructiveOperationsHigh fires when more than
+    // destructiveOpsThreshold subjects are revoked or cleaned across the CA's
+    // replicas within destructiveOpsWindow. The defaults carry the server's
+    // own per-client warning (more than 5 in a minute) over to the whole CA at
+    // the same average rate, but not the same sensitivity to a short burst: up
+    // to 25 in one minute and then nothing stays under this, where the
+    // warning fires at the sixth. Shorten the window or lower the threshold
+    // if a burst that size matters to you; the warning still names the
+    // client. A bulk clean counts every subject it removes, so a single
+    // request that empties the CA fires this too. Raise the threshold on a CA
+    // whose routine work cleans nodes in bulk, such as autoscaled fleets.
+    destructiveOpsWindow: '5m',
+    destructiveOpsThreshold: 25,
+
+    // --- Incomplete cleans ---
+    // A clean carries on past a failed step and still reports success, so
+    // OpenVoxCACleanIncomplete fires on one failed step, and stays up for the
+    // window so that it is seen.
+    cleanFailureWindow: '1h',
+
+    // --- OpenBao Transit session ---
+    // How long the signer may go without a successful OpenBao login before
+    // OpenVoxCAOpenBaoUnauthenticated pages. The signer retries every five
+    // seconds, after a failed login a request prompted as well as one its
+    // background loop made, so this is about sixty attempts: long enough to
+    // ride out an
+    // OpenBao restart, short enough to act before a token's lease runs out.
+    openBaoUnauthenticatedFor: '5m',
+
     // --- CRL update failures ---
     // The CA may fail to amend its CRL (a revocation it cannot record, or a CRL
     // it cannot re-sign or write). Some of these are best-effort and swallowed

@@ -45,6 +45,83 @@
         ],
       },
       {
+        name: 'openvox-ca-administrative-activity',
+        rules: [
+          {
+            alert: 'OpenVoxCADestructiveOperationsHigh',
+            // Subjects revoked or cleaned through the API, summed across the
+            // CA's replicas: a compromised administrator credential spreads
+            // across them as easily as across one. By job and namespace so
+            // that two CAs under one selector are judged apart. The log line
+            // naming the client is the server's "High rate of destructive
+            // operations detected" warning, which works per client per
+            // replica; this works on the whole CA, because a label per client
+            // would be unbounded.
+            //
+            // No `for`: a burst is an event, and increase() over the window
+            // keeps it up for as long as the burst is in range.
+            expr: |||
+              sum by (job, namespace) (
+                increase(openvoxca_destructive_operations_total{%(selector)s}[%(window)s])
+              ) > %(threshold)d
+            ||| % {
+              selector: $._config.openvoxCASelector,
+              window: $._config.destructiveOpsWindow,
+              threshold: $._config.destructiveOpsThreshold,
+            },
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'Many certificates are being revoked or cleaned.',
+              description: 'The OpenVox CA ({{ $labels.job }}) revoked or cleaned {{ $value | humanize }} subjects in the last %(window)s (openvoxca_destructive_operations_total). That is a compromised administrator credential or an operational mistake. The "High rate of destructive operations detected" warnings in the CA log name the client; see docs/ca-key-security.md.' % {
+                window: $._config.destructiveOpsWindow,
+              },
+            },
+          },
+          {
+            alert: 'OpenVoxCACleanIncomplete',
+            // A clean answers success whichever of its steps failed, so this
+            // is the only signal that one left something behind. Fires on one
+            // failure, by step, since the remedies differ: on revoke the
+            // deleted certificate is still a valid credential, on a delete
+            // the subject cannot enrol again.
+            expr: 'increase(openvoxca_clean_failures_total{%(selector)s}[%(window)s]) > 0' % {
+              selector: $._config.openvoxCASelector,
+              window: $._config.cleanFailureWindow,
+            },
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'A clean left something behind.',
+              description: 'The OpenVox CA on {{ $labels.instance }} reported a clean as successful while its {{ $labels.step }} step failed (openvoxca_clean_failures_total). After a failed revoke the deleted certificate stays a valid credential until it expires: revoke it by serial. After a failed delete the subject cannot enrol again: clean it once more. The "Clean:" warnings in the CA log name the subject; see docs/api.md.',
+            },
+          },
+        ],
+      },
+      {
+        name: 'openvox-ca-key-backend',
+        rules: [
+          {
+            alert: 'OpenVoxCAOpenBaoUnauthenticated',
+            // The signer's most recent login to OpenBao failed, so no new
+            // token can be had, and issuance, CRL re-signing and OCSP fail once
+            // the one in hand expires. It retries every five seconds, so the
+            // gauge returns to 1 by itself once a login can succeed. The series exists
+            // only where the CA key is an OpenBao Transit key, so this is
+            // silent everywhere else.
+            expr: 'openvoxca_openbao_authenticated{%(selector)s} == 0' % {
+              selector: $._config.openvoxCASelector,
+            },
+            'for': $._config.openBaoUnauthenticatedFor,
+            labels: { severity: 'critical' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The OpenVox CA cannot log in to OpenBao.',
+              description: 'The OpenVox CA signer on {{ $labels.instance }} has been unable to log in to OpenBao for %(for)s (openvoxca_openbao_authenticated=0). Once its current token expires it cannot sign certificates, CRLs or OCSP responses. Check that OpenBao is reachable and that the source credential (AppRole secret_id, Kubernetes service account or token file) is still valid; see docs/openbao-transit.md.' % {
+                'for': $._config.openBaoUnauthenticatedFor,
+              },
+            },
+          },
+        ],
+      },
+      {
         name: 'openvox-ca-certificate-expiry',
         rules: [
           {
