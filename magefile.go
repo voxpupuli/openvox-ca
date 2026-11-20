@@ -722,6 +722,128 @@ func verifyDistVariantsIn(ciSrc, relSrc, sbomSrc []byte) error {
 	return nil
 }
 
+// attestationIdentity is one signing identity README.md's verification steps
+// pin: the workflow that signs, the text README.md pins it by, and the
+// attestations it makes, counted exactly. Covered by the 1.0.0 public API
+// (releasing.md, item 8): renaming the workflow, moving or dropping an
+// attestation, or changing the predicate one carries breaks every verification
+// an operator has scripted, and needs a major release.
+type attestationIdentity struct {
+	workflow   string // file under .github/workflows
+	readme     string // what README.md pins the identity by
+	provenance int    // actions/attest steps that keep the default SLSA v1 provenance predicate
+	sboms      int    // actions/attest steps that attest an SBOM (sbom-path)
+}
+
+// attestationIdentities are the signing identities README.md pins. The release
+// tarballs and packages carry one provenance bundle (`gh attestation verify
+// --signer-workflow`, and cosign's slsaprovenance1); each image carries
+// provenance per platform and for its index, and an SPDX and a CycloneDX SBOM
+// (`--predicate-type`); the chart carries provenance.
+var attestationIdentities = []attestationIdentity{
+	{"release.yml", "--signer-workflow voxpupuli/openvox-ca/.github/workflows/release.yml", 1, 0},
+	{"container-images.yml", "--signer-workflow voxpupuli/openvox-ca/.github/workflows/container-images.yml", 2, 2},
+	{"helm-chart.yml", `^https://github\.com/voxpupuli/openvox-ca/\.github/workflows/helm-chart\.yml@refs/tags/v`, 1, 0},
+}
+
+// attestInputs are the actions/attest inputs that choose subjects or how the
+// bundle is stored, plus sbom-path, which the attestationIdentity counts
+// separately. Anything else may change the predicate, which is public API, so
+// it is refused rather than guessed about: an allowlist, because the action's
+// predicate inputs have grown before.
+var attestInputs = map[string]bool{
+	"subject-checksums": true, "subject-path": true, "subject-digest": true, "subject-name": true,
+	"push-to-registry": true, "show-summary": true, "github-token": true, "sbom-path": true,
+}
+
+// verifyAttestations asserts that each workflow README.md tells operators to
+// verify against still makes the attestations they verify: for each identity in
+// attestationIdentities, README.md still pins it, the workflow runs exactly the
+// counted actions/attest steps, every such step uses only attestInputs (so a
+// provenance step keeps the action's default SLSA v1 predicate,
+// https://slsa.dev/provenance/v1, which `cosign --type slsaprovenance1`
+// selects), and every job that attests grants the id-token and attestations
+// permissions it signs with. The release read-back checks a published bundle
+// after the fact; this catches the change before a tag is cut. Wired into
+// dev:check.
+func verifyAttestations() error {
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		return err
+	}
+	sources := map[string][]byte{}
+	for _, id := range attestationIdentities {
+		src, err := os.ReadFile(filepath.Join(".github", "workflows", id.workflow))
+		if err != nil {
+			return err
+		}
+		sources[id.workflow] = src
+	}
+	return verifyAttestationsIn(attestationIdentities, sources, readme)
+}
+
+// verifyAttestationsIn is verifyAttestations over caller-supplied content, so
+// its refusals are testable without touching the real files.
+func verifyAttestationsIn(identities []attestationIdentity, sources map[string][]byte, readme []byte) error {
+	for _, id := range identities {
+		where := ".github/workflows/" + id.workflow
+		if !bytes.Contains(readme, []byte(id.readme)) {
+			return fmt.Errorf("README.md no longer pins %s by %q; the signing identity is public API "+
+				"(docs/development/releasing.md), so changing it needs a major release", where, id.readme)
+		}
+		var doc struct {
+			Jobs map[string]struct {
+				Permissions map[string]string `yaml:"permissions"`
+				Steps       []struct {
+					Name string            `yaml:"name"`
+					Uses string            `yaml:"uses"`
+					With map[string]string `yaml:"with"`
+				} `yaml:"steps"`
+			} `yaml:"jobs"`
+		}
+		if err := yaml.Unmarshal(sources[id.workflow], &doc); err != nil {
+			return fmt.Errorf("parsing %s: %w", where, err)
+		}
+		provenance, sboms := 0, 0
+		for name, job := range doc.Jobs {
+			attests := false
+			for _, step := range job.Steps {
+				if !strings.HasPrefix(step.Uses, "actions/attest@") {
+					continue
+				}
+				attests = true
+				for key := range step.With {
+					if !attestInputs[key] {
+						return fmt.Errorf("%s job %s step %q sets %s, which may change the predicate its "+
+							"bundle carries; the predicate type README.md verifies is public API "+
+							"(docs/development/releasing.md)", where, name, step.Name, key)
+					}
+				}
+				if _, sbom := step.With["sbom-path"]; sbom {
+					sboms++
+				} else {
+					provenance++
+				}
+			}
+			if !attests {
+				continue
+			}
+			for _, perm := range []string{"id-token", "attestations"} {
+				if job.Permissions[perm] != "write" {
+					return fmt.Errorf("%s job %s does not grant %s: write, so it cannot sign the "+
+						"attestations README.md tells operators to verify", where, name, perm)
+				}
+			}
+		}
+		if provenance != id.provenance || sboms != id.sboms {
+			return fmt.Errorf("%s makes %d provenance and %d SBOM attestations, not the %d and %d README.md "+
+				"has operators verify; the attestations are public API (docs/development/releasing.md)",
+				where, provenance, sboms, id.provenance, id.sboms)
+		}
+	}
+	return nil
+}
+
 // verifyReleaseJobConfinement asserts that release.yml's `release` job runs no
 // repository code. It is the one job granted contents: write, id-token: write
 // and attestations: write, so anything executing there does so beside the
@@ -9856,6 +9978,10 @@ func (Dev) Check() error {
 	}
 	fmt.Println("Checking the release job's confinement...")
 	if err := verifyReleaseJobConfinement(); err != nil {
+		return err
+	}
+	fmt.Println("Checking the workflows make the attestations README.md verifies...")
+	if err := verifyAttestations(); err != nil {
 		return err
 	}
 	fmt.Println("Checking the release is published only after its asset names are checked...")

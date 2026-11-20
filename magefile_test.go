@@ -11616,3 +11616,78 @@ var _ = Describe("verifyMixinPublishedNames", func() {
 		Expect(publishedMixinConfigKeys).NotTo(BeEmpty())
 	})
 })
+
+var _ = Describe("verifyAttestations", func() {
+	const pin = "--signer-workflow voxpupuli/openvox-ca/.github/workflows/x.yml"
+	readme := []byte("gh attestation verify x --repo voxpupuli/openvox-ca \\\n  " + pin + " \\\n")
+
+	// workflow builds one attesting job from the given permissions and steps.
+	workflow := func(perms, steps string) []byte {
+		return []byte("on: push\njobs:\n  publish:\n    runs-on: ubuntu-latest\n" +
+			"    permissions:\n" + perms + "    steps:\n" + steps)
+	}
+	const goodPerms = "      contents: write\n      id-token: write\n      attestations: write\n"
+	const provenance = "      - name: Attest build provenance\n" +
+		"        uses: actions/attest@0000000000000000000000000000000000000000 # v4\n" +
+		"        with:\n          subject-checksums: dist/checksums.txt\n"
+	const sbom = "      - name: Attest the SBOM\n" +
+		"        uses: actions/attest@0000000000000000000000000000000000000000 # v4\n" +
+		"        with:\n          subject-name: x\n          subject-digest: sha256:00\n" +
+		"          sbom-path: /tmp/x.spdx.json\n"
+	const other = "      - name: Download\n        uses: actions/download-artifact@0000000000000000000000000000000000000000\n"
+
+	check := func(prov, sboms int, src []byte, rm []byte) error {
+		return verifyAttestationsIn([]attestationIdentity{{"x.yml", pin, prov, sboms}},
+			map[string][]byte{"x.yml": src}, rm)
+	}
+
+	It("passes against the repository as it stands", func() {
+		Expect(verifyAttestations()).To(Succeed())
+	})
+
+	It("accepts the counted attestations with the default predicate", func() {
+		Expect(check(1, 0, workflow(goodPerms, other+provenance), readme)).To(Succeed())
+		Expect(check(1, 1, workflow(goodPerms, provenance+sbom), readme)).To(Succeed())
+	})
+
+	DescribeTable("refuses",
+		func(src, rm []byte, prov, sboms int, want string) {
+			Expect(check(prov, sboms, src, rm)).To(MatchError(ContainSubstring(want)))
+		},
+		Entry("a workflow that no longer attests",
+			workflow(goodPerms, other), readme, 1, 0, "makes 0 provenance and 0 SBOM attestations, not the 1 and 0"),
+		Entry("a workflow that attests twice",
+			workflow(goodPerms, provenance+provenance), readme, 1, 0, "makes 2 provenance"),
+		Entry("a provenance step turned into an SBOM",
+			workflow(goodPerms, sbom), readme, 1, 0, "makes 0 provenance and 1 SBOM"),
+		Entry("a predicate type of its own",
+			workflow(goodPerms, provenance+"          predicate-type: https://example.com/custom/v1\n"), readme, 1, 0,
+			"sets predicate-type,"),
+		Entry("a predicate of its own",
+			workflow(goodPerms, provenance+"          predicate: '{}'\n"), readme, 1, 0, "sets predicate,"),
+		Entry("a predicate file of its own",
+			workflow(goodPerms, provenance+"          predicate-path: custom.json\n"), readme, 1, 0, "sets predicate-path,"),
+		Entry("an input the allowlist does not know",
+			workflow(goodPerms, provenance+"          some-new-input: x\n"), readme, 1, 0, "sets some-new-input,"),
+		Entry("no id-token permission",
+			workflow("      contents: write\n      attestations: write\n", provenance), readme, 1, 0,
+			"does not grant id-token: write"),
+		Entry("no attestations permission",
+			workflow("      contents: write\n      id-token: write\n", provenance), readme, 1, 0,
+			"does not grant attestations: write"),
+		Entry("a README that no longer pins the identity",
+			workflow(goodPerms, provenance),
+			[]byte("--signer-workflow voxpupuli/openvox-ca/.github/workflows/publish.yml"), 1, 0,
+			"README.md no longer pins"),
+	)
+
+	It("covers every workflow README.md verifies against", func() {
+		// The floor under the table: the three identities README.md pins
+		// are all rows, so a row dropped from attestationIdentities fails.
+		var workflows []string
+		for _, id := range attestationIdentities {
+			workflows = append(workflows, id.workflow)
+		}
+		Expect(workflows).To(ConsistOf("release.yml", "container-images.yml", "helm-chart.yml"))
+	})
+})
