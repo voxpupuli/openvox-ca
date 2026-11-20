@@ -906,13 +906,6 @@ left the CA bundle, so its published CRL can no longer be attributed to anyone
 `openvoxca_crl_chain_last_read_timestamp_seconds`, reads `0` where the file is
 configured but has never been opened.
 
-> **Rolling upgrades.** A replica running a build from before chain preservation
-> re-signs the CRL as a single block and silently drops the chain, so one old
-> replica handling one revocation undoes it for everyone. Make sure every
-> replica is running a build with chain preservation *before* configuring
-> `crl_chain_file`. Preservation is a no-op on a single-CRL deployment, so that
-> ordering costs nothing.
-
 ## Serving OCSP
 
 The OCSP responder, `POST /ocsp` and `GET /ocsp/{request}` (also under
@@ -1280,15 +1273,12 @@ An operator's renewal through
 That is the case it was set for: a certificate held by something that is not
 renewing it itself, and has to be told about the replacement.
 
-> **Upgrading.** This changes behaviour without any config change. Before this
-> setting existed, every renewal revoked its predecessor before returning; now
-> the predecessor stays valid for 24 hours by default. If you need the old
-> behaviour — because your threat model does not tolerate a replaced credential
-> outliving its replacement at all — set `superseded_cert_revoke_after_sec: 0`,
-> which is an explicit choice and not the same as leaving it unset. You will
-> also see a new `superseded.json` in the cadir, a
-> `Starting superseded-certificate revocation sweep` line in the logs at
-> startup, and `openvoxca_supersede_pending` rising and falling.
+If your threat model does not tolerate a replaced credential outliving its
+replacement at all, set `superseded_cert_revoke_after_sec: 0`, and every renewal
+revokes its predecessor before returning. That is an explicit choice and not the
+same as leaving it unset. The window shows up as a `superseded.json` in the
+cadir, a `Starting superseded-certificate revocation sweep` line in the logs at
+startup, and `openvoxca_supersede_pending` rising and falling.
 
 **The window is a deliberate weakening, and because it is the default it is one
 you inherit rather than choose.** For its whole length the replaced certificate
@@ -1303,7 +1293,7 @@ Two things bound that, and they are why the default is defensible:
   pending list as well as the CRL, so the credential the window keeps alive
   cannot mint a fresh full-lifetime successor and leave the window behind. That
   check is what makes the window bound the exposure rather than end it, and it
-  runs for every deployment because the window now does.
+  runs for every deployment because the window is on by default.
 - **Revoking the subject retires it.** `revoke --certname` reaches a recorded
   predecessor in the same call, so containment is not weakened by the window.
 
@@ -1342,7 +1332,7 @@ Some things worth knowing before you rely on it:
   than for one per entry. Under
   [`ca_key_provider: openbao`](openbao-transit.md) it is likewise one remote
   Transit round trip rather than one per entry. That matters most in the case
-  the sweep used to handle worst: a large backlog coming due at once, after a
+  a per-entry sweep would handle worst: a large backlog coming due at once, after a
   fleet-wide outage or a passphrase rotation. A pass that cannot amend the CRL
   fails as a whole — it leaves every entry it attempted on the list, raises
   `openvoxca_supersede_failures_total`, and the next pass retries them
@@ -1459,7 +1449,8 @@ refused at startup rather than discovered at issuance, and each name occupies
 the ordinary inventory slot for that subject. The certname `ca` is refused at
 startup as well, here and in `serving_cert`: no path that generates a private
 key accepts it, because on the filesystem backend `POST /generate/ca` would
-write that key over the CA's own in a cadir created by an earlier openvox-ca.
+write that key over the CA's own in a cadir that keeps it in
+`private/ca_key.pem`.
 Choose another certname.
 
 **Two managed certificates cannot share a certname**, and neither can a managed

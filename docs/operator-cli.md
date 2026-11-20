@@ -599,8 +599,8 @@ command exists for the two cases the API cannot serve:
   construction (see [Auth-arc OID stripping](migrating-from-puppet-server.md#auth-arc-oid-stripping));
 - minting before a server exists. `openvox-ca-ctl generate` can only reach that
   by starting the CA temporarily on loopback with TLS disabled, where every
-  endpoint is unauthenticated — which is exactly the dance the migration guide
-  used to prescribe, and what this command exists to make unnecessary.
+  endpoint is unauthenticated — which is what this command exists to make
+  unnecessary.
   [The first credential on a new CA](#the-first-credential-on-a-new-ca) walks
   through that case: it is a deadlock rather than an inconvenience, and it is
   the one an operator meets first.
@@ -645,8 +645,7 @@ your fleet trusts and no obvious sign of why.
 
 **It refuses the certname `ca`**, with or without `--key-out`, before opening
 the storage. Without `--key-out` the key would go to `private/ca_key.pem`, which
-on the filesystem backend is where a cadir created by an earlier openvox-ca
-keeps the CA key itself. `POST /generate/ca` and a managed certificate named
+on the filesystem backend is where some cadirs keep the CA key itself. `POST /generate/ca` and a managed certificate named
 `ca` are refused too, so that the name means one thing on every path that
 generates a key. Submitting a CSR for `ca` is still accepted.
 
@@ -713,8 +712,8 @@ writers on different hosts can each decide a subject has no certificate and both
 issue one. Without an atomic inventory append — `filesystem` alone — the
 integrity record is recomputed from a snapshot, so an interleaved append leaves
 an HMAC covering a state that never existed, after which the server refuses to
-start. Recovery was a cutover: `migrate` rebuilds the integrity value on the
-destination, so it needs a second store, and it now refuses such a source unless
+start. One recovery is a cutover: `migrate` rebuilds the integrity value on the
+destination, so it needs a second store, and it refuses such a source unless
 given `--allow-unverified-source`. There is an in-place repair as
 well — see
 [`rebuild-inventory-hmac`](#rebuild-inventory-hmac-re-asserting-inventory-integrity),
@@ -1139,8 +1138,7 @@ below.
 
 `scheme` is worth reading before anything else. A mismatch also fires when a
 store is served under a different integrity scheme than the value was written
-with, which is a different cause reached by the same repair — see [upgrading a
-pre-fix deployment](development/storage-internals.md#upgrading-a-pre-fix-ca_key_file--ca_cert_file--database-deployment).
+with, which is a different cause reached by the same repair.
 
 What it cannot tell you is **which** entry diverged. The backends persist a
 single integrity head and no per-entry value, so nothing records what any
@@ -1224,8 +1222,8 @@ mismatch** the transcript above shows — that one is a usable key with a stored
 value the inventory no longer matches.
 
 If the store still holds an **undecomposed legacy inventory** — an etcd or Redis
-CA upgraded from a release before the inventory was decomposed into per-entry
-keys, which has not been started since — the command refuses outright. It reads
+store whose inventory is still a single blob, because no server has started on
+it to convert it into per-entry keys — the command refuses outright. It reads
 the decomposed rows, which do not exist yet, so it would report an empty
 inventory for a store holding a full one, and rebuilding would write an empty
 chain head over the whole-blob value that is the only thing able to validate the
@@ -1236,8 +1234,8 @@ the legacy blob still verifies, the server decomposes it and starts, after which
 this command applies normally. If it does not, the server refuses with an
 integrity error — decomposition checks the blob against its own stored value
 before committing — and that error names the stored legacy value to remove in
-order to acknowledge a lost baseline. This command cannot repair a
-pre-decomposition inventory either way, which is why it refuses rather than
+order to acknowledge a lost baseline. This command cannot repair an
+undecomposed inventory either way, which is why it refuses rather than
 reporting.
 
 If **no HMAC key is stored and no integrity value is either**, there is nothing

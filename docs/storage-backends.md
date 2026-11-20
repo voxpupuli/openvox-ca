@@ -99,9 +99,9 @@ directory beside the database file for `sqlite`. So:
   Every other `openvox-ca-ctl` subcommand works through the admin API over HTTP
   instead, never opens the store, and is unaffected — asking a running CA to
   sign, revoke or list remains an ordinary thing to do.
-- **`migrate` no longer hangs when both ends are the same store.** That was
-  never supported, and it used to wait for ever on a lock it had already taken
-  itself; it now fails immediately.
+- **`migrate` fails at once when both ends are the same store**, rather than
+  waiting for ever on a lock it has already taken itself. Migrating a store
+  onto itself is not supported.
 - **Nothing to clean up after a crash.** The kernel releases an `flock` when the
   holding process dies, however it dies. There is no stale lock to remove and no
   lock file that needs deleting — see the note on `locks/` under
@@ -129,12 +129,6 @@ unsupported thing is attempted on one host. It cannot do more than that:
   between hosts is not protected at all, and sharing one was never supported.
 - **A second process on another host cannot be excluded**, by this or by
   anything else we could build.
-- **Both processes must be on a release that has this.** The exclusion works
-  only if each side takes the lock, so a new `openvox-ca-ctl` beside an older
-  running server — or the reverse, during a staged upgrade where the package is
-  updated but the service has not been restarted — silently gets the old
-  behaviour: no coordination at all. Upgrade and restart the server before
-  relying on any of it.
 - **Absolute paths matter.** Two processes exclude each other only if they
   resolve the same lock directory, so `cadir` and `sql_dsn` should be absolute.
   A relative path used from two different working directories, or one store
@@ -444,15 +438,14 @@ they configure, or remove them.
 A cadir works with either openvox-ca or OpenVox Server's own CA, as it stands.
 openvox-ca keeps the CA key where OpenVox Server does, and writes each
 `inventory.txt` line in OpenVox Server's format: a `0x` serial zero-padded to
-four hex digits, and `/CN=<certname>`. It reads every line in that format and in
-the one it used before (`<serial> ... /<certname>`), in the same file, and never
-rewrites a line except to drop an expired one during cleanup.
+four hex digits, and `/CN=<certname>`. It also reads the shorter
+`<serial> ... /<certname>` form, in the same file, and never rewrites a line
+except to drop an expired one during cleanup.
 
-That covers a cadir OpenVox Server created and one this version of openvox-ca
-created. A cadir an earlier openvox-ca created keeps its key in
-`private/ca_key.pem`, where openvox-ca goes on reading and writing it; OpenVox
-Server looks for the key at the top of the cadir, so it cannot take that
-directory as it stands.
+That covers a cadir either OpenVox Server or openvox-ca created. A cadir that
+keeps its key in `private/ca_key.pem` is the exception: openvox-ca goes on
+reading and writing the key there, but OpenVox Server looks for it at the top of
+the cadir, so it cannot take that directory as it stands.
 
 - **To start openvox-ca on OpenVox Server's cadir**, stop OpenVox Server's CA
   and point `cadir` at the directory. There is no import step. The first start
@@ -570,34 +563,19 @@ etcd_tls_key_file:  /etc/openvox-ca/etcd-client-key.pem
   certificate**, not as a single ever-growing text blob, so signing cost does
   not grow with the size of the inventory and duplicate serial numbers are
   rejected atomically across all replicas (see
-  [the inventory internals](development/inventory-store.md)). On first start
-  after upgrading from a version that stored the inventory as a blob, the
-  backend converts it in place automatically: the blob is first verified
-  against its stored HMAC (a mismatch fails startup, exactly as it would have
-  before the upgrade), and after the conversion the integrity value is
-  re-established over the converted entries — the conversion window itself is
-  the one moment tamper detection does not cover. An interrupted conversion
-  resumes safely on the next start. **Upgrade all replicas together**: a
-  not-yet-upgraded replica writing the old blob format while an upgraded one
-  serves the converted inventory is not supported and is refused with an
-  explicit error when detected.
-- **The conversion is one-way; take a snapshot before the first upgraded
-  start.** Downgrading to a release that predates it is not supported, and
-  fails quietly rather than loudly: the old binary reads `inventory/data`,
-  finds the empty marker the conversion left, and reports an *empty* inventory
-  rather than an error — so it prunes nothing, and starts appending new
-  issuances to the legacy blob. Upgrading again is then refused, because the
-  blob and the decomposed entries no longer agree. Recovery is a restore from
-  an etcd snapshot taken before the upgrade, so take one.
+  [the inventory internals](development/inventory-store.md)). A store that
+  still holds the inventory as a single blob is converted to per-entry form on
+  first start, after the blob is verified against its stored HMAC; the
+  internals describe the conversion and how an interrupted one resumes.
 - **The etcd backend also maintains the certificate index**: `GET
   /certificate_statuses` (`puppetserver ca list`) is answered from the
   decomposed inventory entries instead of reading and parsing every stored
   certificate, with the same rebuildable-projection semantics as the SQL
   backends — after migrating from another backend the display fields are
   backfilled automatically on the next server start. Note the first start
-  after an upgrade or migration therefore performs both the inventory
-  conversion and a per-certificate projection backfill before serving; on a
-  large fleet expect it to take a while (progress is logged).
+  after a migration therefore performs a per-certificate projection backfill
+  before serving, after the conversion where there is one; on a large fleet
+  expect it to take a while (progress is logged).
 - **Bulk inventory rewrites are batched.** Imports and prunes larger than one
   etcd transaction are split into multiple transactions; batch sizes stay
   well under etcd's default `--max-txn-ops` (128), so no cluster tuning is
@@ -610,8 +588,8 @@ etcd_tls_key_file:  /etc/openvox-ca/etcd-client-key.pem
   `expired_cert_cleanup_interval_sec` — the server logs every deferral, and
   escalates to a warning once the deferred backlog exceeds what a whole pass
   can remove, which is the point at which the backlog is growing rather than
-  draining. An in-progress *conversion* is instead covered by the
-  blob-stays-authoritative resume behaviour described above.
+  draining. An in-progress *conversion* is instead covered by its own resume
+  behaviour, in which the blob stays authoritative until it completes.
 - **Legacy inventories with duplicate serial numbers** (possible, because the
   pre-conversion blob had no cluster-wide uniqueness guarantee) are imported
   verbatim with a startup warning naming the serials. The certificate index
@@ -749,34 +727,19 @@ redis_tls_key_file:  /etc/openvox-ca/redis-client-key.pem
   certificate**, not as a single ever-growing text value, so signing cost does
   not grow with the size of the inventory and duplicate serial numbers are
   rejected atomically across all replicas (see
-  [the inventory internals](development/inventory-store.md)). On first start
-  after upgrading from a version that stored the inventory as a blob, the
-  backend converts it in place automatically: the blob is first verified
-  against its stored HMAC (a mismatch fails startup, exactly as it would have
-  before the upgrade), and after the conversion the integrity value is
-  re-established over the converted entries — the conversion window itself is
-  the one moment tamper detection does not cover. An interrupted conversion
-  resumes safely on the next start. **Upgrade all replicas together**: a
-  not-yet-upgraded replica writing the old blob format while an upgraded one
-  serves the converted inventory is not supported and is refused with an
-  explicit error when detected.
-- **The conversion is one-way; take a snapshot before the first upgraded
-  start.** Downgrading to a release that predates it is not supported, and
-  fails quietly rather than loudly: the old binary reads `inventory:data`,
-  finds the bare marker the conversion left, and reports an *empty* inventory
-  rather than an error — so it prunes nothing, and starts appending new
-  issuances to the legacy blob. Upgrading again is then refused, because the
-  blob and the entries hash no longer agree. Recovery is a restore from a
-  Redis snapshot (RDB/AOF) taken before the upgrade, so take one.
+  [the inventory internals](development/inventory-store.md)). A store that
+  still holds the inventory as a single blob is converted to per-entry form on
+  first start, after the blob is verified against its stored HMAC; the
+  internals describe the conversion and how an interrupted one resumes.
 - **The Redis backend also maintains the certificate index**: `GET
   /certificate_statuses` (`puppetserver ca list`) is answered from the
   decomposed inventory entries instead of reading and parsing every stored
   certificate, with the same rebuildable-projection semantics as the SQL
   backends — after migrating from another backend the display fields are
   backfilled automatically on the next server start. Note the first start
-  after an upgrade or migration therefore performs both the inventory
-  conversion and a per-certificate projection backfill before serving; on a
-  large fleet expect it to take a while (progress is logged).
+  after a migration therefore performs a per-certificate projection backfill
+  before serving, after the conversion where there is one; on a large fleet
+  expect it to take a while (progress is logged).
 - **Bulk inventory rewrites are bounded.** Redis executes a Lua script
   atomically, blocking every other client for its duration, so an inventory
   conversion is split into scripts of 512 records and a single
@@ -811,25 +774,6 @@ The `sqlite`, `postgres` and `mysql` backends share one SQL implementation. The
 backend creates and upgrades its own tables automatically on startup, so
 multiple replicas can start against the same database safely. `cadir` is still
 required for per-subject keys and ancillary local state.
-
-> **Upgrading a PostgreSQL or MySQL deployment across this release.** The
-> advisory-lock key derivation changed, so a server running either side of the
-> change does not exclude one running the other side — for as long as both are
-> up, nothing serialises CRL rewrites or bootstrap across the two generations.
-> **Stop the old process before starting the new one** for this one upgrade:
-> with the Helm chart set `strategy: {type: Recreate}` (an external-backend
-> deployment otherwise derives `RollingUpdate`), or scale to zero and back. If
-> you set the strategy, clear it again afterwards — a pin left in place keeps
-> costing you a Recreate outage on every later upgrade.
->
-> **One replica is not enough to be safe.** The derived `RollingUpdate` sets
-> `maxUnavailable: 0`, so the new pod must become Ready before the old one is
-> terminated, and the two overlap even at `replicaCount: 1`. What does exempt
-> you is already being on `Recreate` (which `persistence.enabled: true`
-> derives), or running a single process you stop and restart yourself. SQLite
-> and the filesystem backend are unaffected either way: their same-host lock
-> derives from `sha256(name).lock` and is unchanged. Background: rule 11 of
-> [locking](development/locking.md).
 
 SQL backends additionally maintain a certificate index (as do
 [etcd](#etcd-backend) and [Redis](#redis--valkey-backend)): `GET
@@ -1216,12 +1160,11 @@ cluster-wide `crl` lock, so each one in flight wants three connections at once:
 one per held lock, plus one for its own reads and writes. A plain sign or CSR
 submission takes only `subject:<name>` and wants two.
 
-Revocation joined that set in this release, and the cost shows up when
-revocations overlap — several admin clients or an orchestration tool issuing
+Revocation is in that set too, and the cost shows up when revocations
+overlap — several admin clients or an orchestration tool issuing
 `PUT`/`DELETE /certificate_status/{subject}` for *distinct* subjects at once.
-Throughput is unchanged, because they still queue one at a time on the single
-`crl` lock; what changed is that each one now holds its own `subject:<name>`
-connection for the whole of that wait instead of queueing without one. Size the
+They queue one at a time on the single `crl` lock, and each one holds its own
+`subject:<name>` connection for the whole of that wait. Size the
 pool for the retirements you expect to overlap rather than for a single request.
 Note that `PUT /clean` is not that case: it processes its certnames
 sequentially, so a bulk clean holds one subject lock at a time and has always
@@ -1418,7 +1361,7 @@ Notes:
 
 - **Stop the server first**, on both ends. Run `migrate` while no `openvox-ca`
   is serving either backend, so the copy sees a consistent snapshot. It does not
-  race one that is, and it no longer waits for one either: on a backend that
+  race one that is, and it does not wait for one either: on a backend that
   supports a single running instance it is refused at once, naming the process
   holding the store, for the source as well as the destination — reading a live
   store still copies an inventory the server is appending to. Pointing

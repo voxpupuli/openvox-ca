@@ -31,9 +31,8 @@ Despite being a blob, the inventory is only ever used four ways:
    (`StorageService.SubjectForSerial`) — a full scan on **every** backend,
    including `InventoryStore` ones. The unique index on `serial` cannot serve
    it: that index is an exact match over the stored text, while this lookup
-   matches on the normalised value, because an inventory written by an older
-   version — or migrated from Puppet Server — carries zero-padded sequential
-   serials. An indexed exact match would miss exactly the historical
+   matches on the normalised value, because an inventory migrated from Puppet
+   Server carries zero-padded sequential serials. An indexed exact match would miss exactly the historical
    certificates most likely to need retiring. A canonical-first fast path with
    fallback to the scan would be sound and is noted as future work in
    `SubjectForSerial`'s own comment.
@@ -216,7 +215,8 @@ describe.
 
 It also carries `LegacyUndecomposed`, which is set when a structured backend
 reports no rows while its blob key still holds parseable entries — an etcd or
-redis store upgraded from a pre-decomposition release and not yet started. That
+redis store whose inventory is still the legacy blob, because no server has
+started on it to decompose it. That
 state is reachable only from an offline caller, because decomposition runs from
 `EnsureReady` and the report is deliberately reached without it. The detection
 fails closed: a blob that cannot be read is an error rather than a "not legacy",
@@ -354,12 +354,12 @@ Rules that keep the decomposed structure coherent:
   into entry keys, and empties the marker only in the final commit.
   Verification is fail-closed: a mismatch — or a stored HMAC that cannot be
   verified because the key is missing or malformed — fails startup with
-  `ErrInventoryTampered`, exactly as the pre-decomposition code would have;
+  `ErrInventoryTampered`, exactly as any other integrity failure does;
   the operator acknowledges a lost baseline by deleting the stored
   `inventory/hmac` key. The verified HMAC is deleted in the same import — it
   is not a chain head, so it cannot carry over — and the next verification
   re-baselines from the imported entries; only the import window itself is
-  uncovered. A CA upgraded while its inventory is *empty* has no import to
+  uncovered. A legacy store whose inventory is *empty* has no import to
   drop the head as part of, so `EnsureReady` handles that case separately:
   when zero entries exist and the stored head verifies as the whole-blob MAC
   of an empty inventory, it is deleted so the first verification re-baselines
@@ -380,11 +380,10 @@ Rules that keep the decomposed structure coherent:
   and the startup repair pass skips them (they can never converge). The
   sentinel outlives partial prunes: a prune releases a by-serial key only
   when the last record bearing that serial is removed, so a lone surviving
-  bearer stays reserved and unknown until the serial is fully released. All
-  replicas must still upgrade together:
-  an old-version writer appending to the blob mid-import is detected via the
-  marker guard and the import restarts, but the race only closes once the old
-  writers are gone.
+  bearer stays reserved and unknown until the serial is fully released. A
+  writer still appending to the blob mid-import is detected via the marker
+  guard and the import restarts, but the race only closes once nothing writes
+  the blob.
 - **Certificate-index writes stay off the chain.** `SetRevoked` /
   `ClearRevoked` / `SetProjection` rewrite a single entry key guarded on its
   own ModRevision (the mutable fields are not chain input), so index repair
@@ -459,14 +458,14 @@ Rules that keep the decomposed structure coherent:
   the `inventory:hmac` key), imports the lines into hash fields, and empties
   the marker only in the final script. The verified HMAC is deleted in the same
   import — it is not a chain head — and the next verification re-baselines from
-  the imported entries; a CA upgraded while its inventory was *empty* has no
+  the imported entries; a legacy store whose inventory is *empty* has no
   import to drop it as part of, so `EnsureReady` handles that separately, on
   exactly the same terms as etcd. Because the blob stays authoritative until
   the final script, an interrupted import is detected on the next start (the
   partial entries are the import-written prefix of the blob) and redone from
   the intact blob; entries that are *not* such a prefix mean a mixed-version
   deployment wrote both forms, which is refused rather than guessed at. A
-  not-yet-upgraded replica writing the blob mid-import is caught by a guard on
+  replica still writing the blob mid-import is caught by a guard on
   the marker's stored mtime prefix and length — every writer stamps a fresh
   mtime, so an unchanged prefix means nothing has touched it — and the import
   restarts from the new blob. Duplicate serials are imported verbatim with a
@@ -831,14 +830,9 @@ the error an operator first meets.
 - **Hash chain** (`InventoryStore` backends) — the head advances atomically with
   the row inside the append transaction, so neither the torn-append nor the
   interleaved-append cause applies, and a mismatch is a stronger signal. It is
-  not conclusive either: a first start after upgrading a
-  `ca_key_file`/`ca_cert_file` deployment over a structured backend can fail
-  here with no tampering, because the stored value was written under the
-  whole-blob scheme and is now read as a chain. That affects pre-release builds
-  only — deployments created after the unwrap fix are unaffected — and
-  [storage-internals.md](storage-internals.md#upgrading-a-pre-fix-ca_key_file--ca_cert_file--database-deployment)
-  carries the recovery. It is precisely why the warning names the scheme it
-  computed under.
+  not conclusive either: a stored value written under the whole-blob scheme
+  and read as a chain fails here with no tampering, which is precisely why the
+  warning names the scheme it computed under.
 
 ### Why the mechanism meets the in-scope set
 

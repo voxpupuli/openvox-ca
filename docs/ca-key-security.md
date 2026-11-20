@@ -165,10 +165,10 @@ costs no key work because a non-success OCSP response carries no signature. See
 [bounding CA-key signing](configuration.md#bounding-ca-key-signing).
 
 **`RemoteSigner.Sign` waits at most two minutes.** The OpenBao Transit path
-bounds every call by its login timeout; the isolated signer's RPC used to bound
-nothing at all, so a signer child that stopped answering blocked its caller
-indefinitely. It now gives up and returns an error, which is what lets a
-signing slot come back.
+bounds every call by its login timeout, and the isolated signer's RPC is
+bounded too: without a deadline, a signer child that stopped answering would
+block its caller indefinitely. The caller gives up and returns an error, which
+is what lets a signing slot come back.
 
 That deadline is a backstop, not a tuning, and it bounds *this caller's wait
 rather than the signer's work*: the RPC layer has no cancellation, so an
@@ -476,23 +476,14 @@ configured, an `ops-admin` issued by a partner CA is therefore counted separatel
 from an `ops-admin` this CA issued: they are different principals, so neither can
 spend the other's allowance or raise an alert against it.
 
-> **Upgrading: the `client` log field has changed shape.** It used to be a flat
-> string holding the common name — `client=admin.example.com`. It is now a group,
-> rendering as the two fields shown above, `client.cn` and `client.domain`
-> (`client` becomes an object under the JSON handler). Every log line in the API
-> that names a client changed with it, not only this one, and three lines that
-> previously used a bare `cn` key now use the same group.
->
-> **This breaks queries keyed on the old field.** A SIEM rule, log-based alert,
-> Loki selector or `grep` matching `client=<value>` will stop matching after the
-> upgrade — and it fails quietly, because the line is still emitted and still
-> carries the name. Update such queries to `client.cn` before upgrading. The
-> message text is unchanged, so alerts keyed on the message alone are unaffected.
->
-> The reason for the change is that a common name is not an identity once more
-> than one issuer is trusted: two CAs may each have an `ops-admin`, and a record
-> naming only the name cannot say which of them acted.
->
+Every log line in the API that names a client does it the same way, as a
+`client` group rendering as the two fields shown above, `client.cn` and
+`client.domain` (`client` is an object under the JSON handler). Key a SIEM rule,
+log-based alert or Loki selector on `client.cn`, not on a bare common name: a
+common name is not an identity once more than one issuer is trusted, because two
+CAs may each have an `ops-admin`, and a record naming only the name cannot say
+which of them acted.
+
 > **`client.domain` takes one of three shapes.** `this CA` for a certificate we
 > issued; `client_ca "<name>"` — quoted — for one attributed to a configured
 > entry; and **`unattributed`** where the request never passed through the

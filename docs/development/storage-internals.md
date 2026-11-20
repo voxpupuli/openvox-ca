@@ -95,7 +95,8 @@ Stored values carry an 8-byte big-endian `time.UnixNano` mtime prefix so
 `If-Modified-Since` without a second round-trip.
 
 The certificate inventory is not stored at `inventory/data` — that key is only
-a presence marker (and the location pre-decomposition versions kept the blob).
+a presence marker (and where the legacy blob sits until the conversion empties
+it).
 The inventory itself is decomposed into one key per issued certificate under
 `inventory/entries/<seq>`, with `inventory/seq` acting as sequence allocator
 and mutation fence and `inventory/by-serial/<serial>` /
@@ -187,7 +188,8 @@ Stored values carry an 8-byte big-endian `time.UnixNano` mtime prefix so
 `ModTime` is answered from the same round-trip as the value.
 
 The certificate inventory is not stored at `inventory:data` — that key is only
-a presence marker (and the location pre-decomposition versions kept the blob).
+a presence marker (and where the legacy blob sits until the conversion empties
+it).
 The inventory itself is decomposed into one hash field per issued certificate
 in `inventory:entries`, with `inventory:seq` acting as sequence allocator and
 mutation fence and `inventory:by-serial` / `inventory:by-subject` as index
@@ -266,41 +268,11 @@ four measures:
 SQLite has no distributed lock, so `EnsureReady` walks the same tiers
 `WithLock` does — by hand, since the migration budget and the "waiting for the
 lock" announcement belong to it — and takes the same-host `flock` instead. Two
-processes sharing one file therefore no longer race here. Where even that is
+processes sharing one file therefore do not race here. Where even that is
 unavailable (an in-memory database, a platform without `flock(2)`) the fallback
 is the process-local mutex, and the transactional, idempotent migrations mean a
 loser fails cleanly and succeeds on its next start rather than leaving the
 schema half-changed.
-
-#### Recovering a half-migrated schema
-
-A database migrated by a build without those measures can hold a version in
-`bun_migrations` whose DDL only partly ran — typically visible as a startup
-failure naming a column that does not exist, reported as an inventory integrity
-failure because the integrity check is the first thing to read the table.
-Confirm it by listing the table's columns and the recorded versions:
-
-```sql
-SELECT column_name FROM information_schema.columns
- WHERE table_name = 'puppet_ca_inventory' ORDER BY ordinal_position;
-SELECT id, name, group_id, migrated_at FROM bun_migrations ORDER BY id;
-```
-
-SQLite has no `information_schema`; list the columns there with the pragma
-form instead (the `bun_migrations` query works unchanged), mirroring the
-dialect split `columnExists` implements in code:
-
-```sql
-SELECT name FROM pragma_table_info('puppet_ca_inventory');
-```
-
-Two rows for one version, recorded milliseconds apart, are the fingerprint of
-two runners having raced. To recover, stop every replica, delete the duplicate
-rows for the affected version, and start one replica: migrations are idempotent,
-so the run completes the missing DDL and leaves the already-applied statements
-alone. Applying the remaining DDL by hand and leaving the rows in place works
-equally well and is the safer choice on a large table, where the missing
-statement may be a long index build you would rather schedule.
 
 On MySQL/MariaDB, the first-run migration widens the `data` column to `LONGBLOB`
 (MySQL's default `BLOB` caps at 64 KiB, too small for large blobs such as the
@@ -381,41 +353,6 @@ Lock names, holders, and ordering are documented in
   inventory appends serialise on a `FOR UPDATE` transaction; an InnoDB deadlock
   (the expected outcome when two replicas race to create the same not-yet-
   existing row) is retried transparently.
-
-## Upgrading a pre-fix `ca_key_file` / `ca_cert_file` + database deployment
-
-Builds from before the InventoryStore-unwrap fix computed the inventory
-integrity value under the whole-blob HMAC scheme when a local cert/key override
-wrapped a SQL backend, instead of that backend's hash chain. The first start
-after upgrading such a deployment reports `ErrInventoryTampered` even though
-nothing was tampered with — only the *scheme* changed, not the data. The
-inventory rows are intact, so the head simply needs recomputing under the scheme
-the backend is now read as.
-
-`openvox-ca rebuild-inventory-hmac --yes-re-bless --replicas-stopped` does
-exactly that, in place:
-it recomputes from the current entries under the current scheme, which is the
-head the migration below would have written. Read its own warning first — it
-re-asserts integrity rather than verifying it — though in this state the premise
-above ("the inventory rows are intact") is what makes that safe.
-
-`--replicas-stopped` is required on PostgreSQL and MySQL, which coordinate locks
-across hosts: the command cannot tell whether a replica is appending, so it asks
-you to say so. Stop every replica first. On SQLite the flag is unnecessary — the
-instance lock enforces the same thing, and the command refuses on its own while
-a server holds the store. See
-[`rebuild-inventory-hmac`](../operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity).
-
-The older route still works and remains the fallback: `openvox-ca-ctl migrate
---allow-unverified-source` from the affected backend into a fresh destination
-(the migration rewrites the head under the correct scheme; a store cannot be
-migrated onto itself), then serve from that destination. The flag is needed
-because the source's stored value does not verify, which `migrate` otherwise
-refuses. It is a whole-store copy and a reconfiguration
-where the rebuild is one command.
-
-This affects pre-release builds only; deployments created after the fix are
-unaffected.
 
 ## Optional capabilities
 
