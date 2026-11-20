@@ -58,10 +58,11 @@ the launcher's pipe refuses to start rather than proceeding unauthenticated.
 
 **The signer makes only the kinds of signature the CA makes.** A request must
 name SHA-256, SHA-384 or SHA-512 and carry a digest of that hash's length;
-anything else is refused, and the signer logs a warning,
-`msg="Refused a signing request"`, naming the reason. The frontend never builds
-such a request itself, so one in the log means a frontend that is broken or no
-longer yours; see [Monitoring destructive operations](#monitoring-destructive-operations).
+anything else is refused, and the signer writes the
+[audit record](configuration.md#audit-events) `event=signer.request_refused`,
+with the reason in `error`. The frontend never builds such a request itself, so
+one in the log means a frontend that is broken or no longer yours; see
+[Monitoring destructive operations](#monitoring-destructive-operations).
 Those three are every hash the
 CA signs with: SHA-256 for any RSA key, and SHA-256, SHA-384 or SHA-512 for
 ECDSA P-256, P-384 or P-521. This takes away what a compromised frontend could
@@ -462,9 +463,13 @@ This is tracked as a separate feature. Contributions welcome.
 
 ## Monitoring destructive operations
 
-The server tracks the rate of destructive operations (certificate revocation and
-deletion) per authenticated client. When a single client exceeds **5 destructive
-operations per minute**, a warning is emitted to the structured log:
+The server counts every subject revoked or cleaned through the API in
+[`openvoxca_destructive_operations_total{operation}`](metrics.md#revocation-and-cleaning),
+and the shipped mixin's `OpenVoxCADestructiveOperationsHigh` warns when more
+than 25 are taken out of service across the CA in five minutes. That is the
+signal to alert on. To say *who*, the server also tracks the rate per
+authenticated client, and when a single client exceeds **5 destructive
+operations per minute** on one replica, it logs a warning naming it:
 
 ```text
 level=WARN msg="High rate of destructive operations detected" role=frontend client.cn=admin.example.com client.domain="this CA" operation=revoke
@@ -506,19 +511,29 @@ operators to potentially anomalous administrative activity. Operators should:
 
 - Forward `openvox-ca` logs to a centralized log aggregator (e.g. Loki,
   Elasticsearch, Splunk)
-- Create alerts on `"High rate of destructive operations"` log messages
-- Create alerts on `"Issued certificate carrying a Puppet authorisation
-  extension"` too. That one is emitted by `openvox-ca generate --pp-cli-auth`
-  (see [operator-cli.md](operator-cli.md#administrator-credentials)) and marks
-  the minting of a CA administrator credential — the only record that
+- Alert on `openvoxca_destructive_operations_total`, as the shipped mixin's
+  `OpenVoxCADestructiveOperationsHigh` does, and use the warnings above to find
+  the client. Its default, more than 25 across the CA in five minutes, matches
+  the warning's rate on average but not a short burst: one client revoking up
+  to 25 subjects within a minute and stopping stays under it, where the
+  warning fires at the sixth. Lower `destructiveOpsThreshold` or shorten
+  `destructiveOpsWindow` in the mixin's `_config` if a burst that size matters
+  to you
+- Alert on the [audit record](configuration.md#audit-events)
+  `event=certificate.auth_grant_issued`. It is written by `openvox-ca generate
+  --pp-cli-auth` (see [operator-cli.md](operator-cli.md#administrator-credentials))
+  and marks the minting of a CA administrator credential — the only record that
   distinguishes one from an ordinary node certificate, since the inventory line
-  keeps the Puppet-compatible format and says nothing about the grant. It is
-  the counterpart to the alert above: this one fires when the privilege is
-  handed out, that one when it is used destructively
-- Create alerts on `"Refused a signing request"` from the signer process. The
-  frontend only ever asks for the signatures the CA makes, so a refusal means
-  the frontend is broken or has been compromised; see
-  [Process isolation](#process-isolation)
+  keeps the Puppet-compatible format and says nothing about the grant. A
+  renewal that carries a grant forward writes it too. It is the counterpart to
+  the alert above: this one fires when the privilege is handed out, that one
+  when it is used destructively
+- Alert on the audit record `event=signer.request_refused`, which only the
+  signer process writes. The frontend only ever asks for the signatures the CA
+  makes, so a refusal means the frontend is broken or has been compromised;
+  see [Process isolation](#process-isolation). Neither audit event has a
+  metric: the offline `generate` has no `/metrics`, and the frontend is the
+  party a refusal is about
 - Investigate any alerts promptly. A burst of revocations may indicate a
   compromised admin certificate or an operational error
 - Consider whether the allow list that granted the client should be tightened

@@ -2639,11 +2639,14 @@ refused as `signed` until the subject is cleaned, or until
 `enable_expired_cert_cleanup`, if enabled, removes it once
 `expired_cert_retention_sec` has passed.
 
-Each refusal is logged as `SaveRequest refused: duplicate certificate request`
-with `subject` and `state`: at `INFO` for a pending CSR, since an agent waiting
-for manual signing resubmits on every poll, and at `WARN`, with a `remedy`, for
-a signed or revoked certificate, which leaves the node waiting until someone
-cleans it.
+Each refusal is counted in
+[`openvoxca_csr_duplicate_refusals_total{state}`](metrics.md#csr-submissions),
+which is what to graph or alert on. `state="requested"` rises steadily on a
+healthy CA with unsigned requests, since an agent waiting for manual signing
+resubmits on every poll; `signed` and `revoked` mean a node waiting until
+someone cleans it. The refusal is logged too, with `subject` and `state`, so the
+log says which node: at `INFO` for a pending CSR, and at `WARN`, with a
+`remedy`, for a signed or revoked certificate.
 
 With it on, the CSR is accepted and logged at `INFO` as `Accepting a duplicate
 certificate request (allow_duplicate_certs)`, with `subject`, `state` and the
@@ -2921,7 +2924,7 @@ a `role` attribute naming the process that wrote it:
 | `signer` | the isolated child that holds the CA key |
 | `frontend` | the child that serves the API |
 | `single-process` | the one process `--single-process` runs instead of all three |
-| `generate`, `rebuild-inventory-hmac` | those offline commands, whose audit records go to the server's `logfile` when it exists |
+| `generate`, `rebuild-inventory-hmac` | those offline commands, whose records go to the server's `logfile` when it exists |
 
 ```text
 time=2026-11-17T10:00:00.000Z level=INFO msg="Signer process ready" role=signer pid=4122
@@ -2956,6 +2959,40 @@ Output that does not go through the logger carries no `role`:
   names it.
 - Everything `openvox-ca-ctl` logs. It is a separate program, not one of the
   server's processes, and its records have no `role`.
+
+### Audit events
+
+A few records are **audit records**: each marks an event worth a record every
+time it happens, and carries an `event` attribute naming it. Match on `event`
+and on the attributes listed for it, not on the message. The message is for a
+human reading the record and may be reworded in any release, while the `event`
+values and their attributes are part of the
+[public API](development/releasing.md#what-the-version-number-promises) from
+1.0.0. This table is the whole set; a record without `event` is an ordinary
+log record, whatever it says.
+
+| `event` | Written by (`role`) | Attributes | What happened |
+| --- | --- | --- | --- |
+| `certificate.auth_grant_issued` | `generate`, `frontend`, `single-process` | `subject`; `grant`, such as `pp_cli_auth=true`; and on a renewal, `renewal`: `same key` or `re-key` | A certificate was issued carrying a Puppet authorisation extension: a CA administrator credential minted by [`openvox-ca generate --pp-cli-auth`](operator-cli.md#administrator-credentials), or one a renewal carried forward. One record per grant |
+| `signer.request_refused` | `signer` | `error` | The isolated signer refused to sign a request for a signature the CA never makes. The frontend never builds one, so it means a frontend that is broken or no longer ours: see [process isolation](ca-key-security.md#process-isolation) |
+
+```text
+time=2026-11-17T10:00:00.000Z level=WARN msg="Issued certificate carrying a Puppet authorisation extension" role=generate event=certificate.auth_grant_issued subject=openvox-admin grant="pp_cli_auth=true"
+```
+
+```json
+{"time":"2026-11-17T10:00:00.000Z","level":"WARN","msg":"Issued certificate carrying a Puppet authorisation extension","role":"generate","event":"certificate.auth_grant_issued","subject":"openvox-admin","grant":"pp_cli_auth=true"}
+```
+
+Alert on these records directly, for example with a Loki
+`| logfmt | event="signer.request_refused"`. Neither has a metric, by design:
+`openvox-ca generate` runs offline with no `/metrics`, and the signer has no
+listener and is the process that judges the frontend, so the frontend cannot
+be trusted to count its refusals. The other conditions the documentation tells
+you to watch for have a [metric](metrics.md), except two that are still
+log-only for now: a best-effort immediate revocation after a renewal or a
+managed reissue that fails once, and a managed reissue that keeps failing. A
+future audit event follows the same `<subject>.<action>` form.
 
 ## Graceful shutdown
 

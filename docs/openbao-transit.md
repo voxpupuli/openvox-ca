@@ -691,10 +691,13 @@ local-key custody, where the CA can sign with no external dependency at all.
   at it. Sustained shedding while Transit has capacity to spare means
   `ca_signing_concurrency` is set below what this deployment needs. Watch the
   OpenBao side too — the CA metrics show contention for the bound, not the
-  health of the backend behind it. Also watch for repeated
-  "re-authentication failed" warnings in the `openvox-ca` logs — a steady
-  stream of those means the source credential can no longer authenticate and
-  needs operator attention before the current token lease runs out.
+  health of the backend behind it. Alert on
+  [`openvoxca_openbao_authenticated`](metrics.md#openbao-transit-session) at
+  `0`, as the shipped mixin's `OpenVoxCAOpenBaoUnauthenticated` does after five
+  minutes: the signer's most recent login failed, so the source credential can
+  no longer authenticate, and it needs operator attention before the current
+  token lease runs out. The signer's `OpenBao re-authentication failed` error
+  in the `openvox-ca` logs carries the cause.
 
 ## Key rotation detection
 
