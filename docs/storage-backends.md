@@ -1160,15 +1160,13 @@ cluster-wide `crl` lock, so each one in flight wants three connections at once:
 one per held lock, plus one for its own reads and writes. A plain sign or CSR
 submission takes only `subject:<name>` and wants two.
 
-Revocation is in that set too, and the cost shows up when revocations
-overlap — several admin clients or an orchestration tool issuing
+The cost shows up when revocations overlap — several admin clients or an orchestration tool issuing
 `PUT`/`DELETE /certificate_status/{subject}` for *distinct* subjects at once.
 They queue one at a time on the single `crl` lock, and each one holds its own
 `subject:<name>` connection for the whole of that wait. Size the
 pool for the retirements you expect to overlap rather than for a single request.
 Note that `PUT /clean` is not that case: it processes its certnames
-sequentially, so a bulk clean holds one subject lock at a time and has always
-paid this cost. See rule 8 in the
+sequentially, so a bulk clean holds one subject lock at a time. See rule 8 in the
 [locking notes](development/locking.md#rules-for-new-or-changed-code) for the
 invariant behind this.
 

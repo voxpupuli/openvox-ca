@@ -429,8 +429,11 @@ first; see [running a container](container-images.md#running). What follows is
 for a release tarball, a container whose baked configuration you have replaced,
 or a packaged CA whose certificate you are replacing by hand.
 
-`generate` needs a running server, so the first serving certificate is issued
-against this CA started temporarily on loopback with TLS switched off. **Stop
+`openvox-ca-ctl generate` needs a running server, so the procedure below issues
+the first serving certificate against this CA started temporarily on loopback
+with TLS switched off. The offline `openvox-ca generate` issues it with no
+server at all; see [the first credential on a new
+CA](operator-cli.md#the-first-credential-on-a-new-ca). **Stop
 the service first if one is running.** That is not just courtesy on
 `filesystem` and `sqlite`: those permit exactly one instance. The store lock
 will normally refuse the second process rather than let it corrupt anything, so

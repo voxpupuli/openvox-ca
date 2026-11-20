@@ -100,7 +100,7 @@ which this signer refuses, so such a key is refused at startup, at import and by
 Because the environment stays readable for the life of the process, the launcher
 also withholds `OPENVOX_CA_KEY_PASSPHRASE` from the frontend, along with every
 `BAO_*` and `VAULT_*` variable, which the OpenBao client library reads for itself.
-The signer receives them as before. The rest of the `OPENVOX_CA_*` configuration,
+The signer still receives them. The rest of the `OPENVOX_CA_*` configuration,
 `OPENVOX_CA_OPENBAO_*` included, still reaches the frontend, which reads its own
 settings from it; the OpenBao credentials among those settings are file paths,
 not the credentials themselves. `--single-process` has no frontend to withhold

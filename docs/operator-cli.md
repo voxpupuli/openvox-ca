@@ -357,10 +357,11 @@ openvox-ca-ctl migrate \
 ```
 
 `setup`, `import` and `migrate` operate directly on storage, and each requires
-the server to be **stopped** on a backend that supports one running instance
-(`filesystem`, `sqlite`). Run one beside a live server and it is refused, naming
-the process holding the store — not left waiting for a lock it was never going
-to get. Because they reach storage directly they take the same locks a running
+the server to be **stopped**, on every backend. On a backend that supports one
+running instance (`filesystem`, `sqlite`), run one beside a live server and it is
+refused, naming the process holding the store — not left waiting for a lock it
+was never going to get. On a backend with distributed locking nothing detects a
+running server, so stopping every replica first is up to you. Because they reach storage directly they take the same locks a running
 server takes, so run them as the user the server runs as rather than under
 `sudo` (see the link below for why). See [running a second process against a
 live store](storage-backends.md#running-a-second-process-against-a-live-store).
@@ -1136,8 +1137,8 @@ zero-length value is present, which a torn write produces. It is an ordinary
 mismatch and takes the `--yes-re-bless` path, not the "no baseline stored" path
 below.
 
-`scheme` names the integrity scheme the value was computed under, whole-blob
-HMAC or hash chain, which the backend decides.
+`scheme` names the integrity scheme this backend computes under, whole-blob
+HMAC or hash chain, which is the one the `computed:` line uses.
 
 What it cannot tell you is **which** entry diverged. The backends persist a
 single integrity head and no per-entry value, so nothing records what any

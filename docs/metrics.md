@@ -520,8 +520,9 @@ mismatch, and `Inventory verification failed` for a failed read.
 
 Present on every CA, and live on any CA that renews certificates, since
 [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession)
-defaults to 24 hours. Only where it is set to `0` is nothing ever recorded — a
-renewal then revokes its predecessor inside the call, and a failure there is a
+defaults to 24 hours. Only where it is set to `0`, and no `managed_certs` entry
+sets a non-zero `revoke_after` of its own, is nothing ever recorded — a renewal
+then revokes its predecessor inside the call, and a failure there is a
 CRL failure counted above instead — so there the gauge sits at zero and the
 counter stays flat.
 
