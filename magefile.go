@@ -8971,6 +8971,152 @@ func (Test) Unit() error {
 	return tparseErr
 }
 
+// publishedMixinAlerts and publishedMixinConfigKeys are the monitoring mixin's
+// alert names and _config keys as published. releasing.md (item 6 of "What the
+// version number promises") covers both: routing and silences are keyed on the
+// alert names, and an override on a renamed _config key silently does nothing.
+// So a name here that the mixin no longer renders is a rename or a removal,
+// and needs a major release. A name the mixin renders and these lists lack is
+// an addition, which is allowed; add it here when it ships, so that it is
+// protected from then on.
+var publishedMixinAlerts = []string{
+	"OpenVoxCAExporterDown",
+	"OpenVoxCAScrapeFailing",
+	"OpenVoxCANotReady",
+	"OpenVoxCADestructiveOperationsHigh",
+	"OpenVoxCACleanIncomplete",
+	"OpenVoxCAOpenBaoUnauthenticated",
+	"OpenVoxCASignerUnresponsive",
+	"OpenVoxCACertificateExpiringSoon",
+	"OpenVoxCACertificateExpiringCritical",
+	"OpenVoxCACRLExpiringSoon",
+	"OpenVoxCACRLExpired",
+	"OpenVoxCAUpstreamCRLExpiringSoon",
+	"OpenVoxCAUpstreamCRLExpired",
+	"OpenVoxCAUpstreamCRLDiscarded",
+	"OpenVoxCAUpstreamCRLRegressed",
+	"OpenVoxCAUpstreamCRLRemoved",
+	"OpenVoxCAUpstreamCRLNeverRead",
+	"OpenVoxCAUpstreamCRLRefreshFailing",
+	"OpenVoxCAClientCRLUnusable",
+	"OpenVoxCAClientCRLStale",
+	"OpenVoxCAClientCRLRefusals",
+	"OpenVoxCALeafCertificateExpiringSoon",
+	"OpenVoxCALeafCertificateExpiringCritical",
+	"OpenVoxCALeafCertificateExpired",
+	"OpenVoxCACertificateRequestPending",
+	"OpenVoxCACRLUpdateFailing",
+	"OpenVoxCASupersedeFailing",
+	"OpenVoxCACRLSyncFailing",
+	"OpenVoxCAOCSPIndexSyncFailing",
+	"OpenVoxCAInventoryTampered",
+	"OpenVoxCAInventoryUnreadable",
+	"OpenVoxCACRLStale",
+	"OpenVoxCAKubernetesExportFailing",
+	"OpenVoxCAKubernetesExportNotRunning",
+	"OpenVoxCAFileExportStale",
+	"OpenVoxCAManagedCertificateNeverIssued",
+}
+
+var publishedMixinConfigKeys = []string{
+	"alertLabels",
+	"caExpiryCriticalSeconds",
+	"caExpiryWarningSeconds",
+	"cleanFailureWindow",
+	"clientCRLRefusalWindow",
+	"clientCRLStaleSeconds",
+	"clientCRLUnusableFor",
+	"crlChainFor",
+	"crlChainWindow",
+	"crlExpiryWarningSeconds",
+	"crlLagFor",
+	"crlSyncFor",
+	"crlSyncThreshold",
+	"crlSyncWindow",
+	"crlUpdateFor",
+	"crlUpdateThreshold",
+	"crlUpdateWindow",
+	"destructiveOpsThreshold",
+	"destructiveOpsWindow",
+	"downFor",
+	"expiryFor",
+	"fileExportStaleAfterSeconds",
+	"fileExportStaleFor",
+	"inventoryTamperWindow",
+	"inventoryUnreadableFor",
+	"inventoryUnreadableThreshold",
+	"inventoryUnreadableWindow",
+	"k8sExportFailingFor",
+	"k8sExportNotRunningFor",
+	"leafExpiryCriticalSeconds",
+	"leafExpiryWarningSeconds",
+	"managedCertNeverIssuedFor",
+	"ocspIndexSyncFor",
+	"ocspIndexSyncThreshold",
+	"ocspIndexSyncWindow",
+	"openBaoUnauthenticatedFor",
+	"openvoxCASelector",
+	"pendingFor",
+	"readyFor",
+	"scrapeFor",
+	"signerUnresponsiveFor",
+	"supersedeFor",
+	"supersedeWindow",
+	"upstreamCRLExpiryWarningSeconds",
+}
+
+// verifyMixinPublishedNames refuses a published alert name or _config key the
+// rendered mixin no longer has. Additions pass. Called from Test.Mixin, which
+// renders the mixin; it needs jsonnet, so it is not part of dev:check.
+func verifyMixinPublishedNames(alerts, configKeys []string) error {
+	var problems []string
+	for _, pub := range []struct {
+		what      string
+		published []string
+		rendered  []string
+	}{
+		{"alert", publishedMixinAlerts, alerts},
+		{"_config key", publishedMixinConfigKeys, configKeys},
+	} {
+		have := make(map[string]bool, len(pub.rendered))
+		for _, n := range pub.rendered {
+			have[n] = true
+		}
+		for _, n := range pub.published {
+			if !have[n] {
+				problems = append(problems, fmt.Sprintf("published %s %s is gone", pub.what, n))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%s: renaming or removing a published mixin alert or _config key is a breaking "+
+			"change and needs a major release (docs/development/releasing.md); if this one is deliberate, "+
+			"remove it from publishedMixinAlerts or publishedMixinConfigKeys in that release",
+			strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// mixinNames renders the mixin's alert names and _config keys with jsonnet.
+func mixinNames() (alerts, configKeys []string, err error) {
+	for _, q := range []struct {
+		expr string
+		into *[]string
+	}{
+		{"[r.alert for g in (import 'mixin/mixin.libsonnet').prometheusAlerts.groups for r in g.rules if std.objectHas(r, 'alert')]", &alerts},
+		{"std.objectFields((import 'mixin/mixin.libsonnet')._config)", &configKeys},
+	} {
+		out, err := sh.Output("jsonnet", "-J", "mixin", "-e", q.expr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("rendering the mixin's names: %w", err)
+		}
+		if err := json.Unmarshal([]byte(out), q.into); err != nil {
+			return nil, nil, fmt.Errorf("decoding the mixin's names: %w", err)
+		}
+	}
+	return alerts, configKeys, nil
+}
+
 // Mixin renders the Jsonnet monitoring mixin and checks the alerting rules it
 // produces: `promtool check rules` for syntax, then `promtool test rules` for
 // the behaviour of the ones whose expressions are not simple thresholds (see
@@ -9007,6 +9153,13 @@ func (Test) Mixin() error {
 	}
 
 	if err := sh.RunV("promtool", "check", "rules", rendered); err != nil {
+		return err
+	}
+	alerts, configKeys, err := mixinNames()
+	if err != nil {
+		return err
+	}
+	if err := verifyMixinPublishedNames(alerts, configKeys); err != nil {
 		return err
 	}
 	return sh.RunV("promtool", "test", "rules", filepath.Join("mixin", "tests.yaml"))

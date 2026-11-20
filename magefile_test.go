@@ -11568,3 +11568,46 @@ var _ = Describe("the packaged configuration path", func() {
 		Entry("postinstall", "postinstall"),
 	)
 })
+
+var _ = Describe("verifyMixinPublishedNames", func() {
+	// Fresh copies, so a spec that drops or adds a name cannot reach the
+	// published lists themselves.
+	alerts := func() []string { return append([]string(nil), publishedMixinAlerts...) }
+	keys := func() []string { return append([]string(nil), publishedMixinConfigKeys...) }
+	without := func(names []string, drop string) []string {
+		out := names[:0]
+		for _, n := range names {
+			if n != drop {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+
+	It("accepts the mixin as published", func() {
+		Expect(verifyMixinPublishedNames(alerts(), keys())).To(Succeed())
+	})
+
+	It("accepts an alert or a _config key the lists do not have yet", func() {
+		Expect(verifyMixinPublishedNames(append(alerts(), "OpenVoxCASomethingNew"),
+			append(keys(), "somethingNewFor"))).To(Succeed())
+	})
+
+	It("refuses a published alert renamed", func() {
+		renamed := append(without(alerts(), "OpenVoxCANotReady"), "OpenVoxCANotYetReady")
+		Expect(verifyMixinPublishedNames(renamed, keys())).To(MatchError(SatisfyAll(
+			ContainSubstring("published alert OpenVoxCANotReady is gone"),
+			ContainSubstring("needs a major release"))))
+	})
+
+	It("refuses a published _config key removed", func() {
+		Expect(verifyMixinPublishedNames(alerts(), without(keys(), "pendingFor"))).To(MatchError(
+			ContainSubstring("published _config key pendingFor is gone")))
+	})
+
+	It("has a floor: both lists are populated", func() {
+		// An empty list would pass every check above vacuously.
+		Expect(publishedMixinAlerts).NotTo(BeEmpty())
+		Expect(publishedMixinConfigKeys).NotTo(BeEmpty())
+	})
+})
