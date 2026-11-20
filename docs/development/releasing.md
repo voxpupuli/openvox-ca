@@ -136,10 +136,10 @@ Not covered, so free to change in a minor or patch release:
   validity, the OCSP response lifetime, `superseded_cert_revoke_after_sec`),
   which is breaking in either direction; and one that bounds how long a
   revocation, or tampering with the inventory, takes to be acted on or reported,
-  such as `crl_sync_interval_sec`, `crl_chain_refresh_interval_sec`,
-  `client_crl_refresh_interval_sec`, `superseded_cert_sweep_interval_sec`, `file_export`'s `interval_sec` and
-  `inventory_verify_interval_sec`, where lengthening is breaking and shortening
-  is not.
+  such as `crl_sync_interval_sec`, the CRL chain refresh interval,
+  `client_crl_refresh_interval_sec`, `superseded_cert_sweep_interval_sec`,
+  `file_export`'s `interval_sec` and `inventory_verify_interval_sec`, where
+  lengthening is breaking and shortening is not.
 
 One reservation. A fix for a security vulnerability may break the public API
 in a minor or patch release when there is no compatible way to fix it, for
