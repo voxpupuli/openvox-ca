@@ -701,7 +701,8 @@ path — still provides no cross-replica guarantee anyway.
     on either side of it derive different keys and do not exclude one another
     for the length of the rollout, so it needs a full restart rather than a
     rolling one. From 1.0.0 it also needs a major release, as does renaming a
-    lock or changing the order in which two nest; see [what the version number
+    lock, changing which lock guards a mutation, or changing the order in which
+    two nest; see [what the version number
     promises](releasing.md#what-the-version-number-promises).
 
 12. **A new nesting is protocol too, not only a new name.** Rule 7 covers

@@ -53,8 +53,9 @@ rule wins.
    `private_keys/openvox-ca-server.pem`), and the images' `serving_cert` names.
 4. **Storage and the cross-replica lock protocol.** What each backend stores and
    where, so that a store one 1.x release wrote is one every later 1.x release
-   reads. The lock names, their key derivation and the order in which any two
-   are nested change only in a major release, so replicas of two 1.x releases
+   reads. The lock names, which named lock guards each mutation, their key
+   derivation and the order in which any two are nested change only in a major
+   release, so replicas of two 1.x releases
    never fail to exclude one another or deadlock on one another. A release that
    cannot be rolled out one replica at a time (because a schema migration it
    runs at start, or another storage change, is one an older replica cannot
@@ -86,7 +87,9 @@ rule wins.
    the `/usr/local/bin` path its `ExecStart` names. For every release: the
    artefact names (tarballs, packages, `checksums.txt`, the `.spdx.json` and
    `.cdx.json` SBOMs, `provenance.sigstore.json`), and the signing identities
-   and the SLSA provenance predicate type (`slsaprovenance1`) the
+   and the SLSA v1 provenance predicate type
+   (`https://slsa.dev/provenance/v1`, which `cosign --type slsaprovenance1`
+   selects) the
    [verification steps](../../README.md#verifying-what-you-downloaded) pin.
 9. **Log fields.** Structured field names, such as `client.cn` and
    `client.domain`; the field values the documentation tells you to match on,
@@ -124,11 +127,13 @@ Not covered, so free to change in a minor or patch release:
   covered.
 - **The default of a performance or capacity setting**: a cache or memory size,
   a timeout, a concurrency budget, or an interval that bounds only how fresh a
-  report or a display is, such as `ocsp_index_sync_interval_sec` (the mixin's
-  `ocspIndexSyncWindow` moves with its default, which is one more reason to
-  vendor the mixin at the server's tag). Such a default moves when a better one
-  is found, and a value you set keeps its meaning. Every other default is covered and changes
-  only in a major release. That includes one that grants access, accepts input
+  report or a display is. The default of `ocsp_index_sync_interval_sec` is
+  excluded too: OCSP is opt-in, and that interval bounds how long a certificate
+  signed on another replica reads `unknown`, never `good`. Such a default moves when a better one
+  is found, and a value you set keeps its meaning. A release that moves a
+  default a shipped mixin window is sized against says so in its release notes,
+  so that an operator who overrides the window through `_config` can resize it.
+  Every other default is covered and changes only in a major release. That includes one that grants access, accepts input
   or relaxes a refusal (`allow_public_status`, `client_revocation_policy`,
   `allow_subject_alt_names`, the `insecure_*` settings, rate limits that refuse
   requests); one that sets how strong a key is (key sizes and algorithms); one

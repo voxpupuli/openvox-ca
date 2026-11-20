@@ -2700,9 +2700,8 @@ var _ = Describe("API Workflow", func() {
 
 				// The migration guide publishes this string as a grep target.
 				// Message text is not a semver surface (releasing.md), so this
-				// pins a runbook aid until #666 gives the rejection an event
-				// value; the subject= and error= fields below are the covered
-				// part. The empty-body form has its own message: an operator
+				// pins a runbook aid; the subject= and error= fields below are
+				// the covered part. The empty-body form has its own message: an operator
 				// filtering for one must not silently miss the other.
 				Expect(logBuf.String()).To(ContainSubstring("Auto-renewal rejected: certificate not eligible"))
 				Expect(logBuf.String()).To(ContainSubstring("subject=" + subject))
