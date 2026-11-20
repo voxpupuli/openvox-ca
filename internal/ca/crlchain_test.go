@@ -572,6 +572,11 @@ var _ = Describe("CRL chain read failures", func() {
 		// starting to count -- and docs/api.md publishes that it does not.
 		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 0),
 			"a revocation that found no inventory entry is not a CRL-update failure")
+		// It is a clean that left a valid credential behind, though, and the
+		// clean counter is documented as the complete signal for that: this is
+		// one of the two revoke arms the CRL counter leaves out.
+		Expect(myCA.CleanFailures()).To(HaveKeyWithValue(ca.CleanStepRevoke, uint64(1)),
+			"openvoxca_clean_failures_total{step=\"revoke\"} must count a revocation the CRL counter does not")
 	})
 
 	It("reads the stored blob once per re-sign, not once per purpose", func() {

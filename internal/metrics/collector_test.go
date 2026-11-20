@@ -266,6 +266,58 @@ var _ = Describe("Collector", func() {
 		Expect(counterValue(series(g, "tampered"))).To(Equal(0.0))
 	})
 
+	// The two counters #666 added so that no condition the docs tell
+	// operators to watch for is left in the log alone. Every label value is
+	// exported from the first scrape, for the same reason as the inventory
+	// reasons above, and each is driven through the real path to a distinct
+	// value so a transposition shows as well as a rename.
+	It("reports clean failures by step and duplicate refusals by state", func() {
+		series := func(g gathered, name, label, value string) float64 {
+			GinkgoHelper()
+			m := g.findByLabels(name, map[string]string{label: value})
+			Expect(m).NotTo(BeNil(), "%s{%s=%q} must be exported even at zero", name, label, value)
+			return counterValue(m)
+		}
+		steps := []string{"revoke", "delete_cert", "delete_csr"}
+		states := []string{"requested", "signed", "revoked"}
+
+		g := gather(metrics.NewCollector(myCA))
+		for _, step := range steps {
+			Expect(series(g, "openvoxca_clean_failures_total", "step", step)).To(Equal(0.0))
+		}
+		for _, state := range states {
+			Expect(series(g, "openvoxca_csr_duplicate_refusals_total", "state", state)).To(Equal(0.0))
+		}
+
+		// Two refusals of a pending request, one of a signed certificate.
+		requestCert("waiting")
+		for range 2 {
+			csrPEM, err := testutil.GenerateCSR("waiting")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(ctx, "waiting", csrPEM)
+			Expect(err).To(HaveOccurred())
+		}
+		signCert("enrolled")
+		csrPEM, err := testutil.GenerateCSR("enrolled")
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.SaveRequest(ctx, "enrolled", csrPEM)
+		Expect(err).To(HaveOccurred())
+
+		// A clean whose revocation fails: the inventory and its MAC lost, the
+		// certificate kept, so the serial lookup finds nothing.
+		Expect(os.Remove(store.InventoryPath())).To(Succeed())
+		Expect(os.Remove(filepath.Join(filepath.Dir(store.InventoryPath()), ".inventory.hmac"))).To(Succeed())
+		Expect(myCA.Clean(ctx, "enrolled")).To(Succeed())
+
+		g = gather(metrics.NewCollector(myCA))
+		Expect(series(g, "openvoxca_csr_duplicate_refusals_total", "state", "requested")).To(Equal(2.0))
+		Expect(series(g, "openvoxca_csr_duplicate_refusals_total", "state", "signed")).To(Equal(1.0))
+		Expect(series(g, "openvoxca_csr_duplicate_refusals_total", "state", "revoked")).To(Equal(0.0))
+		Expect(series(g, "openvoxca_clean_failures_total", "step", "revoke")).To(Equal(1.0))
+		Expect(series(g, "openvoxca_clean_failures_total", "step", "delete_cert")).To(Equal(0.0))
+		Expect(series(g, "openvoxca_clean_failures_total", "step", "delete_csr")).To(Equal(0.0))
+	})
+
 	It("reports CA certificate and CRL metrics", func() {
 		g := gather(metrics.NewCollector(myCA))
 

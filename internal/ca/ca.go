@@ -436,6 +436,20 @@ type CA struct {
 	// (openvoxca_supersede_failures_total) for alerting.
 	supersedeFailures atomic.Uint64
 
+	// cleanFailures counts the steps of a Clean that failed, one counter per
+	// step: the revocation, deleting the certificate and deleting the CSR.
+	// Clean carries on past each, so the subject reads as cleaned while
+	// something is left behind — an unrevoked credential, or a blob that keeps
+	// the subject from enrolling again. The revocation is counted here whatever
+	// stopped it, including the lock acquisition crlUpdateFailures leaves out.
+	// Exposed as openvoxca_clean_failures_total{step}.
+	cleanFailures struct{ revoke, deleteCert, deleteCSR atomic.Uint64 }
+
+	// duplicateRefusals counts CSRs SaveRequest refused because the subject
+	// already held a pending CSR, a signed certificate or a revoked one, by
+	// which. Exposed as openvoxca_csr_duplicate_refusals_total{state}.
+	duplicateRefusals struct{ requested, signed, revoked atomic.Uint64 }
+
 	// Four counters, because their remedies differ: crlChainFailures points at
 	// the file itself, crlChainDiscarded at the CA bundle, crlChainRegressed at
 	// whatever writes the file, and crlChainRemoved at either the file or the
@@ -596,6 +610,39 @@ func (c *CA) CRLUpdateFailures() uint64 {
 // openvoxca_crl_sync_failures_total.
 func (c *CA) CRLSyncFailures() uint64 {
 	return c.crlSyncFailures.Load()
+}
+
+// The steps of a Clean, as CleanFailures reports them and
+// openvoxca_clean_failures_total's step label spells them.
+const (
+	CleanStepRevoke     = "revoke"
+	CleanStepDeleteCert = "delete_cert"
+	CleanStepDeleteCSR  = "delete_csr"
+)
+
+// CleanFailures returns how many times each step of a Clean has failed, keyed
+// by CleanStepRevoke, CleanStepDeleteCert and CleanStepDeleteCSR, every key
+// present. A failed step does not fail the Clean, so this is the only count of
+// a clean that left something behind; the metrics exporter surfaces it as
+// openvoxca_clean_failures_total.
+func (c *CA) CleanFailures() map[string]uint64 {
+	return map[string]uint64{
+		CleanStepRevoke:     c.cleanFailures.revoke.Load(),
+		CleanStepDeleteCert: c.cleanFailures.deleteCert.Load(),
+		CleanStepDeleteCSR:  c.cleanFailures.deleteCSR.Load(),
+	}
+}
+
+// DuplicateRefusals returns how many CSRs SaveRequest has refused as
+// duplicates, keyed by the state the subject held (DuplicateRequested,
+// DuplicateSigned, DuplicateRevoked), every key present. The metrics exporter
+// surfaces it as openvoxca_csr_duplicate_refusals_total.
+func (c *CA) DuplicateRefusals() map[string]uint64 {
+	return map[string]uint64{
+		DuplicateRequested: c.duplicateRefusals.requested.Load(),
+		DuplicateSigned:    c.duplicateRefusals.signed.Load(),
+		DuplicateRevoked:   c.duplicateRefusals.revoked.Load(),
+	}
 }
 
 // SerialIndexSyncFailures returns the number of times the CA failed to refresh
