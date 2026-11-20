@@ -104,9 +104,12 @@
             // The signer's most recent login to OpenBao failed, so no new
             // token can be had, and issuance, CRL re-signing and OCSP fail once
             // the one in hand expires. It retries every five seconds, so the
-            // gauge returns to 1 by itself once a login can succeed. The series exists
-            // only where the CA key is an OpenBao Transit key, so this is
-            // silent everywhere else.
+            // gauge returns to 1 by itself once a login can succeed. The
+            // series exists only where the CA key is an OpenBao Transit key,
+            // so this is silent everywhere else. In the default topology it
+            // comes from the signer over its Metrics RPC, so a signer that
+            // has stopped answering leaves it absent rather than 0, and
+            // OpenVoxCASignerUnresponsive below is what fires then.
             expr: 'openvoxca_openbao_authenticated{%(selector)s} == 0' % {
               selector: $._config.openvoxCASelector,
             },
@@ -116,6 +119,39 @@
               summary: 'The OpenVox CA cannot log in to OpenBao.',
               description: 'The OpenVox CA signer on {{ $labels.instance }} has been unable to log in to OpenBao for %(for)s (openvoxca_openbao_authenticated=0). Once its current token expires it cannot sign certificates, CRLs or OCSP responses. Check that OpenBao is reachable and that the source credential (AppRole secret_id, Kubernetes service account or token file) is still valid; see docs/openbao-transit.md.' % {
                 'for': $._config.openBaoUnauthenticatedFor,
+              },
+            },
+          },
+          {
+            alert: 'OpenVoxCASignerUnresponsive',
+            // The isolated signer is running but has stopped answering the
+            // frontend. Its process_* series are read from /proc by the
+            // frontend and so outlive it; its go_* series come over the same
+            // RPC as its signatures, with a five-second deadline, and are left
+            // out of every scrape it does not answer. A process present with
+            // no runtime is a signer that is alive and not responding, which
+            // nothing else reports: readiness does not consult the signer, a
+            // stalled signature fails only after two minutes and no alert
+            // reads that failure, and the CRL refresh notices hours later. A signer that
+            // exits takes the frontend with it, which is the launcher's to
+            // report, not this rule's.
+            //
+            // For every key backend. Silent under --single-process, which has
+            // no signer role, and on a frontend started without the
+            // launcher, which has no signer PID to read /proc from.
+            expr: |||
+              process_start_time_seconds{%(selector)s,role="signer"}
+                unless on(job, instance)
+              go_goroutines{%(selector)s,role="signer"}
+            ||| % {
+              selector: $._config.openvoxCASelector,
+            },
+            'for': $._config.signerUnresponsiveFor,
+            labels: { severity: 'critical' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The OpenVox CA signer has stopped answering.',
+              description: 'The isolated signer on {{ $labels.instance }} is running but has not answered the frontend for %(for)s: its process series are present and its go_* series, which come over the same connection as its signatures, are not. It cannot be relied on to sign certificates, CRLs or OCSP responses. The frontend logs "Could not read another process\'s Go runtime metrics" with the error on each scrape; restarting the CA restarts the signer. See docs/metrics.md.' % {
+                'for': $._config.signerUnresponsiveFor,
               },
             },
           },

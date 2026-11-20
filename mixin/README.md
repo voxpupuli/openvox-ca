@@ -14,6 +14,12 @@ alerting rules for the openvox-ca exporter. It alerts on:
   (`OpenVoxCAOpenBaoUnauthenticated`, critical, and only where the CA key is in
   [OpenBao](../docs/openbao-transit.md)). Once the token in hand expires, the CA
   can sign nothing;
+- an isolated **signer that has stopped answering** the frontend for five
+  minutes while its process is still running (`OpenVoxCASignerUnresponsive`,
+  critical, for every key backend; silent under `--single-process`).
+  Readiness does not consult the signer, so nothing else reports this before
+  the CRL refresh fails hours later. A signer that exits takes the frontend
+  with it, which the launcher reports;
 - the **CA certificate** nearing expiry (warning) or expiring imminently (critical);
 - the **CRL** approaching its `NextUpdate` (warning) or having lapsed (critical).
   This covers **this CA's own CRL only** — block 0 of the stored blob, which the
@@ -252,6 +258,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `destructiveOpsWindow` | `5m` | Window over which `OpenVoxCADestructiveOperationsHigh` sums revocations and cleans across the CA's replicas. |
 | `destructiveOpsThreshold` | `25` | Subjects revoked or cleaned within `destructiveOpsWindow` above which `OpenVoxCADestructiveOperationsHigh` fires: the server's per-client warning rate (more than 5 a minute) carried over to the whole CA on average. A burst of up to 25 in one minute stays under it, where the per-client warning fires at the sixth; lower it, or shorten `destructiveOpsWindow`, if that matters. Raise it where routine work cleans nodes in bulk. |
 | `cleanFailureWindow` | `1h` | How long one failed clean step keeps `OpenVoxCACleanIncomplete` firing. |
+| `signerUnresponsiveFor` | `5m` | `for:` dwell for `OpenVoxCASignerUnresponsive`. The frontend asks the signer once per scrape and waits five seconds, so one slow answer costs one scrape; this keeps that from paging. |
 | `openBaoUnauthenticatedFor` | `5m` | `for:` dwell for `OpenVoxCAOpenBaoUnauthenticated`. The signer retries a failed login every five seconds, whether the login was its own or one a request prompted, so this is about sixty attempts. |
 | `crlUpdateWindow` | `3h` | Window over which CRL-update failures are counted (the metric is a restart-resetting counter). The CRL refresh job takes the CRL lock and reads the stored CRL on every pass, so a CRL that stays unreadable, or whose lock cannot be taken, fails at least once per `crl_refresh_interval_sec` (1h by default); one that reads but cannot be written counts only when the CA tries to amend it. Keep the window at least `crlUpdateThreshold` + 1 intervals: at exactly the threshold a persistent fault flaps, and below it the alert never fires. Raise it alongside that setting. |
 | `crlUpdateThreshold` | `2` | Failures within `crlUpdateWindow` before the CRL-update-failure alert fires. Above one so that a backend restart costing a single amendment stays silent. With `crl_chain_file` set, the upstream chain refresh counts into the same counter on its own hourly pass, so a restart that overlaps both passes counts two and fires; set this to `3`, and `crlUpdateWindow` to `4h`, if you want those silent. |

@@ -223,6 +223,59 @@ tests:
         alertname: OpenVoxCAOpenBaoUnauthenticated
         exp_alerts: []
 
+  # A signer that stops answering keeps its process series, which the frontend
+  # reads from /proc, and loses its go_* series, which come over its RPC.
+  # Quiet while both are there and for the first 5m without the runtime one,
+  # paging after that, and quiet again once it answers.
+  - interval: 1m
+    name: a signer that stops answering pages after the dwell
+    input_series:
+      - series: 'process_start_time_seconds{job="openvox-ca",instance="ca-1:9140",role="signer"}'
+        values: "1700000000x40"
+      # stale, as Prometheus marks a series a scrape stops carrying; a bare
+      # gap would be bridged by the five-minute lookback.
+      - series: 'go_goroutines{job="openvox-ca",instance="ca-1:9140",role="signer"}'
+        values: "12x10 stale _x19 12x10"
+      - series: 'go_goroutines{job="openvox-ca",instance="ca-1:9140",role="frontend"}'
+        values: "40x40"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: OpenVoxCASignerUnresponsive
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: OpenVoxCASignerUnresponsive
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: OpenVoxCASignerUnresponsive
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openvox-ca
+              instance: ca-1:9140
+              role: signer
+            exp_annotations:
+              summary: "The OpenVox CA signer has stopped answering."
+              description: "The isolated signer on ca-1:9140 is running but has not answered the frontend for 5m: its process series are present and its go_* series, which come over the same connection as its signatures, are not. It cannot be relied on to sign certificates, CRLs or OCSP responses. The frontend logs \"Could not read another process's Go runtime metrics\" with the error on each scrape; restarting the CA restarts the signer. See docs/metrics.md."
+      - eval_time: 38m
+        alertname: OpenVoxCASignerUnresponsive
+        exp_alerts: []
+
+  # Under --single-process there is no signer role at all, and a frontend
+  # started without the launcher has no signer process series: neither pages.
+  - interval: 1m
+    name: no signer role means no unresponsive-signer page
+    input_series:
+      - series: 'go_goroutines{job="openvox-ca",instance="ca-1:9140",role="single-process"}'
+        values: "40x30"
+      - series: 'process_start_time_seconds{job="openvox-ca",instance="ca-1:9140",role="single-process"}'
+        values: "1700000000x30"
+      - series: 'go_goroutines{job="openvox-ca",instance="ca-2:9140",role="frontend"}'
+        values: "40x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: OpenVoxCASignerUnresponsive
+        exp_alerts: []
+
   # A CA whose key is not in OpenBao exports no such series, and must not page.
   - interval: 1m
     name: a CA without OpenBao never pages for it

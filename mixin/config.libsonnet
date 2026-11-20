@@ -90,9 +90,18 @@
     // OpenVoxCAOpenBaoUnauthenticated pages. The signer retries every five
     // seconds, after a failed login a request prompted as well as one its
     // background loop made, so this is about sixty attempts: long enough to
-    // ride out an
-    // OpenBao restart, short enough to act before a token's lease runs out.
+    // ride out an OpenBao restart, short enough to act before a token's lease
+    // runs out.
     openBaoUnauthenticatedFor: '5m',
+
+    // --- Unresponsive signer ---
+    // How long the isolated signer may go without answering the frontend's
+    // metrics request, while its process is present, before
+    // OpenVoxCASignerUnresponsive pages. The frontend asks once per scrape and
+    // waits five seconds, so a single slow answer under load costs one scrape;
+    // this keeps that from paging while catching a wedged signer well before
+    // the CRL refresh would.
+    signerUnresponsiveFor: '5m',
 
     // --- CRL update failures ---
     // The CA may fail to amend its CRL (a revocation it cannot record, or a CRL

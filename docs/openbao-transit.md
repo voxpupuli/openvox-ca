@@ -697,7 +697,9 @@ local-key custody, where the CA can sign with no external dependency at all.
   minutes: the signer's most recent login failed, so the source credential can
   no longer authenticate, and it needs operator attention before the current
   token lease runs out. The signer's `OpenBao re-authentication failed` error
-  in the `openvox-ca` logs carries the cause.
+  in the `openvox-ca` logs carries the cause. A signer that has stopped
+  answering leaves the gauge absent rather than `0`;
+  `OpenVoxCASignerUnresponsive` is the alert for that.
 
 ## Key rotation detection
 

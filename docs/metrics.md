@@ -92,6 +92,17 @@ launcher, has no PIDs to read, so its `process_*` series cover only itself; it
 still reports the signer's `go_*` series, which arrive over the socketpair
 rather than from `/proc`.
 
+That difference is what reveals a signer that is running but has stopped
+answering. Its `process_*` series stay, because the frontend reads them from
+`/proc`, while its `go_*` series, and `openvoxca_openbao_authenticated` with
+them, drop out of every scrape the signer does not answer within five seconds;
+the frontend logs `Could not read another process's Go runtime metrics` each
+time. Nothing else reports that state soon: readiness does not consult the
+signer, and a signature it does not answer fails only after two minutes.
+`OpenVoxCASignerUnresponsive` pages once the signer's process has had no
+`go_*` series for five minutes. A signer that exits instead takes the frontend
+down with it, through the launcher.
+
 Aggregate by what the series measures:
 
 - **Memory against the container's limit:** `sum by (pod)
@@ -474,8 +485,10 @@ to `1` by itself once a login can succeed, with or without further requests.
 The token manager runs in the signer, which has no listener of its own, so in
 the default deployment the frontend fetches this series from the signer along
 with the signer's `go_*` series. Like every `openvoxca_*` series it carries no
-`role`. If the signer cannot answer, the series is missing from that scrape, as
-its `go_*` series are.
+`role`. If the signer cannot answer, the series is **absent** from that scrape,
+not `0`, as its `go_*` series are, so `OpenVoxCAOpenBaoUnauthenticated` cannot
+fire then. `OpenVoxCASignerUnresponsive` covers that state; see
+[one series per process](#one-series-per-process).
 
 ### OCSP responder
 
@@ -958,7 +971,9 @@ See the [`mixin/`](https://github.com/voxpupuli/openvox-ca/tree/main/mixin) dire
 instructions for rendering or importing it. It alerts on exporter availability,
 subjects revoked or cleaned in bulk (`openvoxca_destructive_operations_total`),
 a clean that left something behind (`openvoxca_clean_failures_total`), an
-OpenBao signer that cannot log in (`openvoxca_openbao_authenticated`),
+OpenBao signer that cannot log in (`openvoxca_openbao_authenticated`), a
+signer that has stopped answering (its `go_*` series gone while its process is
+present),
 CA/CRL/leaf expiry, pending requests, CRL update failures
 (`openvoxca_crl_update_failures_total`), a replica whose CRL has fallen behind
 the stored one (`openvoxca_crl_cached_number`,
