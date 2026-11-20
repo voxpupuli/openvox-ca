@@ -1365,9 +1365,11 @@ Notes:
   supports a single running instance it is refused at once, naming the process
   holding the store, for the source as well as the destination — reading a live
   store still copies an inventory the server is appending to. Pointing
-  `--source-config` and `--dest-config` at the same store is refused for the
-  same reason, rather than waiting for ever on a lock it has already taken
-  itself. See [running a second process against a live
+  `--source-config` and `--dest-config` at the same filesystem or SQLite store
+  is refused for the same reason, rather than waiting for ever on a lock it has
+  already taken itself. On a backend with distributed locking nothing refuses
+  it: the destination's `bootstrap` lock waits for ever on the source's, which
+  `migrate` already holds, so interrupt it. See [running a second process against a live
   store](#running-a-second-process-against-a-live-store).
 - **Overwrite protection.** `migrate` refuses to write into a destination that
   already holds a CA certificate. Pass `--force` to overwrite it.
