@@ -614,9 +614,9 @@ configuration rather than by flag. Check the value the pre-flight prints. As
 soon as you supply any `--dns`, the list is taken verbatim, whatever
 [`allow_subject_alt_names`](configuration.md#subject-alternative-names-requested-by-a-csr)
 is set to: that setting governs names a *submitted CSR* asks for, and these come
-from an operator on the CA host rather than from a request. A `generate` runbook
-that worked before the setting existed works unchanged with it off. So a serving certificate that must answer
-to both its own name and an alias has to list both:
+from an operator on the CA host rather than from a request. So a serving
+certificate that must answer to both its own name and an alias has to list
+both:
 
 ```bash
 openvox-ca generate --certname ca.example.com --ttl 8760h \
@@ -968,8 +968,8 @@ JSON:
 Both are worth a rule wherever these logs are aggregated; see
 [Monitoring destructive operations](ca-key-security.md#monitoring-destructive-operations).
 
-**Who can do this.** The `openssl` recipe this replaces required the raw CA key
-file. This requires the ability to run the binary with the server's
+**Who can do this.** Signing with `openssl` by hand needs the raw CA key file.
+This command needs the ability to run the binary with the server's
 configuration — which under `ca_key_provider: openbao` means Transit sign
 permission plus write access to the cadir, rather than the key itself. That is a
 deliberate widening, and the reason the feature is possible at all, but it is

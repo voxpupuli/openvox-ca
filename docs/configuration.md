@@ -1262,11 +1262,9 @@ stops presenting the old one. The default is set for the harder case.
 
 24 hours is chosen to comfortably exceed the interval on which a fleet notices a
 renewal, while staying short enough that a replaced credential is not a standing
-one. The same window is what the CA's own serving-certificate work settled on
-for the same question asked about a different subject. `managed_certs` now
-supplies one: an entry's `revoke_after` is this same window asked about a
-component certificate, and it defaults to this setting. See
-[managed certificates](#managed-certificates).
+one. A `managed_certs` entry's `revoke_after` is this same window asked about a
+component certificate, and it defaults to this setting. See [managed
+certificates](#managed-certificates).
 
 An operator's renewal through
 [`POST /renew/{subject}`](api.md#renewal-by-an-operator) uses this window too.
@@ -1276,11 +1274,12 @@ renewing it itself, and has to be told about the replacement.
 If your threat model does not tolerate a replaced credential outliving its
 replacement at all, set `superseded_cert_revoke_after_sec: 0`: a renewal then
 revokes its predecessor before returning. That is an explicit choice and not the
-same as leaving it unset. Two settings in the table below still decide whether
-a predecessor is revoked at all: `revoke_on_auto_renew: false` keeps a same-key
-renewal's predecessor valid until it expires, and a `managed_certs` entry's
-`revoke_after` overrides this setting for that certificate. While a window is
-open, the predecessor is listed in `superseded.json` in the cadir and counted by
+same as leaving it unset. Two other settings can still leave a predecessor
+valid: `revoke_on_auto_renew: false` keeps a same-key renewal's predecessor until
+it expires (see the table below), and a `managed_certs` entry's own
+`revoke_after` sets the window for that certificate in place of this one. While a
+window is open, the predecessor is on the pending-supersession list
+(`superseded.json` in the cadir on the filesystem backend) and counted by
 `openvoxca_supersede_pending`.
 
 **The window is a deliberate weakening, and because it is the default it is one

@@ -490,7 +490,7 @@ Rules that keep the decomposed structure coherent:
 - **redis/valkey** implements `InventoryStore` and `CertIndex` with per-entry
   hash fields — see [The Redis decomposition](#the-redis-decomposition) above.
 - **The filesystem backend keeps the blob.** It does not implement the
-  interface; the type assertion fails and it behaves exactly as before. It is
+  interface; the type assertion fails and it keeps the blob path. It is
   single-node, so the cost the decomposition removes (and the cross-replica
   guarantee it adds) does not arise there in the same way.
 - **Wrapper backends unwrap to their base.** The probe is `asInventoryStore`,
@@ -829,8 +829,7 @@ the error an operator first meets.
   stronger than the general case.
 - **Hash chain** (`InventoryStore` backends) — the head advances atomically with
   the row inside the append transaction, so neither the torn-append nor the
-  interleaved-append cause applies, and a mismatch is a stronger signal,
-  though still not proof. The warning names the scheme it computed under.
+  interleaved-append cause applies, and a mismatch is a stronger signal.
 
 ### Why the mechanism meets the in-scope set
 

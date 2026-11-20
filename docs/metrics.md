@@ -307,10 +307,8 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > for. A contended lock during `Clean`'s best-effort revoke is not a revocation
 > that did not happen — the operation the caller asked for succeeded — whereas
 > `openvox-ca-ctl revoke --serial` failing on the lock is exactly that, and it is
-> the only way to retire a superseded certificate. Revoke by serial was left out
-> of the counted set when the rest were converted, and a review caught it; the
-> enumeration above is now every writer, with nothing falling into an unnamed
-> remainder.
+> the only way to retire a superseded certificate. The enumeration above is
+> every writer, with nothing falling into an unnamed remainder.
 >
 > Two of those writers are managed certificates', and they move only on a
 > deployment that configures `managed_certs` or `serving_cert` — the CA's own

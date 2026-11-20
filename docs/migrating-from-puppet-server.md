@@ -572,7 +572,7 @@ an administrator of its own domain, and is still answered `403 certificate not
 eligible for renewal` — renewal reissues under our authority using the presented
 certificate's subject, which is only safe for names we assigned. With no
 `client_ca` configured there is one trust domain and the requirement is
-unreachable, exactly as before.
+unreachable.
 
 The third is a defence-in-depth invariant on the internal API rather than
 something a request can trip: the HTTP handler derives the subject from the
