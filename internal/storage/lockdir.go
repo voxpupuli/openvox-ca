@@ -26,8 +26,9 @@ import (
 // DirPerm, and only the lock directory itself at lockDirPerm, so that a store
 // root created on the way is not made group-writable too.
 //
-// An existing directory is left exactly as it is, whatever its mode. One made
-// 0750 by an earlier version keeps working for the uid that owns it and stays
+// An existing directory is left exactly as it is, whatever its mode. One at
+// 0750 -- made under a narrower umask, by hand, or by a build from before #493 --
+// keeps working for the uid that owns it and stays
 // unreachable to any other, because this package never changes the mode of a
 // file it did not just create. MkdirAll rather than Mkdir for the second step
 // because it already answers the two cases that matter: nil for a directory

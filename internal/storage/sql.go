@@ -303,34 +303,33 @@ func NewSQLBackend(cfg SQLConfig) (*SQLBackend, error) {
 // The same-host lock directory derives from the resolved database path, so for a
 // DSN that reaches the database through a symlink -- including a symlinked
 // parent, such as a bind mount or a relocated /var/lib -- it sits beside the
-// target. Earlier versions derived it from the spelling and locked beside the
-// link. Between the two, a process on each version takes a different lock and
-// neither excludes the other, which is the one guarantee this lock exists to
-// give.
+// target. Builds of main from before v1.0.0-alpha1 derived it from the spelling
+// and locked beside the link, so one of those and this code take different locks
+// and neither excludes the other, which is the one guarantee this lock exists to
+// give. No release ever locked beside the link; #659 tracks removing this check.
 //
-// Nothing here can prevent that: the old process is the one holding the wrong
+// Nothing here can prevent that: the other process is the one holding the wrong
 // lock, and it is not running this code. What it can do is say so, at the moment
-// an operator is in a position to act -- an mtime on that directory younger than
-// the upgrade is a live process on the old version, not a leftover, which is why
-// the record carries it. A warning
-// rather than a refusal, because the ordinary case is a stale directory from an
-// upgrade that finished, and refusing to start over it would turn a housekeeping
-// task into an outage.
+// an operator is in a position to act -- a recent mtime on that directory is a
+// live process locking beside the link, not a leftover, which is why the record
+// carries it. A warning rather than a refusal,
+// because the ordinary case is a stale directory nothing uses any more, and
+// refusing to start over it would turn a housekeeping task into an outage.
 func warnOnStrandedSQLiteLockDir(dsn, inUse string) {
 	for _, spelling := range legacySQLiteSpellings(dsn) {
 		warnOnOneStrandedLockDir(spelling, inUse)
 	}
 }
 
-// legacySQLiteSpellings returns the names an earlier version may have derived a
+// legacySQLiteSpellings returns the names a pre-alpha build may have derived a
 // lock directory from.
 //
-// Two of them, because this PR changed the parser. SQLiteFilePath now decodes
-// %HH in the relative "file:" form, to agree with the driver; before that it
-// used the escaped text. So for a DSN of "file:ca%20b.db" an older version
-// locked in ".ca%20b.db.locks" while this one derives ".ca b.db.locks" -- and a
-// check that asked only about the decoded name would look for a directory the
-// old version never created, and miss the one it did. The stranded directory
+// Two of them, because the change that moved the lock directory also changed
+// the parser. SQLiteFilePath decodes %HH in the relative "file:" form, to agree
+// with the driver; before that it used the escaped text. So for a DSN of
+// "file:ca%20b.db" such a build locked in ".ca%20b.db.locks" while this one
+// derives ".ca b.db.locks" -- and a check that asked only about the decoded name
+// would look for a directory that build never created, and miss the one it did. The stranded directory
 // the warning exists for is exactly the one it could not see.
 //
 // The undecoded candidate is read straight off the URI rather than by keeping a
@@ -367,18 +366,17 @@ func warnOnOneStrandedLockDir(spelling, inUse string) {
 		return
 	}
 	slog.Warn("A same-host lock directory was left beside this DSN's own spelling, "+
-		"which is not where this version locks",
+		"which is not where openvox-ca locks",
 		"stranded", legacy,
-		// The doc above names the mtime as what separates a live holder from an
-		// upgrade's leftovers, so the record has to carry it: without it the
+		// The doc above names the mtime as what separates a live holder from a
+		// leftover, so the record has to carry it: without it the
 		// operator is told to go and look at the thing this already stat'd.
 		"stranded_modified", legacyInfo.ModTime().UTC().Format(time.RFC3339),
 		"in_use", inUse,
 		"why", "the lock directory derives from the resolved database path, so a DSN reaching "+
-			"the database through a symlink locks beside the target; earlier versions locked "+
-			"beside the link",
-		"action", "a process still running the earlier version would not exclude this one -- "+
-			"upgrade openvox-ca and openvox-ca-ctl together, then remove the stranded directory")
+			"the database through a symlink locks beside the target, not beside the link",
+		"action", "a process that locks beside the link would not exclude this one -- "+
+			"stop it, then remove the stranded directory")
 }
 
 // newSQLBackend takes both budgets already defaulted: applyDefaults is the single
@@ -1046,8 +1044,8 @@ func (t sqliteTarget) lockDir() (string, bool) {
 }
 
 // sqliteLockDirFor is the naming formula, in one place. Two callers need it: the
-// directory this version locks in, derived from the resolved path, and the one
-// an earlier version would have used, derived from the DSN's own spelling. They
+// directory this code locks in, derived from the resolved path, and the one a
+// pre-alpha build would have used, derived from the DSN's own spelling. They
 // have to agree on the shape or the stranded-directory check compares a name
 // nothing ever created.
 func sqliteLockDirFor(dbPath string) string {

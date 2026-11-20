@@ -367,8 +367,8 @@ var _ = Describe("InventoryIntegrityReport", func() {
 			Expect(blob).NotTo(BeEmpty(), "premise: the blob holds a real inventory")
 
 			// Structured by type, with no decomposed rows, over a store whose
-			// blob still holds everything: an etcd or Redis CA upgraded from a
-			// pre-decomposition release and not yet started.
+			// blob still holds everything: an etcd or Redis store still holding
+			// the legacy blob, which no server has started on to decompose.
 			svc.backend = emptyEntriesBackend{Backend: svc.backend}
 
 			rep, err := svc.InventoryIntegrityReport(ctx)

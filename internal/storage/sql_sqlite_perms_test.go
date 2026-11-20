@@ -732,11 +732,11 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			dir := GinkgoT().TempDir()
 			GinkgoT().Chdir(dir)
 
-			// The driver and this package both open "ca b.db"; an older version
+			// The driver and this package both open "ca b.db"; a pre-alpha build
 			// derived its lock directory from the undecoded text.
 			Expect(os.WriteFile(filepath.Join(dir, "ca b.db"), nil, 0o600)).To(Succeed())
 			Expect(os.Mkdir(filepath.Join(dir, ".ca%20b.db.locks"), 0o700)).To(Succeed(),
-				"what an earlier version left behind")
+				"what a pre-alpha build left behind")
 
 			buf := captureWarnings()
 			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:ca%20b.db"})
@@ -754,7 +754,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			Expect(os.WriteFile(realDB, nil, 0o600)).To(Succeed(), "seed the database")
 			Expect(os.Symlink(realDB, link)).To(Succeed(), "reach it through a link")
 			legacy := filepath.Join(linkDir, ".link.db.locks")
-			Expect(os.Mkdir(legacy, 0o700)).To(Succeed(), "what an earlier version left behind")
+			Expect(os.Mkdir(legacy, 0o700)).To(Succeed(), "what a pre-alpha build left behind")
 
 			buf := captureWarnings()
 			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + link})
@@ -766,9 +766,9 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			// behaviour had regressed, and none of them would fail if the
 			// record named the wrong directory in the right words. What matters
 			// is which directory is named and that the mtime is carried -- the
-			// doc gives the mtime as what separates a live holder from an
-			// upgrade's leftovers, so omitting it sends the operator to stat a
-			// path this already stat'd.
+			// doc gives the mtime as what separates a live holder from a
+			// leftover, so omitting it sends the operator to stat a path this
+			// already stat'd.
 			Expect(buf.String()).To(ContainSubstring("stranded="+legacy),
 				"the attribute naming the directory left behind")
 			inUse, ok := lockDirOf("file:" + link)
@@ -780,7 +780,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 
 			// One pin for the advice, because an operator-facing remedy that
 			// silently disappears is its own regression.
-			Expect(buf.String()).To(ContainSubstring("upgrade openvox-ca and openvox-ca-ctl together"),
+			Expect(buf.String()).To(ContainSubstring("stop it, then remove the stranded directory"),
 				"what the operator has to do about it")
 		})
 

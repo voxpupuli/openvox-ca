@@ -73,8 +73,8 @@ func tryLockFile(f *os.File) (bool, error) {
 // rejects flock(2) (EOPNOTSUPP, ENOSYS on some FUSE and network filesystems),
 // or a kernel out of lock records (ENOLCK). Treating those as hard errors would
 // fail every WithLock caller — bootstrap, signing, revocation, CRL refresh —
-// and so take down a CA that worked before this capability existed, on a store
-// nobody can lock and where the previous release simply did not try. That is
+// and so take down a CA on a store nobody can lock, where the process-local
+// mutex is all the locking there is to have. That is
 // the same trade filelock_other.go makes for a platform with no flock(2) at
 // all, and it is made the same way: report the capability absent.
 func isLockingUnavailableError(err error) bool {

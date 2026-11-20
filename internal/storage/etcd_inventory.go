@@ -939,7 +939,7 @@ func (b *EtcdBackend) decomposeLegacyInventory(ctx context.Context) error {
 		if len(state.entries) > 0 {
 			if !recordsArePrefixOf(state.entries, recs) {
 				return fmt.Errorf("etcd inventory holds both a non-empty legacy blob and decomposed entries that do not match it; " +
-					"this usually means a pre-decomposition replica wrote to the blob after another replica upgraded. " +
+					"this usually means a replica still writing the legacy blob format appended to it after another replica converted it. " +
 					"Refusing to guess: inspect inventory/data and inventory/entries/ under the key prefix and remove whichever is stale")
 			}
 			slog.Info("Resuming interrupted etcd inventory decomposition", "imported", len(state.entries), "total", len(recs))

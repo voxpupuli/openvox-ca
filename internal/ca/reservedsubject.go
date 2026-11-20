@@ -23,8 +23,8 @@ import "errors"
 // for. A key the server keeps for subject S is written to
 // <cadir>/private/S_key.pem whatever the storage backend, so the key for "ca"
 // would land on private/ca_key.pem. On the filesystem backend that is the CA
-// key itself in a cadir an earlier openvox-ca created, and the CA key's legacy
-// location in a fresh one, where the backend then refuses to start on two
+// key itself in a cadir that keeps it there, and the CA key's legacy location
+// in any other, where the backend then refuses to start on two
 // different CA keys (#495). No other backend reads that file.
 const reservedKeySubject = "ca"
 
@@ -45,7 +45,7 @@ const reservedKeySubject = "ca"
 // fit a managed certificate, which never involves a CSR.
 var ErrReservedSubject = errors.New(`the subject "ca" is reserved: this CA generates ` +
 	`no private key for it, because the server's key file for "ca" would be ` +
-	`private/ca_key.pem, where the filesystem backend keeps or once kept the CA's ` +
+	`private/ca_key.pem, where the filesystem backend may keep the CA's ` +
 	`own key. Choose another certname`)
 
 // CheckKeySubject refuses a subject this CA must not generate a private key

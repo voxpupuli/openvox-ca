@@ -27,9 +27,8 @@ import (
 
 // Platforms where the standard library declares no syscall.Flock — Windows,
 // AIX, Solaris, js/wasm and friends. Same-host locking reports itself
-// unsupported, so StorageService.WithLock falls back to the process-local mutex
-// it used before this capability existed: no behaviour is lost relative to the
-// previous release, and none is claimed that the platform cannot deliver.
+// unsupported, so StorageService.WithLock falls back to the process-local
+// mutex, and nothing is claimed that the platform cannot deliver.
 //
 // Only Linux is a supported deployment target (see magefile.go), so this file
 // exists to keep `go build` honest on a contributor's machine rather than to

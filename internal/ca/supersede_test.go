@@ -420,8 +420,8 @@ var _ = Describe("Delayed supersession", func() {
 		// stored one. The presented side is always canonical (serialHexStr of a
 		// *big.Int); the stored side used to be whatever the caller passed, and
 		// on the CSR re-key path that is LatestSerialForSubject, which returns
-		// inventory text verbatim. An inventory written by an older version, or
-		// migrated from Puppet Server, carries zero-padded sequential serials —
+		// inventory text verbatim. An inventory migrated from Puppet Server
+		// carries zero-padded sequential serials —
 		// so the gate compared "A" against "000A", missed, and let the
 		// superseded credential renew itself. Exactly the escalation it exists
 		// to prevent, on the worse path, and silent: the sweep parses before

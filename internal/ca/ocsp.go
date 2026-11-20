@@ -158,9 +158,9 @@ func (c *CA) buildSerialIndex(ctx context.Context) error {
 
 // readSerialIndex reads the stored inventory into a serial → subject map.
 // Serials are normalised to uppercase hex without leading zeros (via
-// serialHexStr) so that lookups are consistent regardless of whether the
-// inventory was written by this version (random serials) or an older version
-// (zero-padded sequential serials).
+// serialHexStr) so that lookups are consistent whether the inventory holds
+// this CA's random serials or the zero-padded sequential serials of one
+// migrated from Puppet Server.
 //
 // It goes through InventoryEntries rather than ReadInventory because this runs
 // on a timer. ReadInventory verifies and then fetches, and its verification

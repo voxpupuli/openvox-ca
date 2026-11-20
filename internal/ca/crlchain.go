@@ -247,11 +247,11 @@ func (c *CA) crlChainLocked(ctx context.Context, ourCRL *x509.RevocationList, st
 	// derives from block 0, so a chain going 2 -> 1 moves crl_number upward and
 	// looks healthy on every dashboard.
 	//
-	// Loss caused by a replica running an older build during a rolling upgrade is
-	// invisible even here: that replica writes a single block, and the next
-	// re-sign on an upgraded replica reads one block and writes one block, with
-	// nothing to compare against. docs/metrics.md names that blind spot and the
-	// order to upgrade in; this line covers only what is observable in-process.
+	// Loss caused by a writer that does not preserve the chain at all is
+	// invisible even here: it writes a single block, and the next re-sign reads
+	// one block and writes one block, with nothing to compare against. No build
+	// since v1.0.0-alpha1 writes that way; this line covers only what is
+	// observable in-process.
 	if before, after := len(stored), len(chain); after != before {
 		slog.Warn("Stored CRL chain length changed while re-signing",
 			"blocks_read", before, "blocks_written", after)

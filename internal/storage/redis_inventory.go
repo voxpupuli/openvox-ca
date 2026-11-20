@@ -1165,7 +1165,7 @@ func (b *RedisBackend) decomposeLegacyInventory(ctx context.Context) error {
 		if len(entries) > 0 {
 			if !recordsArePrefixOf(entries, recs) {
 				return fmt.Errorf("redis inventory holds both a non-empty legacy blob and decomposed entries that do not match it; " +
-					"this usually means a pre-decomposition replica wrote to the blob after another replica upgraded. " +
+					"this usually means a replica still writing the legacy blob format appended to it after another replica converted it. " +
 					"Refusing to guess: inspect the inventory:data and inventory:entries keys under the key prefix and remove whichever is stale")
 			}
 			slog.Info("Resuming interrupted redis inventory decomposition", "imported", len(entries), "total", len(recs))
