@@ -1553,8 +1553,8 @@ var _ = Describe("EtcdLegacyInventoryDecompose", func() {
 		Expect(err.Error()).To(ContainSubstring("do not match"), "the error must explain the conflict")
 		Expect(err.Error()).To(ContainSubstring("stop every replica still writing the legacy format"),
 			"the remedy must not be to delete either side")
-		Expect(err.Error()).To(ContainSubstring("re-revoke every certificate revoked since"),
-			"a snapshot restore rolls back the CRL too")
+		Expect(err.Error()).To(ContainSubstring("reconcile them under the key prefix by hand"),
+			"the remedy that keeps every record")
 
 		// Neither side may have been destroyed by the refusal.
 		blobResp, err := cli.Get(ctx, prefix+"/inventory/data")

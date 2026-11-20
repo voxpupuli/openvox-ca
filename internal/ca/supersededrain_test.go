@@ -504,12 +504,14 @@ var _ = Describe("drainDueLocked", func() {
 		}
 	})
 
-	// A stored row's serial is not guaranteed canonical, so the same
-	// certificate can reach the batch under two spellings. Compared raw they look like two revocations, and the
-	// batch appends both in one go, where the per-entry loop could not: its
-	// second call re-read a CRL its first had already amended. Growing the CRL
-	// without bound is what revokeSerialLocked's duplicate check exists to
-	// prevent, and this is the batch's version of it.
+	// recordSuperseded stores canonically, but the drain does not trust a list
+	// it may not have written (a hand edit, or a future appender), so the same
+	// certificate can reach the batch under two spellings. Compared raw they
+	// look like two revocations, and the batch appends both in one go, where
+	// the per-entry loop could not: its second call re-read a CRL its first had
+	// already amended. Growing the CRL without bound is what
+	// revokeSerialLocked's duplicate check exists to prevent, and this is the
+	// batch's version of it.
 	It("appends one CRL entry for two spellings of the same serial", func() {
 		canonical := entry(0)
 		padded := canonical

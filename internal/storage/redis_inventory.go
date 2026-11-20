@@ -1166,7 +1166,7 @@ func (b *RedisBackend) decomposeLegacyInventory(ctx context.Context) error {
 			if !recordsArePrefixOf(entries, recs) {
 				return fmt.Errorf("redis inventory holds both a non-empty legacy blob and decomposed entries that do not match it; " +
 					"this usually means a replica still writing the legacy blob format appended to it after another replica converted it. " +
-					"Refusing to guess: stop every replica still writing the legacy format first. The blob then usually holds only issuances made after the conversion, so deleting either the inventory:data or the inventory:entries key loses records; reconcile them under the key prefix by hand, or restore from a snapshot taken before the conversion, which also rolls back the CRL, so re-revoke every certificate revoked since it was taken")
+					"Refusing to guess: stop every replica still writing the legacy format first. The blob then usually holds only issuances made after the conversion, so deleting either the inventory:data or the inventory:entries key loses records; reconcile them under the key prefix by hand; a snapshot from before the conversion lacks those issuances too")
 			}
 			slog.Info("Resuming interrupted redis inventory decomposition", "imported", len(entries), "total", len(recs))
 		}

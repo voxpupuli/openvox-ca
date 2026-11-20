@@ -771,7 +771,8 @@ var _ = Describe("SQLiteFilePermissions", func() {
 
 			// The data, not the prose. Four substring assertions on one record
 			// meant a reword of the operator advice failed the spec while no
-			// behaviour had regressed, and none of them would fail if the
+			// behaviour had regressed (the two advice pins below are kept
+			// deliberately, and say why), and none of them would fail if the
 			// record named the wrong directory in the right words. What matters
 			// is which directory is named and that the mtime is carried -- the
 			// doc gives the mtime as what points at a live holder, so omitting
@@ -785,9 +786,9 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			Expect(buf.String()).To(MatchRegexp(`stranded_modified=\S`),
 				"carrying the mtime, not an empty attribute")
 
-			// One pin for the advice, because an operator-facing remedy that
-			// silently disappears is its own regression. It spans how to find
-			// the holder as well as what to do with it.
+			// Two pins for the advice, because an operator-facing remedy that
+			// silently disappears is its own regression: how the operator finds
+			// the holder, and what to do about it.
 			Expect(buf.String()).To(ContainSubstring("find it from the holder record"),
 				"how the operator finds the process")
 			Expect(buf.String()).To(ContainSubstring("stop it, then remove the stranded directory"),

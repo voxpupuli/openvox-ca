@@ -379,8 +379,9 @@ func warnOnOneStrandedLockDir(spelling, inUse string) {
 			"not from the DSN's spelling",
 		"action", "a process that locks in the stranded directory (an openvox-ca build from "+
 			"before v1.0.0-alpha1) would not exclude this one -- find it from the holder record "+
-			"in the stranded directory's lock files (pid, host and start time), or with fuser or "+
-			"lsof on them, stop it, then remove the stranded directory")
+			"in the stranded directory's lock files (pid, host and start time; the record outlives "+
+			"its process, so confirm that pid is still running with that start time, or check with "+
+			"fuser or lsof on the files), stop it, then remove the stranded directory")
 }
 
 // newSQLBackend takes both budgets already defaulted: applyDefaults is the single

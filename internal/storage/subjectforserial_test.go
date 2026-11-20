@@ -48,7 +48,8 @@ var _ = Describe("StorageService SubjectForSerial", func() {
 		// backend, whose reader normalises each serial before SubjectForSerial
 		// compares it, so these entries exercise that normalisation; the
 		// structured-row case, where the stored text itself is not canonical,
-		// is covered in sql_inventory_test.go. Nothing here goes through the CA. The subjects are in OpenVox Server's "/CN=" form, which a
+		// is covered in sql_inventory_test.go. Nothing here goes through the
+		// CA. The subjects are in OpenVox Server's "/CN=" form, which a
 		// filesystem inventory reads as the bare certname.
 		Expect(store.AppendInventory(ctx,
 			"0A 2026-01-01T00:00:00UTC 2027-01-01T00:00:00UTC /CN=first")).To(Succeed())
