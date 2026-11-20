@@ -71,11 +71,14 @@ as many machines as you like, and the one-instance rule does not apply to them.
 Of the `openvox-ca-ctl` commands that reach storage directly, only `migrate` can
 reach these backends (`setup` and `import` take a filesystem cadir only), and it
 still needs every replica stopped, since nothing detects one that is running
-(see [migrating between backends](#migrating-between-backends)). The offline
-`openvox-ca` subcommands each say whether they are safe beside running
-replicas: offline `generate` is, and `rebuild-inventory-hmac --yes-re-bless` is
-not; see [running alongside a live
-server](operator-cli.md#running-alongside-a-live-server). A future backend inherits whichever
+(see [migrating between backends](#migrating-between-backends)). Of the
+offline `openvox-ca` subcommands, `generate` is safe beside running replicas on
+these backends (see [running alongside a live
+server](operator-cli.md#running-alongside-a-live-server)), and
+`rebuild-inventory-hmac --yes-re-bless` needs them stopped, which you confirm
+with `--replicas-stopped` (see
+[`rebuild-inventory-hmac`](operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity)).
+A future backend inherits whichever
 behaviour its locking earns it.
 
 ### Why only one
