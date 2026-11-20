@@ -1136,9 +1136,8 @@ zero-length value is present, which a torn write produces. It is an ordinary
 mismatch and takes the `--yes-re-bless` path, not the "no baseline stored" path
 below.
 
-`scheme` is worth reading before anything else. A mismatch also fires when a
-store is served under a different integrity scheme than the value was written
-with, which is a different cause reached by the same repair.
+`scheme` names the integrity scheme the value was computed under, whole-blob
+HMAC or hash chain, which the backend decides.
 
 What it cannot tell you is **which** entry diverged. The backends persist a
 single integrity head and no per-entry value, so nothing records what any

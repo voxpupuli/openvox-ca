@@ -1360,11 +1360,14 @@ honoured on both ends.
 Notes:
 
 - **Stop the server first**, on both ends. Run `migrate` while no `openvox-ca`
-  is serving either backend, so the copy sees a consistent snapshot. It does not
-  race one that is, and it does not wait for one either: on a backend that
-  supports a single running instance it is refused at once, naming the process
-  holding the store, for the source as well as the destination — reading a live
-  store still copies an inventory the server is appending to. Pointing
+  is serving either backend, so the copy sees a consistent snapshot. On a
+  backend that supports a single running instance it does not race one that
+  is, and does not wait for one either: it is refused at once, naming the
+  process holding the store, for the source as well as the destination —
+  reading a live store still copies an inventory the server is appending to.
+  On a backend with distributed locking nothing detects a running server, so
+  `migrate` copies whatever it reads, and stopping every replica first is up to
+  you. Pointing
   `--source-config` and `--dest-config` at the same filesystem or SQLite store
   is refused for the same reason, rather than waiting for ever on a lock it has
   already taken itself. On a backend with distributed locking nothing refuses

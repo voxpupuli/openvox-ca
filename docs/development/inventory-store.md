@@ -348,7 +348,7 @@ Rules that keep the decomposed structure coherent:
   number of batches so a huge backlog cannot blow the caller's lock budget —
   deferred matches stay present and consistent for later runs.
 - **Legacy blobs are decomposed in place.** `EnsureReady` detects a non-empty
-  pre-decomposition `inventory/data` blob, takes a distributed lock
+  legacy `inventory/data` blob, takes a distributed lock
   (`inventory-decompose`), verifies the blob against its stored whole-blob
   HMAC (the key is a backend blob, so it is available), imports the lines
   into entry keys, and empties the marker only in the final commit.
@@ -367,8 +367,8 @@ Rules that keep the decomposed structure coherent:
   flag). Because the blob stays authoritative until the import's final
   commit, an interrupted import is detected on the next start (the partial
   entries are the import-written prefix of the blob) and redone from the
-  intact blob; entries that are *not* such a prefix mean a mixed-version
-  cluster wrote both forms, which is refused with an explicit error rather
+  intact blob; entries that are *not* such a prefix mean that
+  something wrote both forms, which is refused with an explicit error rather
   than guessed at. Duplicate serials in the legacy blob — possible, since
   blob backends never had a cluster-wide uniqueness guarantee — are imported
   verbatim with a warning; their by-serial keys carry an ambiguity sentinel
@@ -451,7 +451,7 @@ Rules that keep the decomposed structure coherent:
   it deferred.
 - **Legacy blobs are decomposed in place**, under the same
   `inventory-decompose` lock etcd takes, with the same fail-closed rules:
-  `EnsureReady` verifies the pre-decomposition blob against its stored
+  `EnsureReady` verifies the legacy blob against its stored
   whole-blob HMAC before trusting it (a mismatch, or a stored HMAC that cannot
   be verified because the key is missing or malformed, fails startup with
   `ErrInventoryTampered`; the operator acknowledges a lost baseline by deleting
@@ -463,8 +463,8 @@ Rules that keep the decomposed structure coherent:
   exactly the same terms as etcd. Because the blob stays authoritative until
   the final script, an interrupted import is detected on the next start (the
   partial entries are the import-written prefix of the blob) and redone from
-  the intact blob; entries that are *not* such a prefix mean a mixed-version
-  deployment wrote both forms, which is refused rather than guessed at. A
+  the intact blob; entries that are *not* such a prefix mean that
+  something wrote both forms, which is refused rather than guessed at. A
   replica still writing the blob mid-import is caught by a guard on
   the marker's stored mtime prefix and length — every writer stamps a fresh
   mtime, so an unchanged prefix means nothing has touched it — and the import
@@ -829,10 +829,8 @@ the error an operator first meets.
   stronger than the general case.
 - **Hash chain** (`InventoryStore` backends) — the head advances atomically with
   the row inside the append transaction, so neither the torn-append nor the
-  interleaved-append cause applies, and a mismatch is a stronger signal. It is
-  not conclusive either: a stored value written under the whole-blob scheme
-  and read as a chain fails here with no tampering, which is precisely why the
-  warning names the scheme it computed under.
+  interleaved-append cause applies, and a mismatch is a stronger signal,
+  though still not proof. The warning names the scheme it computed under.
 
 ### Why the mechanism meets the in-scope set
 

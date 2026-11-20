@@ -479,7 +479,7 @@ spend the other's allowance or raise an alert against it.
 Every log line in the API that names a client does it the same way, as a
 `client` group rendering as the two fields shown above, `client.cn` and
 `client.domain` (`client` is an object under the JSON handler). Key a SIEM rule,
-log-based alert or Loki selector on `client.cn`, not on a bare common name: a
+log-based alert or Loki selector on both fields, not on `client.cn` alone: a
 common name is not an identity once more than one issuer is trusted, because two
 CAs may each have an `ops-admin`, and a record naming only the name cannot say
 which of them acted.

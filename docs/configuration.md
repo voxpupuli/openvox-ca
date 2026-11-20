@@ -1274,11 +1274,14 @@ That is the case it was set for: a certificate held by something that is not
 renewing it itself, and has to be told about the replacement.
 
 If your threat model does not tolerate a replaced credential outliving its
-replacement at all, set `superseded_cert_revoke_after_sec: 0`, and every renewal
+replacement at all, set `superseded_cert_revoke_after_sec: 0`: a renewal then
 revokes its predecessor before returning. That is an explicit choice and not the
-same as leaving it unset. The window shows up as a `superseded.json` in the
-cadir, a `Starting superseded-certificate revocation sweep` line in the logs at
-startup, and `openvoxca_supersede_pending` rising and falling.
+same as leaving it unset. Two settings in the table below still decide whether
+a predecessor is revoked at all: `revoke_on_auto_renew: false` keeps a same-key
+renewal's predecessor valid until it expires, and a `managed_certs` entry's
+`revoke_after` overrides this setting for that certificate. While a window is
+open, the predecessor is listed in `superseded.json` in the cadir and counted by
+`openvoxca_supersede_pending`.
 
 **The window is a deliberate weakening, and because it is the default it is one
 you inherit rather than choose.** For its whole length the replaced certificate
