@@ -374,7 +374,7 @@ func newerCRL(a, b *x509.RevocationList) bool {
 // One function because three readers need the same answer and reached it three
 // different ways. Import selected the newest; the cache loader and the re-sign
 // read took block 0 unless it was *foreign*. A stale block 0 of our own passes an
-// ownership check, so on a blob holding two of ours -- which the released build's
+// ownership check, so on a blob holding two of ours -- which a pre-alpha build's
 // import stored verbatim -- the cache answered revocation from a list missing
 // every serial revoked since, and the next re-sign advanced from the stale number
 // and destroyed the newer block.

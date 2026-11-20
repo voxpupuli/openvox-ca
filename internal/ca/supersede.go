@@ -227,10 +227,10 @@ func (c *CA) recordSuperseded(ctx context.Context, subject, serial string, after
 	}
 	// Stored canonical, not as handed in. The two callers disagree about form:
 	// AutoRenew passes serialHexStr of the presented certificate, already
-	// canonical, while Renew passes LatestSerialForSubject, which returns
-	// inventory text *verbatim* — and an inventory migrated from Puppet Server
-	// carries zero-padded sequential serials
-	// (see storage.NormaliseSerial and the comment above SubjectForSerial).
+	// canonical, while Renew passes LatestSerialForSubject, whose form depends
+	// on the backend: a structured backend returns the row's text as stored,
+	// which nothing guarantees is canonical (see storage.NormaliseSerial and
+	// the comment above SubjectForSerial).
 	//
 	// refuseIfSuperseded compares this against serialHexStr of a presented
 	// certificate. Storing "000A" where the gate computes "A" would make that

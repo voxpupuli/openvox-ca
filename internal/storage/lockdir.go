@@ -27,13 +27,13 @@ import (
 // root created on the way is not made group-writable too.
 //
 // An existing directory is left exactly as it is, whatever its mode. One at
-// 0750 -- made under a narrower umask, by hand, or by a build from before #493 --
-// keeps working for the uid that owns it and stays
-// unreachable to any other, because this package never changes the mode of a
-// file it did not just create. MkdirAll rather than Mkdir for the second step
-// because it already answers the two cases that matter: nil for a directory
-// that exists, and ENOTDIR for a plain file in its place, which the lock
-// callers report as a hard error rather than as an unwritable store.
+// 0750 -- made under a narrower umask, by hand, or by a build from before #493
+// -- keeps working for the uid that owns it and stays unreachable to any other,
+// because this package never changes the mode of a file it did not just create.
+// MkdirAll rather than Mkdir for the second step because it already answers the
+// two cases that matter: nil for a directory that exists, and ENOTDIR for a
+// plain file in its place, which the lock callers report as a hard error rather
+// than as an unwritable store.
 //
 // In a file of its own, not in filelock.go, because of the directives below.
 // gosec reports both calls as G703 on every run, reaching them through

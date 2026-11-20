@@ -105,8 +105,8 @@ func (atomicNoLockBackend) AcquireLock(context.Context, string) (storage.Unlocke
 // legacyStructuredBackend is an InventoryStore whose decomposed rows do not
 // exist yet, over a real filesystem cadir whose inventory blob does. That is an
 // etcd or Redis store still holding the legacy blob, which no server has
-// started on to decompose: asInventoryStore is true by static type, but Entries reads rows that
-// EnsureReady has not created.
+// started on to decompose: asInventoryStore is true by static type, but Entries
+// reads rows that EnsureReady has not created.
 type legacyStructuredBackend struct {
 	storage.Backend
 }

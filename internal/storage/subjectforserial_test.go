@@ -44,12 +44,11 @@ var _ = Describe("StorageService SubjectForSerial", func() {
 		store = storage.New(tmpDir)
 		Expect(store.EnsureDirs(ctx)).To(Succeed())
 		Expect(store.TouchInventory(ctx)).To(Succeed())
-		// "00FF" is deliberately zero-padded, as an inventory migrated from
-		// Puppet Server would be; "0A" is not. Nothing
-		// here goes through the CA, so both sides of the comparison are as
-		// varied as a real inventory's are. The subjects are in OpenVox
-		// Server's "/CN=" form, which a filesystem inventory reads as the
-		// bare certname.
+		// "00FF" is deliberately zero-padded, a non-canonical rendering a
+		// stored row can hold; "0A" is not. Nothing here goes through the CA,
+		// so both sides of the comparison are as varied as a real inventory's
+		// are. The subjects are in OpenVox Server's "/CN=" form, which a
+		// filesystem inventory reads as the bare certname.
 		Expect(store.AppendInventory(ctx,
 			"0A 2026-01-01T00:00:00UTC 2027-01-01T00:00:00UTC /CN=first")).To(Succeed())
 		Expect(store.AppendInventory(ctx,

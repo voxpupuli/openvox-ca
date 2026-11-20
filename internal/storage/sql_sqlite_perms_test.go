@@ -700,11 +700,11 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			os.FileMode(0o600), os.FileMode(0o600), os.FileMode(0o700)),
 	)
 
-	// The upgrade boundary the resolution created. A process on a version that
-	// locked beside the DSN spelling and one on this version do not exclude each
-	// other, and nothing here can prevent that -- the other process is the one
-	// holding the wrong lock. What it can do is say so where an operator will
-	// read it.
+	// A process that locks beside the DSN's spelling, as builds of main before
+	// v1.0.0-alpha1 did, and one that locks beside the resolved path do not
+	// exclude each other, and nothing here can prevent that -- the other process
+	// is the one holding the wrong lock. What it can do is say so where an
+	// operator will read it.
 	Describe("a lock directory stranded beside the DSN's own spelling", func() {
 		captureWarnings := func() *bytes.Buffer {
 			GinkgoHelper()
@@ -717,10 +717,10 @@ var _ = Describe("SQLiteFilePermissions", func() {
 
 		// The spelling this check could not see. SQLiteFilePath decodes %HH in
 		// the relative file: form now, so the directory it derives is
-		// ".ca b.db.locks" while the version that left one behind created
+		// ".ca b.db.locks" while a pre-alpha build that left one behind created
 		// ".ca%20b.db.locks". Asking only about the decoded name looked for a
-		// directory the old version never made and ignored the one it did,
-		// which is the stranded directory the warning exists for.
+		// directory that build never made and ignored the one it did, which is
+		// the stranded directory the warning exists for.
 		//
 		// Relative, and that is the whole point of the shape: url.Parse puts an
 		// absolute file: path in u.Path already decoded, which the parser before
@@ -745,9 +745,12 @@ var _ = Describe("SQLiteFilePermissions", func() {
 
 			Expect(buf.String()).To(ContainSubstring(".ca%20b.db.locks"),
 				"the directory beside the escaped spelling must be named")
+			// The advice has to hold for this branch too: no symlink is involved.
+			Expect(buf.String()).To(ContainSubstring("stop it, then remove the stranded directory"),
+				"what the operator has to do about it")
 		})
 
-		It("warns when one exists and this version locks elsewhere", func() {
+		It("warns when one exists and the lock directory in use is elsewhere", func() {
 			realDB := filepath.Join(GinkgoT().TempDir(), "real.db")
 			linkDir := GinkgoT().TempDir()
 			link := filepath.Join(linkDir, "link.db")
@@ -772,9 +775,9 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			Expect(buf.String()).To(ContainSubstring("stranded="+legacy),
 				"the attribute naming the directory left behind")
 			inUse, ok := lockDirOf("file:" + link)
-			Expect(ok).To(BeTrue(), "the directory this version locks in")
+			Expect(ok).To(BeTrue(), "the directory this code locks in")
 			Expect(buf.String()).To(ContainSubstring("in_use="+inUse),
-				"and the one this version actually locks in")
+				"and the one this code actually locks in")
 			Expect(buf.String()).To(MatchRegexp(`stranded_modified=\S`),
 				"carrying the mtime, not an empty attribute")
 

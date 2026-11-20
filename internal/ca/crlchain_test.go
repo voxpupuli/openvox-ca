@@ -319,8 +319,8 @@ var _ = Describe("CRL chain read failures", func() {
 	})
 
 	It("answers revocation from the newest of our blocks, not from a stale block 0", func() {
-		// The stored shape an upgrade produces: the released build's import
-		// validated block 0 and wrote the operator's bundle verbatim, so
+		// A stored shape a pre-alpha build's import produced: it validated
+		// block 0 and wrote the operator's bundle verbatim, so
 		// `--crl-chain stale.pem current.pem root.pem` is a blob this code has to
 		// read. A stale block 0 of our own passes the ownership check, so the
 		// search for our block -- which existed only for a *foreign* block 0 --
@@ -1637,10 +1637,10 @@ var _ = Describe("CRL chain ordering at import", func() {
 	})
 
 	It("keeps the newest of our blocks when the stored blob holds two, not the first", func() {
-		// The shape the released build's import could store: it validated block 0
+		// A shape a pre-alpha build's import could store: it validated block 0
 		// and then wrote the operator's bundle verbatim, so
 		// `--crl-chain stale.pem current.pem root.pem` is a stored blob this code
-		// has to read after an upgrade.
+		// has to read.
 		//
 		// orderCRLChain already resolves this for an *incoming* bundle, by CRL
 		// number. ownCRLIn read the stored one and took the first match, so an
@@ -2113,12 +2113,11 @@ func expiringUpstreamCA(cn string, offset time.Duration) []byte {
 }
 
 var _ = Describe("CRL cache loading: a corrupt ancestor block", func() {
-	// The previous build's import stored a multi-block --crl-chain byte for
-	// byte while validating only block 0, so an existing deployment can
-	// legitimately hold a blob whose trailing block does not parse. Refusing to
-	// start on data the previous build wrote would be an upgrade break, and it
-	// would be harsher than this function's policy for a strictly worse
-	// condition — a foreign block 0, which only warns.
+	// A pre-alpha build's import stored a multi-block --crl-chain byte for
+	// byte while validating only block 0, so a store can hold a blob whose
+	// trailing block does not parse. Refusing to start on such data would be
+	// harsher than this function's policy for a strictly worse condition — a
+	// foreign block 0, which only warns.
 	It("starts, serving block 0, rather than refusing", func() {
 		ctx := context.Background()
 		store := storage.New(GinkgoT().TempDir())

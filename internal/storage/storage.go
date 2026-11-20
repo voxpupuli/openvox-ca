@@ -478,9 +478,9 @@ func (s *StorageService) SerialExists(ctx context.Context, serial string) (bool,
 // The scan is linear in the inventory. An indexed by-serial lookup is NOT
 // available even on backends that have the index: the schema's unique index on
 // serial is an exact-match index over the stored text, while this lookup must
-// match on the normalised value, because an inventory written by an older
-// version — or migrated from Puppet Server — carries zero-padded sequential
-// serials (see buildSerialIndex's comment in internal/ca/ocsp.go). An indexed
+// match on the normalised value whatever rendering a row's text holds:
+// zero-padded, as OpenVox Server writes its inventory, or canonical (see
+// readSerialIndex's comment in internal/ca/ocsp.go). An indexed
 // exact match would silently miss precisely the historical certificates most
 // likely to need retiring. A fast path that tried the canonical rendering first
 // and fell back to this scan would be sound; it is deliberately left for later,

@@ -30,8 +30,8 @@ import (
 // syscall.Flock, rather than the broader `unix` constraint: `unix` also covers
 // AIX and Solaris, where it is not declared and this file would not build.
 // Everything outside the list gets filelock_other.go, which reports the
-// capability as unsupported and leaves WithLock on the process-local mutex it
-// used before same-host locking existed. Only Linux is a supported deployment
+// capability as unsupported and leaves WithLock on the process-local mutex.
+// Only Linux is a supported deployment
 // target (see the build targets in magefile.go); darwin and the BSDs are here
 // so a contributor's workstation behaves the same way CI does.
 
@@ -74,9 +74,9 @@ func tryLockFile(f *os.File) (bool, error) {
 // or a kernel out of lock records (ENOLCK). Treating those as hard errors would
 // fail every WithLock caller — bootstrap, signing, revocation, CRL refresh —
 // and so take down a CA on a store nobody can lock, where the process-local
-// mutex is all the locking there is to have. That is
-// the same trade filelock_other.go makes for a platform with no flock(2) at
-// all, and it is made the same way: report the capability absent.
+// mutex is all the locking there is to have. That is the same trade
+// filelock_other.go makes for a platform with no flock(2) at all, and it is
+// made the same way: report the capability absent.
 func isLockingUnavailableError(err error) bool {
 	return errors.Is(err, syscall.ENOLCK) ||
 		errors.Is(err, syscall.EOPNOTSUPP) ||
