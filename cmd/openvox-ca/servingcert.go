@@ -359,6 +359,34 @@ func encryptedKeyHint(keyPEM []byte) string {
 	return ""
 }
 
+// servingCertTLSConflict is the refusal for serving_cert alongside tls_cert or
+// tls_key. It names the file serving_cert came from, because the operator who
+// meets it may not have written it: the container images ship serving_cert in
+// a configuration of their own at defaultConfigFile, and anyone still passing
+// --tls-cert/--tls-key as arguments lands here. From that path it also names
+// the two ways out, since nothing else in a container without a shell says
+// where the setting is. The packages install their configuration at the same
+// path, so the hint says it is about the images, and an operator on a packaged
+// host who set serving_cert themselves can read past it.
+func servingCertTLSConflict(configPath string) error {
+	from := ""
+	if configPath != "" {
+		from = fmt.Sprintf(" (read from %q)", configPath)
+	}
+	msg := "serving_cert" + from + " and tls_cert/tls_key are mutually exclusive: " +
+		"serving_cert makes the CA issue and renew the certificate its listener presents, " +
+		"and tls_cert/tls_key point it at one somebody else supplies. Configure one or the " +
+		"other -- and note that self-provisioning never writes to the paths tls_cert and " +
+		"tls_key name, so it cannot be made to take them over"
+	if configPath == defaultConfigFile {
+		msg += ". In a container image, if you did not set serving_cert, it is the default " +
+			"the images ship at " + defaultConfigFile + ": to supply your own certificate, mount a " +
+			"configuration file of your own over it, or set " + configEnvVar + "=/dev/null " +
+			"to run on flags alone"
+	}
+	return errors.New(msg)
+}
+
 // buildServingCert turns the `serving_cert` block into the CA's own serving
 // certificate, or returns nil when none is configured.
 //
@@ -378,11 +406,7 @@ func buildServingCert(cfg *serverConfig, absCADir, configPath string,
 	// two are set would leave two answers to which certificate the listener
 	// presents. Refused rather than resolved.
 	if cfg.TLSCert != "" || cfg.TLSKey != "" {
-		return nil, errors.New("serving_cert and tls_cert/tls_key are mutually exclusive: " +
-			"serving_cert makes the CA issue and renew the certificate its listener presents, " +
-			"and tls_cert/tls_key point it at one somebody else supplies. Configure one or the " +
-			"other -- and note that self-provisioning never writes to the paths tls_cert and " +
-			"tls_key name, so it cannot be made to take them over")
+		return nil, servingCertTLSConflict(configPath)
 	}
 
 	// Validated through internal/certstore rather than beside it, so a serving

@@ -249,7 +249,8 @@ ca_port   = 8140
 **On a packaged install that is 8141, not 8140.** The `.deb` and `.rpm` ship a
 configuration file setting `port: 8141`, because a package is what gets
 installed beside OpenVox Server and Server binds 8140 itself. Release tarballs
-and container images ship no configuration file and stay on 8140. Set `ca_port`
+ship no configuration file, and the container images ship one that sets only
+`serving_cert`, so both stay on 8140. Set `ca_port`
 to whichever the CA you are migrating onto actually serves — see [installing
 from a package](systemd.md#the-packages-listen-on-8141).
 

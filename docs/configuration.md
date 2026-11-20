@@ -78,9 +78,12 @@ The config file is located by checking, in order:
 `tls_key` and `port: 8141` — enough to start without an edit, and marked as a
 configuration file in both formats so your changes survive upgrades. Everything
 below applies to it; what it sets and why 8141 rather than 8140 is in
-[installing from a package](systemd.md#installing-from-a-package). Release
-tarballs and container images ship no configuration file at all, so on those
-the settings below are yours to write.
+[installing from a package](systemd.md#installing-from-a-package). The
+container images ship one that sets only
+[`serving_cert`](#the-cas-own-serving-certificate), and a file you mount over
+it replaces it whole; see [running a container](container-images.md#running).
+Release tarballs ship no configuration file at all, so there the settings below
+are yours to write.
 
 **A key openvox-ca does not recognise refuses startup**, at any depth, with its
 path and line:
@@ -417,9 +420,14 @@ common name for years.
 `.rpm` provision a serving credential the first time the service starts — at
 install on Debian, at `systemctl enable --now openvox-ca` on EL — and point
 `tls_cert`/`tls_key` at it — see [installing from a
-package](systemd.md#installing-from-a-package). What follows is for a release
-tarball, a container, or a packaged CA whose certificate you are replacing by
-hand.
+package](systemd.md#installing-from-a-package). The published container
+images do not need it either: their baked configuration has the CA issue its
+own, through [`serving_cert`](#the-cas-own-serving-certificate), and while that
+file is in place this procedure fails, because `serving_cert` keeps TLS on and
+refuses `tls_cert`/`tls_key`. To use it in a container, replace the baked file
+first; see [running a container](container-images.md#running). What follows is
+for a release tarball, a container whose baked configuration you have replaced,
+or a packaged CA whose certificate you are replacing by hand.
 
 `generate` needs a running server, so the first serving certificate is issued
 against this CA started temporarily on loopback with TLS switched off. **Stop
@@ -2076,7 +2084,11 @@ would replace each other on every pass for ever.
 
 Enabling `serving_cert` enables TLS on its own. A CA with neither it nor
 `tls_cert` / `tls_key` is still refused on a non-loopback address unless
-`no_tls_required` is set.
+`no_tls_required` is set. The converse holds too: `no_tls_required` has no
+effect while TLS is configured, by either route, and the server warns at
+startup when it is set alongside it, because a proxy forwarding plain HTTP to
+an HTTPS listener fails every request. Running behind such a proxy is in
+[container images](container-images.md#running).
 
 ### What this deliberately does not do
 
@@ -2438,7 +2450,9 @@ Allowlist example:
 compile-*.internal
 ```
 
-Executable plugin example:
+Executable plugin example. A script needs its interpreter where the CA runs: the
+distroless container image has none, and the `-alpine` image has `sh` but not
+`bash`.
 
 ```bash
 #!/bin/bash

@@ -19,15 +19,18 @@ package main
 
 import (
 	"bytes"
+	"crypto/x509"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/voxpupuli/openvox-ca/internal/api"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
@@ -926,6 +929,81 @@ var _ = Describe("loadServerConfig unknown keys", func() {
 		cfg, err := loadServerConfig(filepath.Join("..", "..", "packaging", "config", "config.yaml"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.CADir).NotTo(BeEmpty(), "the packaged file sets cadir; empty means it was not read")
+	})
+
+	It("loads the container images' config.yaml, which sets serving_cert and nothing else", func() {
+		// Baked into both images as defaultConfigFile, where a misspelt key
+		// would refuse every bare `docker run`. The image check in CI starts
+		// one; this is the same verdict without an image build.
+		path := filepath.Join("..", "..", "packaging", "container", "config.yaml")
+		cfg, err := loadServerConfig(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.ServingCert).NotTo(BeNil(), "the baked file sets serving_cert; nil means it was not read")
+		// Not `puppet`: that is a name on the certificate, but as the certname
+		// it would take the inventory slot a migrated Puppet server holds.
+		Expect(cfg.ServingCert.Certname).To(Equal("openvox-ca"))
+		Expect(cfg.ServingCert.Names).To(ContainElement("puppet"))
+
+		// And past decoding: the validation the server runs at startup, against
+		// the cadir the images' CMD names, so a store path moved under it, or a
+		// CMD moved over it, fails here too. Server authentication only, as the
+		// file says and nothing else would notice losing: verifying the listener
+		// needs serverAuth to be present, not clientAuth to be absent.
+		sc, err := buildServingCert(cfg, imagesCADir(), defaultConfigFile, stubCACerts{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sc.entry.Spec.ExtKeyUsage).To(Equal([]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}))
+		// "Nothing else", as the file and the docs say: the cadir comes from the
+		// image's CMD, and everything else stays at the built-in defaults.
+		src, err := os.ReadFile(path)
+		Expect(err).NotTo(HaveOccurred())
+		var top map[string]any
+		Expect(yaml.Unmarshal(src, &top)).To(Succeed())
+		Expect(top).To(HaveLen(1))
+		Expect(top).To(HaveKey("serving_cert"))
+	})
+
+	It("keeps the images' cadir and the baked serving pair on compose.yml's volume", func() {
+		// The one volume compose.yml mounts has to hold both, or recreating the
+		// container loses the CA (a fresh one bootstraps, which no enrolled
+		// agent trusts) or reissues the serving certificate. The three paths
+		// live in three files; this is what ties them.
+		cfg, err := loadServerConfig(filepath.Join("..", "..", "packaging", "container", "config.yaml"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.ServingCert).NotTo(BeNil())
+		Expect(cfg.ServingCert.Store.Files).NotTo(BeNil())
+
+		src, err := os.ReadFile(filepath.Join("..", "..", "compose.yml"))
+		Expect(err).NotTo(HaveOccurred())
+		var doc struct {
+			Services map[string]struct {
+				Volumes []string `yaml:"volumes"`
+			} `yaml:"services"`
+			Volumes map[string]any `yaml:"volumes"`
+		}
+		Expect(yaml.Unmarshal(src, &doc)).To(Succeed())
+		Expect(doc.Services).To(HaveKey("openvox-ca"))
+		var target string
+		for _, v := range doc.Services["openvox-ca"].Volumes {
+			name, mount, ok := strings.Cut(v, ":")
+			if ok && doc.Volumes != nil {
+				if _, named := doc.Volumes[name]; named {
+					Expect(target).To(BeEmpty(), "compose.yml mounts more than one named volume")
+					target, _, _ = strings.Cut(mount, ":")
+				}
+			}
+		}
+		Expect(target).NotTo(BeEmpty(), "compose.yml mounts no named volume")
+
+		for what, path := range map[string]string{
+			"the CMD's --cadir":       imagesCADir(),
+			"the serving certificate": cfg.ServingCert.Store.Files.Cert,
+			"the serving key":         cfg.ServingCert.Store.Files.Key,
+		} {
+			rel, err := filepath.Rel(target, path)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rel == ".." || strings.HasPrefix(rel, "../")).To(BeFalse(),
+				"%s (%s) is not under compose.yml's volume at %s", what, path, target)
+		}
 	})
 
 	// The issue's own example (#436): one transposed letter, and a CA meant to
@@ -2017,3 +2095,25 @@ var _ = Describe("status_fingerprint_algorithms", func() {
 		})
 	})
 })
+
+// imagesCADir reads the default --cadir every Dockerfile at the top of the tree
+// names in its CMD, and requires them to agree.
+func imagesCADir() string {
+	GinkgoHelper()
+	cmd := regexp.MustCompile(`(?m)^CMD \["--cadir=([^"]+)"`)
+	paths, err := filepath.Glob(filepath.Join("..", "..", "Dockerfile*"))
+	Expect(err).NotTo(HaveOccurred())
+	Expect(len(paths)).To(BeNumerically(">=", 2))
+	cadir := ""
+	for _, path := range paths {
+		src, err := os.ReadFile(path)
+		Expect(err).NotTo(HaveOccurred())
+		m := cmd.FindSubmatch(src)
+		Expect(m).NotTo(BeNil(), "%s has no CMD naming --cadir first", path)
+		if cadir != "" {
+			Expect(string(m[1])).To(Equal(cadir), "%s's CMD names another cadir", path)
+		}
+		cadir = string(m[1])
+	}
+	return cadir
+}

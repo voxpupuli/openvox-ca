@@ -90,7 +90,6 @@ jobs:
       fail-fast: false
       matrix:
         dockerfile:
-          - Dockerfile
           - Dockerfile.alpine
           - Dockerfile.distroless
           - test/Dockerfile.run
@@ -120,10 +119,7 @@ jobs:
   # reimplementation could. For the stamp one Dockerfile would be enough, since
   # all of them read the same .dockerignore; both are built because the check
   # also pins -trimpath, which each Dockerfile spells out for itself and shares
-  # with the release tarballs. The CentOS Stream Dockerfile spells it out too
-  # and is not built here: its builder installs Go with dnf and then downloads
-  # the toolchain go.mod asks for, which costs more than this check is worth
-  # for an image #319 is to retire. CI only ever takes the passing branch; the
+  # with the release tarballs. CI only ever takes the passing branch; the
   # mutations that exercise the others are in docs/development/testing.md,
   # "Image build context check".
   image-context:

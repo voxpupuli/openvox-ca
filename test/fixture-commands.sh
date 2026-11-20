@@ -28,8 +28,8 @@
 # had worked for months on whatever the base happened to ship -- so both Compose
 # legs failed, and they failed *dishonestly*: the assertion that broke reported a
 # certificate-content mismatch on files that were byte for byte identical. The
-# base image cannot be pinned against a repeat, because quay does not retain
-# superseded CentOS Stream digests (see renovate.json).
+# image is built on Debian now, pinned by digest, but Renovate moves that pin
+# and a bump can drop a package just as a rolling tag did.
 #
 # So the contract is asserted instead. A command that vanishes from the base now
 # fails once, by name, before any test runs -- rather than once per assertion,

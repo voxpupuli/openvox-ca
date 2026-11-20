@@ -1,14 +1,13 @@
 # Container images
 
 Prebuilt, multi-arch container images are published to the GitHub Container
-Registry (GHCR) for every release and every push to `main`. Three variants are
-built, differing in base image and in the user they run as:
+Registry (GHCR) for every release and every push to `main`. Two variants are
+built, differing in base image:
 
 | Variant | Base image | Tag suffix | Runs as |
 | --- | --- | --- | --- |
-| CentOS Stream | `quay.io/centos/centos` | *(none)* | `1000:1000` |
-| Alpine | `alpine` | `-alpine` | `1000:1000` |
-| Distroless | `gcr.io/distroless/static-debian13:nonroot` | `-distroless` | `65532:65532` |
+| Distroless (the default) | `gcr.io/distroless/static-debian13:nonroot` | *(none)*, or `-distroless` | `65532:65532` |
+| Alpine | `alpine` | `-alpine` | `65532:65532` |
 
 Every variant is built for `linux/amd64` and `linux/arm64` and published as a
 single multi-arch manifest per variant, so `docker`/`podman` pulls the right
@@ -18,26 +17,30 @@ architecture automatically. The images are published as
 The distroless variant holds the two binaries, a CA trust store and little
 else: no shell, no package manager, no `curl` or `kill`. It has the least in it
 to patch or to exploit, and what that costs is listed under [the distroless
-variant](#the-distroless-variant). It runs as a **different uid** from the
-other two, so switching an existing deployment to or from it means re-owning
-its data; see [runtime user](#runtime-user).
+variant](#the-distroless-variant). Its tags carry no suffix, and each is
+published again with `-distroless` appended, for anyone who wants to name the
+variant. The Alpine variant adds a shell and busybox. Both run as the same uid,
+so either can take over data the other wrote.
 
 ## Pulling
 
 ```console
-$ docker pull ghcr.io/voxpupuli/openvox-ca:latest              # CentOS Stream
-$ docker pull ghcr.io/voxpupuli/openvox-ca:latest-alpine       # Alpine
-$ docker pull ghcr.io/voxpupuli/openvox-ca:latest-distroless   # distroless
+$ docker pull ghcr.io/voxpupuli/openvox-ca:latest          # distroless
+$ docker pull ghcr.io/voxpupuli/openvox-ca:latest-alpine   # Alpine
 ```
+
+`latest` names the most recent final release, so it first appears with 1.0.0.
+Until then, pull `edge`. The pre-releases so far predate the configuration
+the examples below rely on, so their own documentation applies to them.
 
 ## Available tags
 
 | Tag | Points at |
 | --- | --- |
-| `latest` / `latest-alpine` / `latest-distroless` | The most recent release |
-| `1.2.3`, `1.2`, `1` (+ `-alpine`, `-distroless`) | A specific release and its semver aliases; the major-only tag (`1`) is published for v1+ releases only, so `0.x` releases have no `0` tag |
-| `edge` / `edge-alpine` / `edge-distroless` | The latest build from the default branch (`main`) |
-| `main` / `main-alpine` / `main-distroless` | Same as `edge`; the head of `main` |
+| `latest` / `latest-distroless` / `latest-alpine` | The most recent final release; pre-releases never move it, so it does not exist before 1.0.0 |
+| `1.2.3`, `1.2`, `1` (+ `-distroless`, `-alpine`) | A specific release and its semver aliases; the major-only tag (`1`) is published for v1+ releases only, so `0.x` releases have no `0` tag |
+| `edge` / `edge-distroless` / `edge-alpine` | The latest build from the default branch (`main`) |
+| `main` / `main-distroless` / `main-alpine` | Same as `edge`; the head of `main` |
 
 Pin to a specific semver tag (e.g. `1.2.3`) for reproducible deployments;
 `edge` tracks unreleased changes and can break at any time.
@@ -65,39 +68,92 @@ each check does and does not prove.
 
 ## Running
 
-The image's entrypoint is `openvox-ca`; any arguments you pass are appended to
-it, exactly like running the binary. Mount a volume for the CA directory so the
-CA survives container restarts, and publish port 8140:
+The image's entrypoint is `openvox-ca`, and its default command is
+`--cadir=/etc/puppetlabs/puppet/ssl/ca --verbosity=1`. Any arguments you pass
+are appended to the entrypoint, exactly like running the binary, and replace
+that command entirely, so restate `--cadir` in them. While the default command
+runs, its `--cadir` also outranks a `cadir` set in a configuration file.
+
+Mount a volume at `/etc/puppetlabs/puppet/ssl` so the CA survives container
+restarts, and publish port 8140:
 
 ```console
 $ docker run -d --name openvox-ca \
     -p 8140:8140 \
-    -v openvox-ca-data:/data \
-    ghcr.io/voxpupuli/openvox-ca:latest \
-    --cadir=/data --hostname=puppet.example.com \
-    --tls-cert=/data/ca_crt.pem --tls-key=/data/ca_key.pem
+    -v openvox-ca-ssl:/etc/puppetlabs/puppet/ssl \
+    ghcr.io/voxpupuli/openvox-ca:latest
 ```
 
-On first run this bootstraps a new CA under `/data` and serves HTTPS on port
-8140, using the CA's own certificate as the TLS server certificate. (The
-server refuses plain HTTP on a non-loopback address unless `--no-tls-required`
-is set — only do that behind a trusted TLS-terminating proxy or in test
-environments.)
+On first run this bootstraps a new CA under `/etc/puppetlabs/puppet/ssl/ca`, and
+the CA issues its own serving certificate, for the names `puppet` and
+`localhost`, into `/etc/puppetlabs/puppet/ssl` beside it. Its certname, the
+inventory slot it occupies, is `openvox-ca` rather than `puppet`, so on a CA
+carried over from Puppet it does not displace an existing `puppet` certificate. The volume keeps both,
+and the CA renews the certificate before it expires. A volume mounted somewhere
+else, with `--cadir` pointed into it, keeps the CA but not the certificate,
+which the baked configuration always writes to `/etc/puppetlabs/puppet/ssl`:
+the CA issues a new one whenever the container is recreated. Give such a
+deployment its own configuration, with the `store` paths on that volume. An
+agent left at its default server name, `puppet`, verifies that certificate as it stands, and the CA's
+private key stays in the signer process rather than on the listener (see
+[process isolation](ca-key-security.md#process-isolation)).
 
-That last part makes the command self-contained, and nothing else: the CA
-certificate's `keyUsage` is `certSign, cRLSign` and it has no
-`subjectAltName`, so no agent will accept the connection. The server warns
-about this at startup; see [serving
-certificate](configuration.md#serving-certificate). Before any agent talks to
-this CA, either let the CA issue its own with
-[`serving_cert`](configuration.md#the-cas-own-serving-certificate) — which
-removes this bootstrap entirely and renews the certificate unattended, which
-nothing else does once the CA key is held at a provider — or issue one with `openvox-ca-ctl generate` and
-point `--tls-cert`/`--tls-key` at that. The same goes for the rest of a
-production deployment — mTLS, an alternative storage backend, autosigning: pass the
-relevant flags, or mount a config file at `/etc/openvox-ca/config.yaml` (or
-set `OPENVOX_CA_CONFIG` to where you mounted it), which the [health
-check](#health-check) reads too. See [configuring the
+That comes from the configuration baked into the image at
+`/etc/openvox-ca/config.yaml`
+([its source](https://github.com/voxpupuli/openvox-ca/blob/main/packaging/container/config.yaml)),
+which sets [`serving_cert`](configuration.md#the-cas-own-serving-certificate)
+and nothing else. To serve another name, or to configure anything else (mTLS,
+a storage backend, autosigning), mount your own file over it, or set
+`OPENVOX_CA_CONFIG` to where you mounted it. The [health check](#health-check)
+reads the same file. Yours replaces the baked one entirely, so keep a
+`serving_cert` block in it unless you supply the certificate yourself:
+
+```yaml
+serving_cert:
+  certname: ca.example.com
+  names: [ca.example.com, puppet]
+  ttl: 2160h
+  renew_before: 720h
+  usages: [serverAuth]   # as the baked file; leaving it out adds clientAuth
+  store:
+    files:
+      cert: /etc/puppetlabs/puppet/ssl/serving_crt.pem
+      key: /etc/puppetlabs/puppet/ssl/serving_key.pem
+```
+
+Give it a certname nothing else enrols under, as the baked file does: issuing
+under the certname of an existing certificate displaces it from its inventory
+slot.
+
+**`--tls-cert` and `--tls-key` do not combine with the baked configuration.**
+`serving_cert` and `tls_cert`/`tls_key` are two answers to which certificate
+the listener presents, and the server refuses to start with both. To supply
+your own certificate, put `tls_cert` and `tls_key` in the file you mount, or
+run the server with no configuration file at all and pass the flags, restating
+`--cadir` with them:
+
+```console
+$ docker run -d --name openvox-ca -p 8140:8140 \
+    -v openvox-ca-ssl:/etc/puppetlabs/puppet/ssl \
+    -e OPENVOX_CA_CONFIG=/dev/null \
+    ghcr.io/voxpupuli/openvox-ca:latest \
+    --cadir=/etc/puppetlabs/puppet/ssl/ca \
+    --tls-cert=/etc/puppetlabs/puppet/ssl/tls.crt \
+    --tls-key=/etc/puppetlabs/puppet/ssl/tls.key
+```
+
+**Behind a TLS-terminating proxy**, the same applies to `--no-tls-required`:
+the baked configuration always serves TLS, so the flag has no effect while it is
+in place, and the server says so at startup. Run with
+`-e OPENVOX_CA_CONFIG=/dev/null`, `--cadir=/etc/puppetlabs/puppet/ssl/ca` and
+`--no-tls-required`, or mount a configuration without `serving_cert` that sets
+`no_tls_required: true`. Only do this behind a trusted proxy, or in a test
+environment. Without TLS the server installs no authorisation at all, so every
+endpoint, the administrative ones included, answers anything that can reach
+port 8140 (see [the HTTP API reference](api.md)). Publish the port to the proxy
+alone, on a private network or bound to loopback with
+`-p 127.0.0.1:8140:8140`, never with the `-p 8140:8140` the examples above use.
+See [configuring the
 server](configuration.md) for the full reference, and the [HTTP API
 reference](api.md) for the endpoints agents use.
 
@@ -113,9 +169,9 @@ process. See [memory budget](configuration.md#memory-budget).
 
 ### Runtime user
 
-The CentOS Stream and Alpine variants run as the non-root user `puppet`,
-uid/gid **1000**. The distroless variant runs as uid/gid **65532**, the base
-image's own `nonroot` user. Each declares its user numerically, so that a host
+Both variants run as uid/gid **65532**: the distroless base image's own
+`nonroot` user, and a `puppet` user created with that uid in the Alpine image.
+Each declares its user numerically, so that a host
 which cannot read the image's `/etc/passwd` can still tell who the process runs
 as. Under Kubernetes, a container whose image only names its user fails to
 start when the pod sets `runAsNonRoot` without also setting `runAsUser` — the
@@ -123,23 +179,26 @@ kubelet cannot verify that a name is non-root, and the container stops at
 `CreateContainerConfigError`.
 
 A named volume like the one above is created with the right ownership
-automatically. A bind mount is not, so `chown` the host directory to the
-variant's uid and gid (`1000:1000`, or `65532:65532` for distroless) before
-starting the container, or the CA cannot write its state. Under rootless Podman
+automatically. A bind mount is not, so `chown` the host directory to
+`65532:65532` before starting the container, or the CA cannot write its state. Under rootless Podman
 the container's uid maps to a subordinate uid on the host, so a plain `chown`
 leaves the directory unwritable — use `podman unshare chown <uid>:<gid> <dir>`,
 or mount with the `:U` suffix. Under Kubernetes, `fsGroup` on the pod covers
 PersistentVolumeClaims and `emptyDir`, but the kubelet does not apply it to a
 `hostPath`, which needs the same treatment as a bind mount.
 
-**Switching between distroless and either other variant changes the uid**, and
-the CA's state does not follow by itself. The private keys are written `0600`,
-readable by their owner alone, so the new variant cannot read a key the old one
-wrote, and openvox-ca never changes the owner or mode of an existing file.
-Re-own the volume or bind mount to the new uid and gid before starting the new
-variant. Under Kubernetes, set the pod's `runAsUser`, `runAsGroup` and
-`fsGroup` to match the variant: `fsGroup` re-groups the volume, but it leaves
-each file's owner as it was.
+**Data written by a container that ran as another uid** does not follow by
+itself. The private keys are written `0600`, readable by their owner alone, and
+openvox-ca never changes the owner or mode of an existing file. Re-own a Docker
+or Podman volume or bind mount to `65532:65532` before starting the container,
+and do it for every volume the CA reads, not only its `--cadir`: a
+`crl_chain_file` kept on another volume and left unreadable fails every chain
+refresh. Under Kubernetes the Helm chart runs the pod as `65532:65532` through
+`podSecurityContext`. Where the kubelet applies `fsGroup` to the volume, as it
+does to most PersistentVolumeClaims and to `emptyDir`, it re-groups data another
+uid wrote and adds group read and write, so the pod can take it over; a
+`hostPath`, or a driver without `fsGroup` support, needs re-owning like a bind
+mount. See [choosing an image](helm-chart.md#choosing-an-image).
 
 ### The distroless variant
 
@@ -171,8 +230,20 @@ not work, and needs another route:
 ### Health check
 
 Every image declares a `HEALTHCHECK` that runs `openvox-ca healthcheck`, so
-`docker ps` and `podman ps` report the container's health without any
-configuration. It requests `/healthz/ready` every 30 seconds and marks the
+`docker ps` reports the container's health without any configuration. Podman
+does not: it reads no `HEALTHCHECK` from an OCI-format image, and the images
+are published in that format, so `podman ps` shows no health until you pass
+the same check yourself:
+
+```console
+$ podman run -d --name openvox-ca \
+    --health-cmd '["/usr/local/bin/openvox-ca", "healthcheck"]' \
+    --health-interval 30s --health-timeout 5s \
+    --health-start-period 120s --health-retries 3 \
+    … ghcr.io/voxpupuli/openvox-ca:latest
+```
+
+The check requests `/healthz/ready` every 30 seconds and marks the
 container unhealthy after three failures in a row. The first two minutes are a
 grace period, because the first start generates the CA key; the first check
 that passes ends it.
@@ -188,11 +259,14 @@ server's config file, but not the arguments the server was started with:
   server listening on every address is checked over loopback; one bound with
   `host` to a specific address is checked there.
 - **Scheme.** It tries HTTPS first and falls back to plain HTTP only when the
-  server answers in plain HTTP, so TLS enabled with `--tls-cert` on the command
-  line needs nothing repeated.
+  server answers in plain HTTP, so TLS enabled anywhere the check cannot see,
+  such as `--tls-cert` on the command line under `OPENVOX_CA_CONFIG=/dev/null`,
+  needs nothing repeated.
 - **Certificate.** It does not verify the server's certificate. It sends no
-  credentials and reads nothing but the status code, and the CA's own
-  certificate, which the example above serves, cannot be verified at all.
+  credentials and reads nothing but the status code, and it has no way to know
+  which name or CA a deployment's certificate should verify against: a CA
+  serving its own certificate, which cannot be verified at all, is still
+  reported healthy.
 
 It exits 0 when the endpoint answers 200, and 1 otherwise with a one-line
 reason, which `docker inspect --format '{{json .State.Health}}' openvox-ca`
@@ -219,16 +293,17 @@ cost the pod nothing between checks.
 ### Compose
 
 The [`compose.yml`](https://github.com/voxpupuli/openvox-ca/blob/main/compose.yml) at the repository root is the equivalent
-Docker/Podman Compose deployment: edit `--hostname`, then `docker compose up
--d` (or `podman-compose up -d`). It declares no healthcheck of its own, so the
-service has the image's [health check](#health-check). The
+Docker/Podman Compose deployment: `docker compose up -d` (or `podman-compose
+up -d`). It restates the image's [health check](#health-check) as its own, so
+the service reports its health under Podman as well as Docker. The
 `test/compose*.yml` files, by contrast,
 are the integration-test topologies — they build throwaway images from the
 working tree and are not deployment examples.
 
-> **Autosigning is off by default.** Only set `--autosign-config=true` in
-> dev/test environments: it lets any CSR submitter obtain a signed certificate
-> without operator review.
+> **Autosigning is off by default.** Only enable it in dev/test environments,
+> with `autosign_config: "true"` in a configuration you mount or
+> `OPENVOX_CA_AUTOSIGN_CONFIG=true` under the service's `environment:`: it lets
+> any CSR submitter obtain a signed certificate without operator review.
 
 ## Publishing
 

@@ -1,8 +1,8 @@
 name: Container images
 
-# Builds the CentOS Stream, Alpine and distroless runtime images for
-# linux/amd64 and linux/arm64 and publishes multi-arch manifests to the GitHub
-# Container Registry (GHCR).
+# Builds the distroless and Alpine runtime images for linux/amd64 and
+# linux/arm64 and publishes multi-arch manifests to the GitHub Container
+# Registry (GHCR).
 #
 # Triggers:
 #   * Push to main            -> build + push the rolling "edge" (and "main") tags.
@@ -69,19 +69,25 @@ jobs:
       # the suffix names the tags in the merge job and the version label in the
       # build job, and the image check compares the two. Every suffix is
       # "-<name>" except that of the single unsuffixed variant, which takes the
-      # plain tags and latest.
+      # plain tags and latest. That variant also carries an alias, "-<name>":
+      # every tag it gets is published a second time with the alias appended,
+      # so it can be pinned by name as well as being the default. The alias is
+      # required, not optional, so a renamed or misspelt key fails here rather
+      # than leaving the -<name> tags to go stale.
       - name: Define the image variants
         id: variants
+        # CI only takes the passing branch of the check below; whenever you
+        # edit it, run the must-fail mutations in docs/development/testing.md.
         run: |
           variants='[
-            {"name": "centos",     "dockerfile": "Dockerfile",            "suffix": ""},
-            {"name": "alpine",     "dockerfile": "Dockerfile.alpine",     "suffix": "-alpine"},
-            {"name": "distroless", "dockerfile": "Dockerfile.distroless", "suffix": "-distroless"}
+            {"name": "distroless", "dockerfile": "Dockerfile.distroless", "suffix": "", "alias": "-distroless"},
+            {"name": "alpine",     "dockerfile": "Dockerfile.alpine",     "suffix": "-alpine"}
           ]'
           if ! jq -e '([.[] | select(.suffix == "")] | length == 1)
                 and all(.[]; .suffix == "" or .suffix == "-" + .name)
+                and all(.[]; if .suffix == "" then .alias == "-" + .name else (.alias // "") == "" end)
                 and (map(.name) | length == (unique | length))' <<< "$variants" > /dev/null; then
-            echo "::error::the variant list needs unique names, exactly one unsuffixed variant, and every other suffix \"-<name>\""
+            echo "::error::the variant list needs unique names, exactly one unsuffixed variant, every other suffix \"-<name>\", and an alias \"-<name>\" on the unsuffixed variant and on no other"
             exit 1
           fi
           {
@@ -227,9 +233,12 @@ jobs:
       # that openvox-ca starts at all (a cgo build has no libc to load in
       # distroless, and builds without complaint), has openvox-ca-ctl
       # initialise a CA in each of those directories as the image's own user
-      # (an owner in a listing is not a write), and starts the server through
-      # the image's entrypoint, which bootstraps a CA in the default cadir and
-      # must answer /healthz/ready. On
+      # (an owner in a listing is not a write), and runs the image with no
+      # arguments at all. The default CMD and the configuration baked in at
+      # /etc/openvox-ca/config.yaml have to start a CA in the default cadir
+      # that answers /healthz/ready over TLS a client can verify as `puppet`,
+      # so a config the server cannot read, or one that left it serving the CA
+      # certificate itself, fails here. On
       # the push path nothing was loaded, so the image is pulled by the digest
       # that was pushed, and this is the only step on that path that runs it.
       # CI only takes the passing branch; the mutations that exercise the
@@ -308,8 +317,7 @@ jobs:
             fi
             echo "ok: a CA was initialised in $dir as $uid:$gid"
           done
-          sid="$(docker run -d -p 127.0.0.1::8140 "$ref" --cadir="$cadir" --hostname=localhost \
-            --tls-cert="$cadir/ca_crt.pem" --tls-key="$cadir/ca_key.pem")"
+          sid="$(docker run -d -p 127.0.0.1::8140 "$ref")"
           ready=""
           for _ in $(seq 1 30); do
             port="$(docker port "$sid" 8140/tcp 2> /dev/null | head -n 1)" || true
@@ -328,7 +336,14 @@ jobs:
             docker logs "$sid" 2>&1 | tail -n 40
             exit 1
           fi
-          echo "ok: the server is ready on $cadir as $uid:$gid"
+          docker cp "$sid:$cadir/ca_crt.pem" /tmp/default-ca.pem
+          if ! curl -sSf --cacert /tmp/default-ca.pem --resolve "puppet:${port}:127.0.0.1" \
+              "https://puppet:${port}/healthz/ready" > /dev/null; then
+            echo "::error::the default configuration's serving certificate does not verify as puppet against the CA"
+            docker logs "$sid" 2>&1 | tail -n 40
+            exit 1
+          fi
+          echo "ok: the default command serves verifiable TLS from $cadir as $uid:$gid"
 
       - name: Export digest
         if: needs.setup.outputs.push == 'true'
@@ -348,8 +363,8 @@ jobs:
 
       # -- Provenance and SBOM for this per-architecture image ---------------─
       # The per-arch images are the meaningful ones to catalogue: each has its
-      # own binary and its own base package set (CentOS Stream, Alpine or
-      # distroless's Debian packages), so
+      # own binary and its own base package set (distroless's Debian packages
+      # or Alpine's), so
       # scanning them here catalogues that variant's base-layer packages as well
       # as the Go modules. Which packages those are is whatever the image's own
       # install line declares, or for distroless the base image itself, so they
@@ -434,9 +449,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # From the setup job's variant list. The unsuffixed variant (CentOS
-        # Stream) takes the plain tags and latest; every other variant carries
-        # its suffix on every tag, latest included.
+        # From the setup job's variant list. The unsuffixed variant
+        # (distroless) takes the plain tags and latest, and its alias gives it
+        # the same tags again with "-distroless" appended; every other variant
+        # carries its suffix on every tag, latest included.
         variant: ${{ fromJSON(needs.setup.outputs.variants) }}
     steps:
       - name: Download digests
@@ -477,7 +493,37 @@ jobs:
         working-directory: /tmp/digests
         env:
           IMAGE: ${{ needs.setup.outputs.image }}
+          ALIAS: ${{ matrix.variant.alias }}
         run: |
+          # The tags the metadata action computed, then, for a variant with an
+          # alias, each of them again with the alias appended -- the same rule
+          # its flavor suffix applies, latest included. Written to a file the
+          # verify step below reads, so it checks the alias tags as well.
+          jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON" > /tmp/tags.txt
+          if [ -n "$ALIAS" ]; then
+            jq -r --arg alias "$ALIAS" '.tags[] + $alias' <<< "$DOCKER_METADATA_OUTPUT_JSON" >> /tmp/tags.txt
+            # Every computed tag, and its alias copy, and nothing else: the
+            # verify step below checks only what this file holds, so a short
+            # list, or one whose copies are misnamed, would pass it. Each copy
+            # is looked for by name, built here in the shell rather than by the
+            # jq above, so a wrong expression there cannot also be the check.
+            # CI only takes the passing branch; see docs/development/testing.md
+            # for the mutations to run whenever you edit this.
+            want=$(( 2 * $(jq '.tags | length' <<< "$DOCKER_METADATA_OUTPUT_JSON") ))
+            got=$(grep -c . /tmp/tags.txt)
+            if [ "$got" -ne "$want" ]; then
+              echo "::error::expected $want tags with the $ALIAS alias copies, but the list holds $got"
+              exit 1
+            fi
+            while IFS= read -r tag; do
+              if ! grep -qxF -- "${tag}${ALIAS}" /tmp/tags.txt; then
+                echo "::error::$tag has no alias copy named ${tag}${ALIAS} in the list"
+                exit 1
+              fi
+            done < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          fi
+          echo "publishing:"; sed 's/^/  /' /tmp/tags.txt
+
           # --metadata-file reports the digest of the index this command just
           # pushed. That matters: the obvious way to learn it afterwards is
           # `imagetools inspect <tag>`, which is a fresh tag resolution, and a
@@ -489,7 +535,7 @@ jobs:
           # shellcheck disable=SC2046
           docker buildx imagetools create \
             --metadata-file /tmp/index.json \
-            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(sed 's/^/-t /' /tmp/tags.txt) \
             $(printf "${IMAGE}@sha256:%s " *)
           digest="$(jq -r '.["containerimage.descriptor"].digest' /tmp/index.json)"
           case "$digest" in
@@ -565,7 +611,7 @@ jobs:
             fi
             echo "ok: $tag -> $got"
             checked=$((checked + 1))
-          done < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          done < /tmp/tags.txt
           # Guard against the loop having verified nothing at all: an empty tag
           # list would otherwise pass this step in silence.
           if [ "$checked" -eq 0 ]; then

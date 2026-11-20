@@ -485,12 +485,11 @@ spec:
         - { name: cadir, persistentVolumeClaim: { claimName: openvox-ca } }
 ```
 
-The CentOS Stream and Alpine images run as uid/gid 1000, and the `-distroless`
-image as 65532. The `cadir` PVC has to be writable by that uid for the
-`import-ca-cert` step below, which a freshly provisioned PVC is not: most CSI
-drivers hand it over owned by `root:root`. Set `securityContext.fsGroup` to the
-image's gid on this Job's pod spec, and on the Deployment that shares the
-claim. See [the runtime
+The images run as uid/gid 65532. The `cadir` PVC has to be writable by that
+uid for the `import-ca-cert` step below, which a freshly provisioned PVC is not:
+most CSI drivers hand it over owned by `root:root`. Set
+`securityContext.fsGroup: 65532` on this Job's pod spec, and on the Deployment
+that shares the claim. See [the runtime
 user](container-images.md#runtime-user) for the full contract.
 
 The second step is the same Job with the signed chain mounted in and

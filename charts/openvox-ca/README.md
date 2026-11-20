@@ -82,7 +82,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 | --- | --- | --- |
 | `image.registry` | `ghcr.io` | Registry hosting the image |
 | `image.repository` | `voxpupuli/openvox-ca` | Image repository |
-| `image.tag` | `""` | Empty resolves to `<appVersion>-alpine`. An explicit tag is used verbatim — this is how you select the CentOS Stream variant (`tag: "0.9.0"`) or the distroless one (`tag: "0.9.0-distroless"`, whose image user is `65532`; `podSecurityContext` still decides the pod's) |
+| `image.tag` | `""` | Empty resolves to `<appVersion>`, the unsuffixed tag: the distroless image, which has no shell. An explicit tag is used verbatim — this is how you select the Alpine variant (`tag: "0.9.0-alpine"`), which has one |
 | `image.digest` | `""` | `sha256:…` digest; takes precedence over `tag` |
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | |
@@ -116,7 +116,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `tls.existingSecret` | `""` | Secret holding the server certificate; sets `tls_cert`/`tls_key`. The server re-reads the keypair on `SIGHUP`, but nothing sends one, so a renewal needs a signal (`kubectl exec <pod> -- kill -HUP 1`, or `kubectl debug --target` on the distroless image, which has no `kill`) or a restart. Mutually exclusive with `config.serving_cert`, which the chart refuses at install time — see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) |
+| `tls.existingSecret` | `""` | Secret holding the server certificate; sets `tls_cert`/`tls_key`. The server re-reads the keypair on `SIGHUP`, but nothing sends one, so a renewal needs a signal (`kubectl debug --target` running `kill -HUP 1`, since the default image has no `kill`; `kubectl exec <pod> -- kill -HUP 1` on `-alpine`) or a restart. Mutually exclusive with `config.serving_cert`, which the chart refuses at install time — see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) |
 | `tls.certKey` / `tls.keyKey` | `tls.crt` / `tls.key` | Data keys within that Secret |
 | `tls.mountPath` | `/run/secrets/openvox-ca-tls` | |
 | `ca.existingSecret` | `""` | Secret holding the CA certificate and key; sets `ca_cert_file`/`ca_key_file`. Under a provider that holds the key (`config.ca_key_provider: openbao`) clear the latter with `config.ca_key_file: ""` |
@@ -201,7 +201,7 @@ and [the CA's own serving certificate](https://github.com/voxpupuli/openvox-ca/b
 | `configChecksumAnnotation` | `true` | Roll the pods when the rendered config changes. Inert when `existingConfigMap` is set |
 | `podAnnotations` / `podLabels` | `{}` | |
 | `deploymentAnnotations` | `{}` | Annotations on the Deployment rather than the pods |
-| `podSecurityContext` | non-root uid/gid 1000, `fsGroup` 1000, `RuntimeDefault` | |
+| `podSecurityContext` | non-root uid/gid 65532, `fsGroup` 65532, `RuntimeDefault` | |
 | `securityContext` | no privilege escalation, read-only rootfs, all capabilities dropped | |
 | `livenessProbe` / `readinessProbe` / `startupProbe` | probes on `/healthz/*` | Set `enabled: false` to drop one; other keys are the probe spec. `httpGet.scheme` defaults to HTTPS or HTTP to match whether the server has a certificate. `startupProbe.failureThreshold x periodSeconds` is the entire budget the CA gets before the probe path is served. The default 60s does not cover `CA.Init`'s worst case (two `internal/ca.LockTimeout` waits plus CA key generation); raise it if you run several replicas against a fresh shared backend, where both locks can be contended. **With `config.serving_cert` the window also has to cover issuing that certificate**, which runs after Init and before the listener binds and is bounded at one further `LockTimeout` plus the store read that follows it (up to 30s for a Secret store) — so raise it when self-provisioning, particularly against a remote key provider or a Secret store. **Two starts also rewrite every stored certificate's index row inside Init**: the first after a backend migration, and the first after adding a digest to `config.status_fingerprint_algorithms` — so raise it for that start on a large fleet; see [Status fingerprints](https://github.com/voxpupuli/openvox-ca/blob/main/docs/configuration.md#status-fingerprints) |
 | `lifecycle` | `{}` | |

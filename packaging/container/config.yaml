@@ -1,0 +1,42 @@
+# Configuration for the published container images, baked in as
+# /etc/openvox-ca/config.yaml -- the path the server reads when neither
+# --config nor OPENVOX_CA_CONFIG names another.
+#
+# It exists so that the image's default command starts a CA that agents can
+# talk to. Without it the default command can only refuse: the server will not
+# serve plain HTTP on a non-loopback address, and the only TLS material a fresh
+# CA has is its own certificate and key, which no verifying client accepts and
+# which would put the signing key in the network-facing process.
+#
+# So it asks the CA to issue its own serving certificate instead, and nothing
+# else. Everything else stays at the built-in defaults, and the cadir comes
+# from the image's CMD.
+#
+# Replace it rather than edit it: mount your own file over
+# /etc/openvox-ca/config.yaml, or point OPENVOX_CA_CONFIG or --config at one.
+# While this file is in place, --tls-cert/--tls-key are refused at startup,
+# because serving_cert and tls_cert/tls_key are two answers to the same
+# question. See docs/container-images.md.
+serving_cert:
+  # `puppet` is the server name an agent uses when none is configured, so it
+  # is a name on the certificate and an agent with default settings verifies
+  # it as it stands. It is not the certname, which is the inventory slot the
+  # certificate occupies: a CA migrated from Puppet may well hold a `puppet`
+  # certificate already, which issuing under that certname would displace.
+  # Nothing enrols as `openvox-ca` by default.
+  certname: openvox-ca
+  names: [puppet, localhost]
+  # 90 days, renewed unattended with 30 left.
+  ttl: 2160h
+  renew_before: 720h
+  # Server authentication only. Nothing in the container presents this
+  # certificate as a client, and without clientAuth it cannot become an
+  # administrator if its certname is later listed in --puppet-server.
+  usages: [serverAuth]
+  store:
+    files:
+      # Beside the default cadir rather than in it: the CA refuses to let a
+      # store write anywhere under its cadir. The directory exists in every
+      # image and belongs to the CA's user.
+      cert: /etc/puppetlabs/puppet/ssl/serving_crt.pem
+      key: /etc/puppetlabs/puppet/ssl/serving_key.pem

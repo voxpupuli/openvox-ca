@@ -2898,6 +2898,119 @@ var _ = Describe("verifyChartBackendAliases", func() {
 	})
 })
 
+var _ = Describe("verifyImageUIDs", func() {
+	// The guard that keeps the Alpine image, the distroless image, the chart's
+	// podSecurityContext and the integration fixture on one uid, driven over
+	// content through the seam so each refusal can be planted without touching
+	// the real files.
+	alpine := func(user string) []byte {
+		return []byte("FROM alpine AS runtime\nRUN adduser -D puppet\n" + user + "\nEXPOSE 8140\n")
+	}
+	fixture := func(user string) []byte {
+		return []byte("FROM debian\nRUN useradd puppet\n" + user + "\nEXPOSE 8140\n")
+	}
+	distroless := func(arg, user string) []byte {
+		return []byte(arg + "\nFROM golang AS builder\nARG CA_UID\nFROM distroless\nARG CA_UID\n" + user + "\n")
+	}
+	values := func(uid, gid, fsGroup string) []byte {
+		return []byte("image:\n  tag: \"\"\npodSecurityContext:\n  runAsNonRoot: true\n" +
+			uid + gid + fsGroup)
+	}
+	goodAlpine := alpine("USER 65532:65532")
+	goodFixture := fixture("USER 65532:65532")
+	goodDistroless := distroless("ARG CA_UID=65532", "USER ${CA_UID}:${CA_UID}")
+	goodValues := values("  runAsUser: 65532\n", "  runAsGroup: 65532\n", "  fsGroup: 65532\n")
+
+	It("passes against the repository as it stands", func() {
+		Expect(verifyImageUIDs()).To(Succeed())
+	})
+
+	It("accepts every site naming the same uid", func() {
+		Expect(verifyImageUIDsIn(goodAlpine, goodDistroless, goodValues, goodFixture)).To(Succeed())
+	})
+
+	// Compared with each other, not with a literal: moving every site together
+	// is the change the check must allow.
+	It("accepts the uid moving everywhere at once", func() {
+		Expect(verifyImageUIDsIn(alpine("USER 4242:4242"),
+			distroless("ARG CA_UID=4242", "USER ${CA_UID}:${CA_UID}"),
+			values("  runAsUser: 4242\n", "  runAsGroup: 4242\n", "  fsGroup: 4242\n"),
+			fixture("USER 4242:4242"))).To(Succeed())
+	})
+
+	DescribeTable("refuses one site that disagrees",
+		func(a, d, v, f []byte, culprit string) {
+			Expect(verifyImageUIDsIn(a, d, v, f)).To(MatchError(And(
+				ContainSubstring("they disagree"),
+				ContainSubstring(culprit),
+			)))
+		},
+		Entry("the Alpine uid", alpine("USER 1000:65532"), goodDistroless, goodValues, goodFixture,
+			"Dockerfile.alpine USER uid=1000"),
+		Entry("the Alpine gid", alpine("USER 65532:1000"), goodDistroless, goodValues, goodFixture,
+			"Dockerfile.alpine USER gid=1000"),
+		Entry("the distroless default", goodAlpine,
+			distroless("ARG CA_UID=1000", "USER ${CA_UID}:${CA_UID}"), goodValues, goodFixture,
+			"Dockerfile.distroless CA_UID=1000"),
+		Entry("the chart's runAsUser", goodAlpine, goodDistroless,
+			values("  runAsUser: 1000\n", "  runAsGroup: 65532\n", "  fsGroup: 65532\n"), goodFixture,
+			"podSecurityContext.runAsUser=1000"),
+		Entry("the chart's runAsGroup", goodAlpine, goodDistroless,
+			values("  runAsUser: 65532\n", "  runAsGroup: 1000\n", "  fsGroup: 65532\n"), goodFixture,
+			"podSecurityContext.runAsGroup=1000"),
+		// The one that strands a key on upgrade: fsGroup is what keeps 0600
+		// Secret mounts and re-grouped data readable to the new uid.
+		Entry("the chart's fsGroup", goodAlpine, goodDistroless,
+			values("  runAsUser: 65532\n", "  runAsGroup: 65532\n", "  fsGroup: 1000\n"), goodFixture,
+			"podSecurityContext.fsGroup=1000"),
+		Entry("the fixture uid", goodAlpine, goodDistroless, goodValues, fixture("USER 1000:65532"),
+			"test/Dockerfile.run USER uid=1000"),
+		Entry("the fixture gid", goodAlpine, goodDistroless, goodValues, fixture("USER 65532:1000"),
+			"test/Dockerfile.run USER gid=1000"),
+	)
+
+	// Zero lines and two lines are both refused: with two, comparing whichever
+	// came first would pass a Dockerfile that runs as the other.
+	DescribeTable("refuses a USER it cannot read as one line",
+		func(a, f []byte, want string) {
+			Expect(verifyImageUIDsIn(a, goodDistroless, goodValues, f)).To(MatchError(ContainSubstring(want)))
+		},
+		Entry("an Alpine USER by name", alpine("USER puppet"), goodFixture,
+			"Dockerfile.alpine: found 0 numeric `USER <uid>:<gid>` lines"),
+		Entry("two Alpine USER lines", alpine("USER 65532:65532\nUSER 1000:1000"), goodFixture,
+			"Dockerfile.alpine: found 2 numeric `USER <uid>:<gid>` lines"),
+		Entry("a fixture USER by name", goodAlpine, fixture("USER puppet"),
+			"test/Dockerfile.run: found 0 numeric `USER <uid>:<gid>` lines"),
+		Entry("two fixture USER lines", goodAlpine, fixture("USER 65532:65532\nUSER 1000:1000"),
+			"test/Dockerfile.run: found 2 numeric `USER <uid>:<gid>` lines"),
+	)
+
+	DescribeTable("refuses a distroless CA_UID default it cannot read as one line",
+		func(arg, want string) {
+			Expect(verifyImageUIDsIn(goodAlpine, distroless(arg, "USER ${CA_UID}:${CA_UID}"), goodValues, goodFixture)).To(
+				MatchError(ContainSubstring(want)))
+		},
+		Entry("no default", "ARG CA_UID", "found 0 `ARG CA_UID=<uid>` defaults"),
+		Entry("two defaults", "ARG CA_UID=65532\nARG CA_UID=1000", "found 2 `ARG CA_UID=<uid>` defaults"),
+	)
+
+	// The ARG then says nothing about who the image runs as.
+	It("refuses a distroless USER not spelt from CA_UID", func() {
+		Expect(verifyImageUIDsIn(goodAlpine, distroless("ARG CA_UID=65532", "USER 65532:65532"), goodValues, goodFixture)).To(
+			MatchError(ContainSubstring("no longer sets `USER ${CA_UID}:${CA_UID}`")))
+	})
+
+	It("refuses a chart that leaves a podSecurityContext id unset", func() {
+		Expect(verifyImageUIDsIn(goodAlpine, goodDistroless,
+			values("  runAsUser: 65532\n", "  runAsGroup: 65532\n", ""), goodFixture)).To(
+			MatchError(ContainSubstring("podSecurityContext.fsGroup is not set")))
+	})
+
+	It("refuses a values file it cannot parse", func() {
+		Expect(verifyImageUIDsIn(goodAlpine, goodDistroless, []byte("podSecurityContext: [\n"), goodFixture)).To(
+			MatchError(HavePrefix("charts/openvox-ca/values.yaml: ")))
+	})
+})
 var _ = Describe("verifyMageTargets", func() {
 	// Against the repository's real magefile and workflows, which is what
 	// `mage dev:check` runs.

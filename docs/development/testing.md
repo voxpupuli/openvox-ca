@@ -211,8 +211,12 @@ must not end with another variant's, so the label says which variant an image
 is. The step then runs `openvox-ca --version`, because a cgo build
 fails only when a base without libc tries to start it, and has
 `openvox-ca-ctl setup` initialise a CA in each of those directories as the
-image's user, because an owner in a listing is not a write. Last, it starts the
-server through the image's entrypoint and waits for `/healthz/ready`.
+image's user, because an owner in a listing is not a write. Last, it runs the
+image with no arguments, so the default `CMD` and the configuration baked in at
+`/etc/openvox-ca/config.yaml` must start a CA that answers `/healthz/ready`, and
+the listener's certificate must verify as `puppet` against that CA's: a baked
+configuration the server cannot read, or one that serves the CA's own
+certificate, fails there.
 
 CI only ever exercises the passing branch of these guards, so **whenever you
 edit one, re-verify by hand that it still fails.** A guard that has stopped
@@ -225,9 +229,9 @@ non-zero exit — a mutation that breaks the build for the wrong reason looks
 identical to one that worked.
 
 ```bash
-# 1. Pinned uid. Works on Dockerfile, Dockerfile.alpine and test/Dockerfile.run
-#    (context `.`) -- expect "puppet is 1001:1000, not 1000:1000".
-sed 's/-u 1000/-u 1001/' Dockerfile > /tmp/mut && docker build -f /tmp/mut .
+# 1. Pinned uid (context `.`). On Dockerfile.alpine and test/Dockerfile.run
+#    -- expect "puppet is 65533:65532, not 65532:65532".
+sed 's/-u 65532/-u 65533/' Dockerfile.alpine > /tmp/mut && docker build -f /tmp/mut .
 
 # 2. The same, for docker/puppet/Dockerfile.client. Note the build context, and
 #    that this image's account is puppet-agent, so the message differs:
@@ -235,16 +239,16 @@ sed 's/-u 1000/-u 1001/' Dockerfile > /tmp/mut && docker build -f /tmp/mut .
 sed 's/-u 1000/-u 1001/' docker/puppet/Dockerfile.client > /tmp/mut && \
     docker build -f /tmp/mut docker/puppet
 
-# 3. Ownership of the directories the CA writes (Dockerfile, Dockerfile.alpine).
+# 3. Ownership of the directories the CA writes (Dockerfile.alpine).
 #    Drop either argument of the chown; the loop asserts both, so either is
-#    caught. The first is the image's default --cadir, the second is what
-#    compose.yml and the docs mount.
-#    -- expect "/etc/puppetlabs/puppet/ssl/ca is owned by 0:0, not 1000:1000"
+#    caught. The first is the image's default --cadir, whose parent compose.yml
+#    and the docs mount; the second is a mount point for --cadir=/data.
+#    -- expect "/etc/puppetlabs/puppet/ssl/ca is owned by 0:0, not 65532:65532"
 sed 's|chown -R puppet:puppet /etc/puppetlabs/puppet /data|chown -R puppet:puppet /data|' \
-    Dockerfile > /tmp/mut && docker build -f /tmp/mut .
-#    -- expect "/data is owned by 0:0, not 1000:1000"
+    Dockerfile.alpine > /tmp/mut && docker build -f /tmp/mut .
+#    -- expect "/data is owned by 0:0, not 65532:65532"
 sed 's|chown -R puppet:puppet /etc/puppetlabs/puppet /data|chown -R puppet:puppet /etc/puppetlabs/puppet|' \
-    Dockerfile > /tmp/mut && docker build -f /tmp/mut .
+    Dockerfile.alpine > /tmp/mut && docker build -f /tmp/mut .
 
 # 4. Package-assigned identity (docker/puppet/Dockerfile). This one is inherited
 #    rather than chosen, so mutate the image, not the expectation: flipping
@@ -257,7 +261,7 @@ sed 's|^RUN expected=|RUN usermod -aG wheel puppet \&\& expected=|' \
 ```
 
 For `Dockerfile.distroless`, mutations 5 and 6 abort its build. Mutations 7 to
-17 build a bad image, and the image check must then reject it. To run that check
+19 build a bad image, and the image check must then reject it. To run that check
 by hand, take its `run:` script out of the workflow as the first command below
 does. Run it on Linux, because the parsing expects GNU tar's listing format:
 
@@ -273,11 +277,12 @@ sed 's|chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet /rootfs/data
 sed 's|chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet /rootfs/data|chown -R "${CA_UID}:${CA_UID}" /rootfs/etc/puppetlabs/puppet|' \
     Dockerfile.distroless > /tmp/mut && docker build -f /tmp/mut .
 
-# 7-17. The image check. Build the mutant with the label CI gives it, then run
-#    the check against it:
-#    docker build --label org.opencontainers.image.version=edge-distroless \
-#        -f /tmp/mut -t mut . && PUSH=false LOADED=mut SUFFIX=-distroless \
-#        SUFFIXES='-alpine -distroless' bash /tmp/check.sh
+# 7-19. The image check. Build the mutant with the label CI gives it, then run
+#    the check against it. Distroless is the unsuffixed variant, so its label
+#    is the plain tag and its SUFFIX is empty:
+#    docker build --label org.opencontainers.image.version=edge \
+#        -f /tmp/mut -t mut . && PUSH=false LOADED=mut SUFFIX= \
+#        SUFFIXES=-alpine bash /tmp/check.sh
 # 7. Copy per directory, which the builder-stage guard cannot see.
 #    -- expect "/data is owned by 0:0, but the image runs as 65532:65532"
 sed 's|^COPY --from=builder /rootfs/ /$|COPY --from=builder /rootfs/etc/puppetlabs /etc/puppetlabs\nCOPY --from=builder /rootfs/data /data|' \
@@ -303,23 +308,68 @@ sed 's|^CMD \["--cadir=/etc/puppetlabs/puppet/ssl/ca", \\$|CMD ["--cadir=/srv/ca
 # 14. Drop the default cadir from CMD.
 #    -- expect "CMD is ["--verbosity=1"]; it must name the default cadir once, as --cadir=<absolute path>"
 sed 's|^CMD \["--cadir=/etc/puppetlabs/puppet/ssl/ca", \\$|CMD [\\|' Dockerfile.distroless > /tmp/mut
-# 15. Label it as another variant: build the unmodified Dockerfile.distroless
-#    with --label org.opencontainers.image.version=edge instead.
-#    -- expect "the version label is 'edge'; it must end with this variant's tag suffix '-distroless'"
+# 15. Label a suffixed variant without its suffix: build Dockerfile.alpine with
+#    --label org.opencontainers.image.version=edge and run the check with
+#    SUFFIX=-alpine.
+#    -- expect "the version label is 'edge'; it must end with this variant's tag suffix '-alpine'"
 # 16. An entrypoint that does not serve.
 #    -- expect "the server did not answer /healthz/ready: it exited, or 60 seconds
 #    passed", followed by the server's own "unknown flag: --cadir"
 sed 's|^ENTRYPOINT \["/usr/local/bin/openvox-ca"\]$|ENTRYPOINT ["/usr/local/bin/openvox-ca-ctl"]|' \
     Dockerfile.distroless > /tmp/mut
-# 17. Label the unsuffixed variant as another: build Dockerfile with
-#    --label org.opencontainers.image.version=edge-alpine and run the check
-#    with SUFFIX= (empty).
+# 17. Label the unsuffixed variant as another: build the unmodified
+#    Dockerfile.distroless with --label org.opencontainers.image.version=edge-alpine.
 #    -- expect "the version label is 'edge-alpine', another variant's; this variant's tags carry no suffix"
+# 18. Bake the default configuration in with COPY --chmod, which leaves
+#    /etc/openvox-ca untraversable, so the server never reads it.
+#    -- expect "the server did not answer /healthz/ready: it exited, or 60 seconds
+#    passed", followed by the server's own "refusing to start: plain HTTP"
+sed 's|^COPY --from=builder /container-config/ /etc/openvox-ca/$|COPY --chmod=0644 packaging/container/config.yaml /etc/openvox-ca/config.yaml|' \
+    Dockerfile.distroless > /tmp/mut
+# 19. A default configuration that serves the CA's own certificate.
+#    -- expect "the default configuration's serving certificate does not verify as puppet against the CA"
+sed "s|^RUN install -D -m 0644 packaging/container/config.yaml /container-config/config.yaml\$|RUN mkdir /container-config \&\& printf 'tls_cert: %s\\\\ntls_key: %s\\\\n' /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem /etc/puppetlabs/puppet/ssl/ca/ca_key.pem > /container-config/config.yaml|" \
+    Dockerfile.distroless > /tmp/mut
 ```
 
 These are deliberately not a CI job: each mutation is a full image build, and
 the failure they guard against is introduced by editing the assertion itself —
 which is exactly when this procedure is required.
+
+The workflow's variant list, in its setup job, is guarded the same way: it
+must hold unique names, exactly one unsuffixed variant, every other suffix
+`-<name>`, and an alias `-<name>` on the unsuffixed variant and on no other.
+CI only ever takes the passing branch, so check each refusal by running the
+step's script with a mutated list. Every mutation below should print the
+step's `::error::` line and exit 1:
+
+```bash
+yq -r '.jobs.setup.steps[] | select(.name == "Define the image variants") | .run' \
+    .github/workflows/container-images.yml > /tmp/variants.sh
+mut() { sed "$1" /tmp/variants.sh > /tmp/mut.sh && GITHUB_OUTPUT=/dev/null bash /tmp/mut.sh; }
+mut 's/, "alias": "-distroless"//'                                   # no alias
+mut 's/"alias": "-distroless"/"alias": "-dl"/'                       # not "-<name>"
+mut 's/"suffix": "-alpine"}/"suffix": "-alpine", "alias": "-alpine"}/' # on a suffixed variant
+mut 's/"suffix": "-alpine"/"suffix": ""/'                            # two unsuffixed
+```
+
+The merge job's check that every tag got its alias copy is the same: CI never
+fails it. Run the tag-list part of its *Create multi-arch manifest* step with
+each mutation below. The first writes the alias copies over the file instead
+of appending them, and should print `::error::expected 6 tags with the
+-distroless alias copies, but the list holds 3`. The second names the copies
+wrongly, keeping their count, and should print `::error::r/i:1.0.0 has no alias
+copy named r/i:1.0.0-distroless in the list`. Both exit 1:
+
+```bash
+yq -r '.jobs.merge.steps[] | select(.name == "Create multi-arch manifest") | .run' \
+    .github/workflows/container-images.yml | sed -n '1,/publishing:/p' > /tmp/tags.sh
+mut() { sed "$1" /tmp/tags.sh > /tmp/tags-mut.sh &&
+    DOCKER_METADATA_OUTPUT_JSON='{"tags":["r/i:1.0.0","r/i:1.0","r/i:latest"]}' \
+    ALIAS=-distroless bash /tmp/tags-mut.sh; }
+mut '/+ \$alias/s/>> \/tmp\/tags.txt/> \/tmp\/tags.txt/'   # copies overwrite
+mut "s/'.tags\[\] + \$alias'/'.tags[] + \"-\" + \$alias'/"    # copies misnamed
+```
 
 ## Image build context check
 
@@ -387,8 +437,8 @@ never declared, or the base image dropped it. The second is not hypothetical —
 on 2026-09-10 the rolling `stream10` tag dropped `diffutils`, and because
 nothing had ever declared the suite's one `diff` call, both Compose legs failed
 while *asserting a certificate-content mismatch on byte-identical files*. The
-base cannot be pinned against a repeat: quay does not retain superseded CentOS
-Stream digests, which `renovate.json` records as its reason for declining.
+image is now built on Debian, pinned by digest, but each Renovate bump of that
+pin can drop a package the same way.
 
 `mage test:fixtureCommands` exercises the guard logic on the host. CI never takes
 its failing branches, so the mutations below check the parts that only a real
@@ -396,10 +446,13 @@ image can show. Apply each to a copy, never to the tracked file, and read the
 message rather than just the non-zero exit.
 
 ```bash
-# 1. A declared package the base no longer provides. Drop diffutils from the
-#    install line, rebuild, and run a compose leg.
-#    -- expect "Bail out! ... # absent from PATH: diff", before test 1 runs.
-sed 's/ diffutils findutils/ findutils/' test/Dockerfile.run > /tmp/mut && \
+# 1. A declared package the base does not provide. Drop python3 from the
+#    install line, rebuild, and run a compose leg. Most of the declared
+#    packages are Essential in Debian and come with the base, so dropping one
+#    of those changes nothing. Of the three the base lacks, curl is the
+#    services' healthcheck and would stall the leg before the preflight runs.
+#    -- expect "Bail out! ... # absent from PATH: python3", before test 1 runs.
+sed 's/ openssl python3 sed/ openssl sed/' test/Dockerfile.run > /tmp/mut && \
     docker build -f /tmp/mut -t openvox-ca-integ:latest . && \
     docker compose -f test/compose.yml up --exit-code-from test-runner
 
@@ -420,8 +473,8 @@ bash -c 'set -uo pipefail; FIXTURE_MISSING_LOG=/proc/x; . test/fixture-commands.
 
 CI's *Packages* legs (`.github/workflows/packages.yml`, which "CI success"
 needs) build the deb and rpm as the release does and install each into a
-container booted with systemd as PID 1: `debian:trixie` for the deb and
-CentOS Stream 10 for the rpm, each on an amd64 and an arm64 runner. They judge
+container booted with systemd as PID 1: `debian:trixie` for the deb and UBI 10
+(`ubi10/ubi-init`) for the rpm, each on an amd64 and an arm64 runner. They judge
 the packages from the installed state. The CA must answer TLS verified through
 the `certs/ca.pem` the package linked, a CA placed before install must come
 through byte-identical, and each format's lifecycle (takeover, upgrade,

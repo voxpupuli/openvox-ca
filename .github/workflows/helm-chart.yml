@@ -18,7 +18,7 @@ name: Helm chart
 #     version is the internal/version constant (e.g. 0.9.0-dev), so the tag is
 #     mutable and carries no commit SHA — each push overwrites it. That chart's
 #     appVersion is a -dev version, which the chart resolves to the rolling
-#     "edge-alpine" image, so the pair stay consistent.
+#     "edge" image, so the pair stay consistent.
 #
 #     Only -dev versions publish from main. Merging a release-prep PR — for
 #     0.9.0, but equally for 0.9.0-rc1 or a rehearsal's 0.9.0-test1 — puts a
@@ -232,8 +232,10 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository }}
           VERSION: ${{ steps.package.outputs.version }}
         run: |
-          # The tag the chart's own default resolves to for this appVersion.
-          ref="$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]'):${VERSION}-alpine"
+          # The tag the chart's own default resolves to for this appVersion:
+          # this restates openvox-ca.image in templates/_helpers.tpl, so
+          # change the two together.
+          ref="$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]'):${VERSION}"
           echo "Waiting for $ref"
           for attempt in $(seq 1 60); do
             # Keep the last attempt's output: a 401, a missing binary and a

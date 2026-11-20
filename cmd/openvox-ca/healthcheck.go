@@ -54,9 +54,10 @@ const defaultHealthcheckTimeout = 3 * time.Second
 //
 // It reads the server's own configuration file and environment to find the
 // port, but it cannot see the flags the server was started with, so it does
-// not take TLS from configuration: the documented `docker run` enables TLS
-// with --tls-cert on the server's command line. It tries HTTPS and falls back
-// to plain HTTP only when the server answers in plain HTTP.
+// not take TLS from configuration: TLS can be enabled where it cannot look,
+// such as --tls-cert on the server's command line under
+// OPENVOX_CA_CONFIG=/dev/null. It tries HTTPS and falls back to plain HTTP
+// only when the server answers in plain HTTP.
 func newHealthcheckCmd() *cobra.Command {
 	var (
 		configFile string

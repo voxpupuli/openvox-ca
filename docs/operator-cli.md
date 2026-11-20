@@ -739,12 +739,12 @@ that outlives the container:
 
 ```bash
 mkdir -p ca-admin-out
-podman unshare chown 1000:1000 ca-admin-out
+podman unshare chown 65532:65532 ca-admin-out
 podman run --rm \
-  -v ca-data:/data \
+  -v ca-ssl:/etc/puppetlabs/puppet/ssl \
   -v "$PWD/ca-admin-out":/out:Z \
   ghcr.io/voxpupuli/openvox-ca:1.2.3 \
-  generate --cadir /data --certname admin-cli --ttl 8760h \
+  generate --cadir /etc/puppetlabs/puppet/ssl/ca --certname admin-cli --ttl 8760h \
   --pp-cli-auth --key-out /out/admin-cli_key.pem > admin-cli.crt
 
 # Take the key back: it lands 0600 owned by the container's user.
@@ -757,15 +757,15 @@ container writes on-disk state that the server wrote and will read again when it
 restarts, the inventory and its integrity record among it, so a version
 difference here is between two writers of the same data rather than between a
 client and a server. The image must be fully qualified — an unqualified name
-will not resolve without registry search configured. The CentOS Stream and
-Alpine images run as uid 1000 (the `puppet` user), so under rootless podman a bind mount owned by your host user is
-not writable inside the container — the mint then fails at the key write,
-cleanly but confusingly. Hence the `podman unshare chown`: it sets the
-directory's owner to whatever container uid 1000 maps to on the host, which is
-what `puppet` runs as.
+will not resolve without registry search configured. The images run as uid
+65532, so under rootless podman a bind mount owned by your host user is not
+writable inside the container — the mint then fails at the key write, cleanly
+but confusingly. Hence the `podman unshare chown`: it sets the directory's owner
+to whatever container uid 65532 maps to on the host, which is what the CA runs
+as.
 
 That mapping has to be undone afterwards, which is the last line of the recipe.
-The key is written `0600` as `puppet`, so on the host it belongs to a subuid you
+The key is written `0600` as uid 65532, so on the host it belongs to a subuid you
 are not, and reading it back as yourself gives `Permission denied` — a key you
 cannot open is the same as no key at all, which is the standard this section
 already sets for the Kubernetes path. Inside `podman unshare` you *are* uid 0,
@@ -774,12 +774,14 @@ expands outside the namespace and would hand the file to a different subuid
 again.
 
 Resist fixing that with `--userns` instead. A remap applies to every path the
-container touches, `ca-data` included, so mapping yourself onto uid 1000 shifts
+container touches, `ca-ssl` included, so mapping yourself onto uid 65532 shifts
 the CA files the server left behind out from under it — and the failure moves
 from the key write to the CA directory, which is a worse place to discover it.
-The `-distroless` images run as uid 65532 instead, so with one of those the
-first `podman unshare chown` takes `65532:65532`. Read the uid of the image you are using with
-`podman image inspect --format '{{.Config.User}}' ghcr.io/voxpupuli/openvox-ca:<tag>`.
+Pinning an older release can also mean another uid: the unsuffixed tags up to
+v1.0.0-alpha1 are a CentOS image that runs as 1000. Read the uid of the image
+you are using with
+`podman image inspect --format '{{.Config.User}}' ghcr.io/voxpupuli/openvox-ca:<tag>`,
+and put it in the first `podman unshare chown` in place of `65532:65532`.
 The images set an entrypoint, which is why the recipe above appends
 `generate ...` rather than a shell command. And the mount
 is a dedicated directory with `:Z` rather than `$PWD` with `:z`, because `:Z`
@@ -799,13 +801,14 @@ at startup. The CRL and the inventory are correct immediately.
 
 ##### Reading the version back off a floating tag
 
-Pin the *version*, not whatever tag the deployment names. `compose.yml` ships
-`:latest` deliberately, so copying the tag from a deployment that floats would
-reintroduce exactly the skew this avoids.
+Pin the *version*, not whatever tag the deployment names. `compose.yml` ships a
+floating tag deliberately (`:edge` until 1.0.0, then `:latest`), so copying the
+tag from a deployment that floats would reintroduce exactly the skew this
+avoids.
 
 Take the digest off the **running container, before you stop it**. Inspecting
-the tag instead would resolve to whatever `:latest` points at now, which is the
-one thing it may no longer be:
+the tag instead would resolve to whatever it points at now, which is the one
+thing it may no longer be:
 
 ```bash
 podman inspect --format '{{index .RepoDigests 0}}' \
@@ -818,7 +821,7 @@ prints `ghcr.io/voxpupuli/openvox-ca@sha256:…`, which goes into the `podman ru
 above in place of the tag. Prefer that digest to the
 `org.opencontainers.image.version` label: the label is stamped from the git ref
 and the variant's tag suffix, so on a release it reads `v1.2.3` (or
-`v1.2.3-alpine`, `v1.2.3-distroless`) while the published tag is `1.2.3`, and
+`v1.2.3-alpine`) while the published tag is `1.2.3`, and
 pasting it back gives `manifest unknown` at the point you have already stopped
 the CA.
 

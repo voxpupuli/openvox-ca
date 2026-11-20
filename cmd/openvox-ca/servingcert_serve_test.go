@@ -28,6 +28,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -144,6 +145,45 @@ var _ = Describe("the serve command with a self-provisioned serving certificate"
 			Expect(err).To(MatchError(ContainSubstring("failed to listen on "+unassigned)),
 				"the command must get as far as binding, which is past every gate")
 		})
+
+		It("refuses --tls-cert/--tls-key over a configuration that sets serving_cert, naming the file", func() {
+			// The container images' baked configuration sets serving_cert, so
+			// an operator still passing the keypair as flags meets this. The
+			// flags reach cfg after the file is read, and the refusal must
+			// name that file: the operator may never have written it.
+			cfg := serveConfig(caDir, servingDir, unassigned, 8140, true)
+			err := runServeBounded(cfg, "--tls-cert", "/srv/tls.crt", "--tls-key", "/srv/tls.key")
+			Expect(err).To(MatchError(ContainSubstring(fmt.Sprintf("serving_cert (read from %q)", cfg))))
+			Expect(err).To(MatchError(ContainSubstring("mutually exclusive")))
+		})
+
+		DescribeTable("says when --no-tls-required has no effect because serving_cert is TLS",
+			// Wired, not only written: noTLSRequiredNotice's own table cannot
+			// see whether the serve command calls it. The twin without the flag
+			// shows the line is the flag's doing, not something every start logs.
+			func(extra []string, warns bool) {
+				// The command points the default logger at logfile and leaves it
+				// there; registered first, so it is restored after the command.
+				DeferCleanup(slog.SetDefault, slog.Default())
+				cfg := serveConfig(caDir, servingDir, unassigned, 8140, true)
+				logPath := filepath.Join(GinkgoT().TempDir(), "server.log")
+				appendConfig(cfg, fmt.Sprintf("logfile: %s\n", logPath))
+
+				err := runServeBounded(cfg, extra...)
+				Expect(err).To(MatchError(ContainSubstring("failed to listen on "+unassigned)),
+					"the command must get past every startup warning to the bind")
+				logged, err := os.ReadFile(logPath)
+				Expect(err).NotTo(HaveOccurred())
+				warning := ContainSubstring("no_tls_required is set but has no effect")
+				if warns {
+					Expect(string(logged)).To(warning)
+				} else {
+					Expect(string(logged)).NotTo(warning)
+				}
+			},
+			Entry("with the flag", []string{"--no-tls-required"}, true),
+			Entry("without it", []string(nil), false),
+		)
 
 		It("refuses the same address without one", func() {
 			err := runServeBounded(serveConfig(caDir, servingDir, unassigned, 8140, false))
@@ -409,26 +449,27 @@ func startServeRecorded(configPath string, extra ...string) (string, *notifyReco
 // runServeBounded runs the serve command to completion and returns its error.
 // Bounded because the specs that call it expect it to fail before serving; if
 // it served instead, the deadline stops it and the nil error fails the spec,
-// rather than the spec hanging until the binary's own timeout.
-func runServeBounded(configPath string) error {
+// rather than the spec hanging until the binary's own timeout. extra is
+// appended to the command line, after --config, as startServe's is.
+func runServeBounded(configPath string, extra ...string) error {
 	GinkgoHelper()
 	// The recorder is not used for its messages here, but it pins
 	// NOTIFY_SOCKET to a socket this spec owns, so nothing reaches a real
 	// service manager.
-	_, err := runServeRecorded(configPath)
+	_, err := runServeRecorded(configPath, extra...)
 	return err
 }
 
 // runServeRecorded is runServeBounded, also returning the recorder the
 // command's notifications reached.
-func runServeRecorded(configPath string) (*notifyRecorder, error) {
+func runServeRecorded(configPath string, extra ...string) (*notifyRecorder, error) {
 	GinkgoHelper()
 	rec := startNotifyRecorder(nil)
 
 	cmd := newRootCmd()
 	cmd.SetOut(GinkgoWriter)
 	cmd.SetErr(GinkgoWriter)
-	cmd.SetArgs([]string{"--config", configPath, "--single-process"})
+	cmd.SetArgs(append([]string{"--config", configPath, "--single-process"}, extra...))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

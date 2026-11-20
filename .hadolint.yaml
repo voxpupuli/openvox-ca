@@ -3,10 +3,12 @@
 # Ignored rules:
 #   DL3041 - "Specify version with dnf install -y <package>-<version>"
 #   DL3018 - "Pin versions in apk add"
+#   DL3008 - "Pin versions in apt get install"
 #
-# We intentionally do not pin dnf/apk package versions: the images build
-# against rolling distro repositories (CentOS Stream, Alpine), where pinning
-# exact versions breaks builds as soon as upstream rebuilds a package.
+# We intentionally do not pin dnf/apk/apt package versions: the images build
+# against distribution repositories (UBI, Alpine, Debian) that drop a package
+# version once an update supersedes it, so pinning exact versions breaks builds
+# as soon as upstream ships a fix.
 #
 # These are global defaults. Individual rules can still be re-enabled or
 # further suppressed per Dockerfile with inline comments, e.g.:
@@ -15,3 +17,4 @@
 ignored:
   - DL3041
   - DL3018
+  - DL3008

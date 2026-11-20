@@ -17,19 +17,18 @@ image:
   registry: ghcr.io
   repository: voxpupuli/openvox-ca
 
-  # Image tag. Empty (the default) resolves to the Alpine variant of the
-  # chart's appVersion, e.g. "0.9.0-alpine" — Alpine is the chart's default
-  # image. To run the CentOS Stream variant instead, set the unsuffixed tag:
+  # Image tag. Empty (the default) resolves to the chart's appVersion, e.g.
+  # "0.9.0": the unsuffixed tag, which is the distroless image. It has no shell;
+  # to run the Alpine variant instead, which has one, set its tag:
   #
   #   image:
-  #     tag: "0.9.0"
+  #     tag: "0.9.0-alpine"
   #
-  # The distroless variant is "0.9.0-distroless". Its own user is 65532:65532,
-  # but podSecurityContext below sets the uid the pod runs as either way.
+  # Both images run as 65532:65532, the uid podSecurityContext below sets.
   #
   # An explicit tag is used exactly as given; the chart never appends a suffix
   # to it. Charts built from an unreleased tree (a -dev appVersion) fall back
-  # to the rolling "edge-alpine" tag, which is what main publishes.
+  # to the rolling "edge" tag, which is what main publishes.
   tag: ""
 
   # Pin by digest. When set it takes precedence over tag, and the reference
@@ -226,8 +225,8 @@ autosign:
 # Secret, and the running process keeps serving the old certificate until it is
 # signalled or restarted — while the probes speak to that same listener, so
 # readiness stays green until it expires and every agent fails at once. Act on
-# renewal: `kubectl exec <pod> -- kill -HUP 1` (PID 1 forwards it, no restart;
-# the distroless image has no `kill`, so use `kubectl debug --target` there),
+# renewal: `kubectl debug --target` running `kill -HUP 1` (PID 1 forwards it, no
+# restart; the default image has no `kill`, `-alpine` takes `kubectl exec`),
 # `kubectl rollout restart`, a Reloader annotation on the pod template
 # (`reloader.stakater.com/auto: "true"` watches every mounted Secret and
 # ConfigMap and restarts the pod; ci/postgres-ha-values.yaml sets it under
@@ -535,11 +534,17 @@ podLabels: {}
 # — e.g. ignore-check.kube-linter.io/… suppressions.
 deploymentAnnotations: {}
 
+# 65532 is the uid both published images run as. On a volume the kubelet
+# applies fsGroup to, it re-groups data another uid wrote and adds group read
+# and write, so the pod can take it over. On one it does not (a hostPath, or a
+# driver without fsGroup support), re-own the data on every volume the CA reads
+# to this uid first: the CA's private keys are readable by their owner alone.
+# See docs/helm-chart.md, "Choosing an image".
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 1000
-  runAsGroup: 1000
-  fsGroup: 1000
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
   seccompProfile:
     type: RuntimeDefault
 

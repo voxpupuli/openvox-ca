@@ -21,10 +21,15 @@ ENV CGO_ENABLED=0 GOOS=linux
 RUN go build -trimpath -ldflags="-s -w" -o /openvox-ca     ./cmd/openvox-ca/ && \
     go build -trimpath -ldflags="-s -w" -o /openvox-ca-ctl ./cmd/openvox-ca-ctl/
 
+# The default configuration, staged with its mode for the runtime stage's COPY.
+RUN install -D -m 0644 packaging/container/config.yaml /container-config/config.yaml
+
 # The directories the CA writes, laid out under /rootfs for the runtime stage to
 # copy whole. They are made here because the runtime stage cannot run anything.
-# The first is the image's default --cadir, the second is what compose.yml and
-# the docs mount. The assertion below must be re-verified by hand when edited --
+# The first is the image's default --cadir, whose parent compose.yml and the
+# docs mount; the second is a mount point for a deployment that passes
+# --cadir=/data, which also needs a configuration of its own: the baked one
+# writes the serving pair beside the default cadir, not onto /data. The assertion below must be re-verified by hand when edited --
 # CI only ever takes its passing branch. See docs/development/testing.md,
 # "Container identity guards", for the mutations and the messages they should
 # produce. CA_UID is declared here rather than at the top of the stage: every
@@ -60,11 +65,22 @@ COPY --from=builder /rootfs/ /
 COPY --from=builder /openvox-ca     /usr/local/bin/openvox-ca
 COPY --from=builder /openvox-ca-ctl /usr/local/bin/openvox-ca-ctl
 
+# The configuration the default CMD below runs with: it has the CA issue its own
+# serving certificate, so a bare `docker run` starts and serves TLS that agents
+# can verify, without the CA key on the network-facing listener. Root-owned and
+# read-only to the CA; replace it by mounting another file over it, or with
+# OPENVOX_CA_CONFIG or --config. See packaging/container/config.yaml. Staged
+# in the builder rather than copied with --chmod, which BuildKit applies to the
+# directory it creates as well, leaving /etc/openvox-ca untraversable.
+COPY --from=builder /container-config/ /etc/openvox-ca/
+
 USER ${CA_UID}:${CA_UID}
 EXPOSE 8140
 
-# The image's own health state, for `docker ps`, compose and Podman. It is a
-# subcommand of the server binary rather than curl or wget so the same line
+# The image's own health state, for `docker ps` and Docker Compose. Podman
+# does not read it from an OCI-format image, which is what CI publishes, so
+# compose.yml declares the same check and the docs give Podman users the
+# --health-cmd that matches it. It is a subcommand of the server binary rather than curl or wget so the same line
 # works in every image, including one with no shell. It requests
 # /healthz/ready, over HTTPS or plain HTTP as the server speaks, on the port
 # from the server's config file and OPENVOX_CA_* environment; a port set only

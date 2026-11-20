@@ -668,6 +668,23 @@ func plainHTTPAdminNotice(cfg *serverConfig, tlsConfigured bool) string {
 	return msg
 }
 
+// noTLSRequiredNotice is the startup warning for no_tls_required set while TLS
+// is configured. The opt-out then does nothing: the listener serves HTTPS, so a
+// TLS-terminating proxy that forwards plain HTTP to it gets an error on every
+// request while the CA reports itself healthy. Said aloud because the container
+// images ship a serving_cert that turns TLS on, so an operator who passes
+// --no-tls-required to one, as for a proxy, would otherwise hear nothing.
+// Empty when the setting is off or TLS is not configured.
+func noTLSRequiredNotice(cfg *serverConfig, tlsConfigured bool) string {
+	if !cfg.NoTLSRequired || !tlsConfigured {
+		return ""
+	}
+	return "no_tls_required is set but has no effect while TLS is configured (tls_cert/tls_key, or " +
+		"serving_cert, which the container images' default configuration sets): the listener serves " +
+		"HTTPS, so a proxy forwarding plain HTTP to it gets an error on every request. Remove it, or " +
+		"configure no TLS; see docs/container-images.md for running behind a TLS-terminating proxy"
+}
+
 // ocspURLWithoutResponderNotice is the startup warning for an ocsp_url set
 // while enable_ocsp is not. Issued certificates then advertise a responder this
 // server does not serve, which is right when the URL names one elsewhere and a
@@ -1392,6 +1409,9 @@ func newRootCmd() *cobra.Command {
 				}
 			}
 			if msg := plainHTTPGenerateNotice(cfg, tlsConfigured); msg != "" {
+				slog.Warn(msg)
+			}
+			if msg := noTLSRequiredNotice(cfg, tlsConfigured); msg != "" {
 				slog.Warn(msg)
 			}
 			if msg := ocspURLWithoutResponderNotice(cfg); msg != "" {

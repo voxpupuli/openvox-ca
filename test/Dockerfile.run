@@ -1,7 +1,7 @@
 # Integration test fixture image, built from locally-compiled binaries.
 #
-# This is NOT the published runtime image -- see Dockerfile, Dockerfile.alpine
-# and Dockerfile.distroless for those. It exists to run the suites, and the packages
+# This is NOT the published runtime image -- see Dockerfile.alpine and
+# Dockerfile.distroless for those. It exists to run the suites, and the packages
 # below are chosen for what the suites invoke, not for what openvox-ca needs in
 # order to run. Keeping the two apart is what lets the published image be
 # minimised independently of the test suites (#316, under #292).
@@ -16,7 +16,7 @@
 # Integration test targets (mage test:integCompose, etc.) handle
 # both steps automatically.
 
-FROM quay.io/centos/centos:stream10
+FROM docker.io/library/debian:13.7-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 
 # Declared dependencies of the suites that run INSIDE this image. Six scripts
 # run here: test/integration-compose.sh, test/migration/migration-test.sh, the
@@ -30,10 +30,8 @@ FROM quay.io/centos/centos:stream10
 # `compose exec`, which is why `sh` matters below even though nothing in the
 # image's own scripts uses it.
 #
-#   bash             the interpreter every in-container script is invoked with,
-#                    and the owner of /bin/sh, which the three host-side
-#                    suites exec into this image
-#   coreutils-single basename cat chmod cp cut date dirname head ls mkdir
+#   bash             the interpreter every in-container script is invoked with
+#   coreutils        basename cat chmod cp cut date dirname head ls mkdir
 #                    mktemp rm seq sleep sort tail touch tr wc
 #   curl             HTTP API exercise, and the `curl` healthcheck of every
 #                    test/compose*.yml service built from this file that declares
@@ -42,6 +40,9 @@ FROM quay.io/centos/centos:stream10
 #                    than a list because an enumeration here was already wrong
 #                    once, and quantified over the services that have one so it
 #                    stays true when a seventh arrives
+#   dash             /bin/sh, which the three host-side suites exec into this
+#                    image, as do the CMD-SHELL healthchecks. What they run
+#                    through it is POSIX sh, not bash
 #   diffutils        `diff`, in integration-compose.sh's import assertion
 #   findutils        `find`, over the migrated signed-cert directory
 #   grep             assertions throughout
@@ -52,9 +53,8 @@ FROM quay.io/centos/centos:stream10
 #                    which use [ -f ] and grep
 #   sed              output normalisation in a handful of assertions
 #
-# `coreutils` is deliberately NOT requested: it conflicts with the
-# coreutils-single the base ships, and dnf fails the build rather than
-# substituting. coreutils-single provides every command listed against it.
+# Most of these are already in the base, several as Debian Essential packages.
+# They are requested anyway, for the reason below.
 #
 # This list is enforced at runtime, not taken on trust: test/fixture-commands.sh
 # carries the same set as commands and both in-container suites assert it before
@@ -66,33 +66,33 @@ FROM quay.io/centos/centos:stream10
 # "Fixture image command contract".
 #
 # Why these are declared at all, rather than left to the base: on 2026-09-10 the
-# rolling stream10 tag dropped diffutils, which no Dockerfile had ever asked
-# for, and both Compose legs failed. A dependency satisfied only by whatever the
-# base happens to include is not declared. Pinning the base is not the
-# alternative -- quay does not retain superseded CentOS Stream digests, which
-# renovate.json records as its reason for declining to pin it.
+# rolling CentOS Stream 10 tag this image was then built on dropped diffutils,
+# which no Dockerfile had ever asked for, and both Compose legs failed. A
+# dependency satisfied only by whatever the base happens to include is not
+# declared. The base is now pinned by digest, but Renovate moves that pin, and
+# a package can drop out of the base at any of those bumps.
 #
-# uid/gid 1000 pinned to match the CentOS Stream and Alpine published images
-# (see Dockerfile): `USER`
-# has to be numeric, and the local runtime image should present the same
-# identity as the one it stands in for.
+# uid/gid 65532 pinned to match the Alpine and distroless published images
+# (see Dockerfile.alpine): `USER` has to be numeric, and the local runtime
+# image should present the same identity as the one it stands in for.
 # The assertion below must be re-verified by hand when edited -- CI only ever
 # takes its passing branch. See docs/development/testing.md, "Container
 # identity guards".
-RUN dnf install -y bash coreutils-single curl diffutils findutils grep \
-        openssl python3 sed && \
-    dnf clean all && \
-    groupadd -g 1000 puppet && \
-    useradd -m -u 1000 -g 1000 puppet && \
-    { [ "$(id -u puppet):$(id -g puppet)" = "1000:1000" ] || \
-        { echo "puppet is $(id -u puppet):$(id -g puppet), not 1000:1000; USER below must match" >&2; exit 1; }; } && \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends bash coreutils curl dash \
+        diffutils findutils grep openssl python3 sed && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd -g 65532 puppet && \
+    useradd -m -u 65532 -g 65532 puppet && \
+    { [ "$(id -u puppet):$(id -g puppet)" = "65532:65532" ] || \
+        { echo "puppet is $(id -u puppet):$(id -g puppet), not 65532:65532; USER below must match" >&2; exit 1; }; } && \
     mkdir -p /etc/puppetlabs/puppet/ssl/ca /etc/openvox-ca /data && \
     chown -R puppet:puppet /etc/puppetlabs/puppet /etc/openvox-ca /data
 
 COPY bin/openvox-ca     /usr/local/bin/openvox-ca
 COPY bin/openvox-ca-ctl /usr/local/bin/openvox-ca-ctl
 
-USER 1000:1000
+USER 65532:65532
 EXPOSE 8140
 
 # NOTE: autosign is OFF by default. Set --autosign-config=true only in
