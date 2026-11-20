@@ -128,9 +128,10 @@ Not covered, so free to change in a minor or patch release:
 - **The default of a performance or capacity setting**: a cache or memory size,
   a timeout, a concurrency budget, or an interval that bounds only how fresh a
   report or a display is. The default of `ocsp_index_sync_interval_sec` is
-  excluded too: OCSP is opt-in, and that interval bounds how long a certificate
-  signed on another replica reads `unknown`, never `good`. Such a default moves when a better one
-  is found, and a value you set keeps its meaning. A release that moves a
+  excluded too: OCSP is opt-in, and the interval bounds no revocation, only how
+  long a certificate signed on another replica reads `unknown` and how long one
+  another replica pruned after its expiry keeps its last answer. Such a default
+  moves when a better one is found, and a value you set keeps its meaning. A release that moves a
   default a shipped mixin window is sized against says so in its release notes,
   so that an operator who overrides the window through `_config` can resize it.
   Every other default is covered and changes only in a major release. That includes one that grants access, accepts input
@@ -371,6 +372,14 @@ never name an image that does not exist.
    ```console
    $ git log --oneline --no-merges v0.8.0..origin/main   # or: origin/main, for the first tag
    ```
+
+   From 1.0.0, check for the notes [what the version number
+   promises](#what-the-version-number-promises) requires, and write any that
+   apply into the release's summary: a release that cannot be rolled out one
+   replica at a time, or must reach every replica before a feature is turned
+   on; a moved default that a shipped mixin window (a `*Window` key in
+   `mixin/config.libsonnet`) is sized against; and a break made under the
+   security-fix reservation.
 
 5. **Decide whether this is a pre-release.** See
    [Pre-1.0 and pre-release tags](#pre-10-and-pre-release-tags) below —
