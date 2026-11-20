@@ -5383,8 +5383,11 @@ type chartRenderCase struct {
 	// valuesYAML supplies values a --set cannot express, as on chartRejectCase:
 	// a key containing a dot, or one that has to keep surrounding whitespace.
 	valuesYAML string
-	wants      []string
-	notWants   []string
+	// release is the release name to render under; empty means openvox-ca,
+	// the chart's own name, which takes fullname's short branch.
+	release  string
+	wants    []string
+	notWants []string
 }
 
 // inlineCredentialSources are the files that declare the server's config keys,
@@ -5557,6 +5560,11 @@ data:
 // helmRender renders the chart, optionally including the post-install notes,
 // and optionally with an extra values file and extra helm arguments.
 func helmRender(notes bool, sets []string, valuesYAML string, extra ...string) (string, error) {
+	return helmRenderAs("openvox-ca", notes, sets, valuesYAML, extra...)
+}
+
+// helmRenderAs is helmRender under the given release name.
+func helmRenderAs(release string, notes bool, sets []string, valuesYAML string, extra ...string) (string, error) {
 	dir := chartDir
 	if notes {
 		tmp, err := os.MkdirTemp("", "openvox-ca-notes")
@@ -5574,7 +5582,7 @@ func helmRender(notes bool, sets []string, valuesYAML string, extra ...string) (
 		}
 	}
 
-	args := []string{"template", "openvox-ca", dir}
+	args := []string{"template", release, dir}
 	for _, s := range sets {
 		args = append(args, "--set", s)
 	}
@@ -5637,6 +5645,42 @@ func (Chart) Test() error {
 	}
 
 	renders := []chartRenderCase{
+		{
+			// What `helm upgrade` depends on, which releasing.md covers. The
+			// Deployment's selector is immutable, so a label added to
+			// openvox-ca.selectorLabels fails every upgrade; it is anchored on
+			// the key after it so that an addition fails here too. Renaming the
+			// claim orphans the CA's volume, and renaming the Deployment or the
+			// Service leaves the old ones behind. Changing any of these needs a
+			// major release.
+			name: "the upgrade surface: object names, the Deployment's selector and the claim",
+			sets: []string{tls, "persistence.enabled=true"},
+			wants: []string{
+				"kind: Deployment\nmetadata:\n  name: \"openvox-ca\"\n",
+				"kind: Service\nmetadata:\n  name: \"openvox-ca\"\n",
+				"kind: PersistentVolumeClaim\nmetadata:\n  name: \"openvox-ca\"\n",
+				"  selector:\n    matchLabels:\n      app.kubernetes.io/name: \"openvox-ca\"\n" +
+					"      app.kubernetes.io/instance: \"openvox-ca\"\n  strategy:\n",
+				"persistentVolumeClaim:\n            claimName: \"openvox-ca\"\n",
+			},
+		},
+		{
+			// The same surface under a release name that does not contain the
+			// chart's, which every other case cannot reach: fullname takes its
+			// <release>-<chart> branch, and the two selector labels differ, so
+			// swapping one for the other, or for fullname, shows.
+			name:    "the upgrade surface under another release name",
+			release: "ca",
+			sets:    []string{tls, "persistence.enabled=true"},
+			wants: []string{
+				"kind: Deployment\nmetadata:\n  name: \"ca-openvox-ca\"\n",
+				"kind: Service\nmetadata:\n  name: \"ca-openvox-ca\"\n",
+				"kind: PersistentVolumeClaim\nmetadata:\n  name: \"ca-openvox-ca\"\n",
+				"  selector:\n    matchLabels:\n      app.kubernetes.io/name: \"openvox-ca\"\n" +
+					"      app.kubernetes.io/instance: \"ca\"\n  strategy:\n",
+				"persistentVolumeClaim:\n            claimName: \"ca-openvox-ca\"\n",
+			},
+		},
 		{
 			name:  "an unset tag resolves to the unsuffixed (distroless) tag of the appVersion",
 			sets:  []string{tls, "image.tag=", "image.digest="},
@@ -8756,7 +8800,11 @@ config:
 	}
 
 	for _, tc := range renders {
-		out, err := helmRender(tc.notes, tc.sets, tc.valuesYAML)
+		release := tc.release
+		if release == "" {
+			release = "openvox-ca"
+		}
+		out, err := helmRenderAs(release, tc.notes, tc.sets, tc.valuesYAML)
 		if err != nil {
 			fmt.Printf("FAIL  %s\n      render failed: %v\n", tc.name, err)
 			failures++
