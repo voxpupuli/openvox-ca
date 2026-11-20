@@ -6,8 +6,11 @@
 # Run with `mage test:mixin` from the repository root, which renders the mixin
 # to the path below and then runs both promtool checks over it.
 #
-# These cover the rules whose firing behaviour is not obvious from reading the
-# PromQL:
+# Every shipped alert appears here at least once, because its name is public
+# API (docs/development/releasing.md) and a case is what notices a rename. The
+# plain thresholds at the top -- availability, CA certificate expiry, pending
+# requests -- are there for that alone. Beyond them, these cover the rules
+# whose firing behaviour is not obvious from reading the PromQL:
 #
 #   * OpenVoxCACRLStale, built from set operators (`or`, `unless`,
 #     `and on(...)`) like several rules below. Its two arms exist for
@@ -84,6 +87,129 @@ rule_files:
 evaluation_interval: 1m
 
 tests:
+
+  # The availability rules. ExporterDown is tested on its `up == 0` arm; a
+  # target missing from discovery altogether is its `absent()` arm.
+  - interval: 1m
+    name: an exporter that stops answering is down after the dwell
+    input_series:
+      - series: 'up{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1x10 0x20"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: OpenVoxCAExporterDown
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: OpenVoxCAExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openvox-ca
+              instance: ca-1:9140
+            exp_annotations:
+              summary: "OpenVox CA metrics exporter is down."
+              description: "Prometheus cannot scrape the OpenVox CA exporter on ca-1:9140. Certificate and CRL expiry can no longer be monitored."
+
+  - interval: 1m
+    name: a gather that keeps failing and a CA that is not ready both warn after their dwells
+    input_series:
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1x5 0x30"
+      - series: 'openvoxca_ca_ready{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1x5 0x30"
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: OpenVoxCAScrapeFailing
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: OpenVoxCAScrapeFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+            exp_annotations:
+              summary: "OpenVox CA exporter cannot read CA state."
+              description: "The OpenVox CA exporter on ca-1:9140 is failing to gather certificate metrics from storage (openvoxca_collector_scrape_success=0)."
+      - eval_time: 14m
+        alertname: OpenVoxCANotReady
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: OpenVoxCANotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+            exp_annotations:
+              summary: "OpenVox CA is not ready."
+              description: "The OpenVox CA on ca-1:9140 has been reporting not-ready (openvoxca_ca_ready=0) and cannot serve signing requests."
+
+  # The CA certificate's expiry: 20 days out warns, 6 days out pages and does
+  # not also warn, each after expiryFor. The common name comes from the info
+  # series, since the expiry series has none.
+  - interval: 1m
+    name: the CA certificate warns at 30 days and pages at 7
+    input_series:
+      - series: 'openvoxca_ca_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1728000x90"
+      - series: 'openvoxca_ca_certificate_info{job="openvox-ca",instance="ca-1:9140",common_name="Puppet CA: ca.example.com",serial="01",issuer="Puppet CA: ca.example.com"}'
+        values: "1x90"
+      - series: 'openvoxca_ca_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-2:9140"}'
+        values: "518400x90"
+      - series: 'openvoxca_ca_certificate_info{job="openvox-ca",instance="ca-2:9140",common_name="Puppet CA: ca2.example.com",serial="02",issuer="Puppet CA: ca2.example.com"}'
+        values: "1x90"
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: OpenVoxCACertificateExpiringSoon
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: OpenVoxCACertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              common_name: "Puppet CA: ca.example.com"
+            exp_annotations:
+              summary: "OpenVox CA certificate is approaching expiry."
+              description: "The CA certificate (Puppet CA: ca.example.com) on ca-1:9140 expires in 19d 22h 59m 0s."
+      - eval_time: 61m
+        alertname: OpenVoxCACertificateExpiringCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openvox-ca
+              instance: ca-2:9140
+              common_name: "Puppet CA: ca2.example.com"
+            exp_annotations:
+              summary: "OpenVox CA certificate expires imminently."
+              description: "The CA certificate (Puppet CA: ca2.example.com) on ca-2:9140 expires in 5d 22h 59m 0s. Re-keying the CA is disruptive; act now."
+
+  # A request waits pendingFor (1h) before it warns.
+  - interval: 1m
+    name: a certificate request pending past pendingFor warns
+    input_series:
+      - series: 'openvoxca_leaf_certificate_info{job="openvox-ca",instance="ca-1:9140",subject="node1.example.com",serial="",state="requested"}'
+        values: "1x90"
+      - series: 'openvoxca_leaf_certificate_info{job="openvox-ca",instance="ca-1:9140",subject="node2.example.com",serial="0A",state="signed"}'
+        values: "1x90"
+    alert_rule_test:
+      - eval_time: 59m
+        alertname: OpenVoxCACertificateRequestPending
+        exp_alerts: []
+      - eval_time: 61m
+        alertname: OpenVoxCACertificateRequestPending
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              subject: node1.example.com
+              state: requested
+            exp_annotations:
+              summary: "A certificate request has been pending too long."
+              description: "The request for node1.example.com on ca-1:9140 has been awaiting signing for more than 1h."
 
   # A bulk clean of thirty subjects is thirty destructive operations, not one,
   # and over the threshold of 25 in 5m. It fires while the burst is in the
