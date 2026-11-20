@@ -334,6 +334,11 @@ type CA struct {
 	// bound existed. Sized by initSigningBound.
 	signSlots chan struct{}
 
+	// autosignSlots bounds how many autosign executables this CA runs at once:
+	// a token per run, autosignConcurrency of them, made by New. Nil means
+	// unbounded, as for signSlots. See acquireAutosignSlot.
+	autosignSlots chan struct{}
+
 	// signWait is how long acquireSigningSlotOrShed waits for a slot before
 	// shedding. Set to ocspSigningWait by initSigningBound; overridden in tests
 	// so a spec that must observe a shed does not spend a real second doing it,
@@ -575,6 +580,7 @@ func New(s *storage.StorageService, autosignCfg AutosignConfig, hostname string)
 		serialIndex:       make(map[string]string),
 		ocspCache:         make(map[ocspCacheKey]ocspCacheEntry),
 		crlNotify:         make(chan struct{}, 1),
+		autosignSlots:     make(chan struct{}, autosignConcurrency),
 	}
 }
 

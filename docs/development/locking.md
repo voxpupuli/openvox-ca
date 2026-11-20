@@ -314,6 +314,31 @@ That costs nothing in ordering: a rejection and a `Generate` for the same name
 serialise on `subject:<name>`, which both take, in every process rather than
 merely within one. `c.mu` was never what stood between them.
 
+`SaveRequest` takes `c.mu` in turn, inside its subject lock and never across
+a wait: for the duplicate check and the save, and again for the autosign
+signature (with an executable policy, also for a first duplicate check ahead
+of the slot wait below). It releases it while the autosign policy decides. An executable policy may run
+for its whole timeout, and holding `c.mu` across it stalled every reader below
+— the revocation check on each authenticated request, the readiness probe,
+`certificate_statuses`, every metrics scrape and OCSP — behind any agent that
+submitted a CSR ([#664](https://github.com/voxpupuli/openvox-ca/issues/664)).
+The decision does not need `c.mu`: it is about one subject's request, and the
+subject lock that every write or delete of that request takes is held
+throughout. The signature still checks that the pending CSR is byte for byte
+the one the policy approved, for the case rule 6 describes, where that lock
+has lapsed.
+
+Holding `c.mu` across the policy also capped the process at one policy run at
+a time, as a side effect; without it, policies for different subjects run in
+parallel. So an executable policy takes one of `autosignConcurrency` (8)
+slots first, inside the subject lock and outside `c.mu`, and waits for one
+only until the request's context is done — a queue under `c.mu` would be the
+stall again. The wait comes before the CSR is saved, and a request that has
+to queue stops waiting while its deadline still covers the run's whole
+timeout and the signature, since all three share it. So a request that cannot
+be served leaves nothing behind for the agent's next submission to be refused
+as a duplicate of. Duplicates are refused before the queue. The cap is per process, so N replicas run up to N × 8.
+
 `c.mu` is held across the signing call itself **on the issuance paths**. Every
 one of them (`Sign`, `SignWithTTL`, `SaveRequest`'s autosign, `Renew`,
 `AutoRenew`, `RenewStored`, `Generate`, `ReconcileManaged`) calls
@@ -443,6 +468,16 @@ written as two.
   unauthenticated flood stalls every `c.mu` reader — the same process-wide stall
   [#197](https://github.com/voxpupuli/openvox-ca/issues/197) removed, reached
   by a different queue.
+- The **autosign slot** (`autosignSlots`, see
+  [autosign.go](../../internal/ca/autosign.go)) is the other bound, and its
+  rule runs the opposite way: `subject:<name>` → autosign slot, and the slot is
+  never acquired, held or waited on under `c.mu`. `SaveRequest` takes it inside
+  the subject lock, takes and releases `c.mu` for the save while holding it,
+  and gives it back before it takes `c.mu` again to sign. A full set of slots
+  is a queue, and a queue under `c.mu` is the stall
+  [#664](https://github.com/voxpupuli/openvox-ca/issues/664) removed; its wait
+  honours the request's context for the same reason the signing slot's does.
+  See Tier 3.
 - `CA.Init` inverts the order (it holds `c.mu` while acquiring **two**
   distributed locks in turn: `hmac-key`, via `InitHMAC` → `EnsureHMACKey` on a
   cold start, and then `bootstrap`). They are sequential, never nested. The
@@ -565,15 +600,20 @@ path — still provides no cross-replica guarantee anyway.
    check that justifies a mutation (duplicate cert? already revoked? CRL still
    fresh?) must run *inside* the same `WithLock` as the mutation, or it is a
    TOCTOU bug. `RefreshCRLIfDue` (check-then-re-sign under one lock) and
-   `SaveRequest` (check-then-save-then-autosign under one lock) are the
-   patterns to copy. [#173](https://github.com/voxpupuli/openvox-ca/issues/173)
+   `SaveRequest` (check-then-save-then-autosign under one subject lock) are
+   the patterns to copy. The rule is about the named lock: `SaveRequest`
+   releases `c.mu` while its autosign policy decides (see Tier 3), which is
+   sound because nothing its decision rests on is guarded by `c.mu`. [#173](https://github.com/voxpupuli/openvox-ca/issues/173)
    / [PR #186](https://github.com/voxpupuli/openvox-ca/pull/186) exist because
    a renewal once did such a re-check outside the lock.
 3. **Keep expensive, shared-state-free work outside the lock.** Key
    generation in `Generate` runs before any lock is taken (it no longer
    assembles a CSR at all — that round trip through the signing path was
    removed); parsing and validation in `Renew`/`SaveRequest` likewise. Only the
-   storage-touching tail belongs inside. The deliberate exception is the CA
+   storage-touching tail belongs inside. The same goes for work that needs one
+   lock but not another: `SaveRequest`'s autosign policy, which can run for
+   its executable's whole timeout, runs inside the subject lock and outside
+   `c.mu`. The deliberate exception is the CA
    signature *on the issuance paths*: `x509.CreateCertificate` runs under
    `c.mu` (see Tier 3), because the cache update it guards must be atomic with
    the issuance. The OCSP responder's signature is not an exception — it signs
@@ -1149,6 +1189,24 @@ inventory append inside an autosigning `SaveRequest`'s issuance, so it observes
 the lock being held from that append until `SaveRequest` returns, not across
 the check/save prefix ahead of it. Dropping `SaveRequest`'s `WithLock` still
 fails it, which is what makes `SaveRequest` pinned too.
+
+[autosignlock_test.go](../../internal/ca/autosignlock_test.go) pins what
+`SaveRequest` holds while its autosign policy decides, with an executable the
+spec keeps from deciding until it is released. Every `c.mu` reader it names
+must answer while the policy is undecided — the shape
+[ocsplockscope_test.go](../../internal/ca/ocsplockscope_test.go) uses for the
+signer, asserted while the policy is still running rather than after. A
+`DeleteRequest` for the same subject must wait until it has decided, which is
+the subject lock still being held across it. And a CSR replaced behind the
+lock while the policy runs must be refused at the signature rather than
+signed. Its reader table includes an operator's `Sign` for another subject,
+because the readers alone take `c.mu` for reading and would pass against a
+`SaveRequest` that read-held it across the policy.
+[autosignlock_internal_test.go](../../internal/ca/autosignlock_internal_test.go)
+pins the cap: one run more than it allows has to wait, every slot comes back
+after runs that deny, a wait for a slot ends with the request's context having
+saved nothing, a duplicate is refused without waiting, and a policy that
+starts no process takes no slot.
 
 `managedcert_reconcile_test.go` is pinned a second way of its own, which is
 worth copying where an operation is genuinely concurrent: four replicas over

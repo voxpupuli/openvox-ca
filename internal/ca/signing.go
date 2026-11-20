@@ -19,6 +19,7 @@
 package ca
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -450,7 +451,7 @@ func (c *CA) Sign(ctx context.Context, subject string) ([]byte, error) {
 	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		pem, err := c.signWithDuration(ctx, subject, 0)
+		pem, err := c.signWithDuration(ctx, subject, 0, nil)
 		if err != nil {
 			return err
 		}
@@ -473,7 +474,7 @@ func (c *CA) SignWithTTL(ctx context.Context, subject string, ttl time.Duration)
 	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		pem, err := c.signWithDuration(ctx, subject, ttl)
+		pem, err := c.signWithDuration(ctx, subject, ttl, nil)
 		if err != nil {
 			return err
 		}
@@ -483,11 +484,9 @@ func (c *CA) SignWithTTL(ctx context.Context, subject string, ttl time.Duration)
 	return out, err
 }
 
-// sign is the internal (unlocked) signing implementation using the default TTL.
-// c.mu must be held by the caller.
-func (c *CA) sign(ctx context.Context, subject string) ([]byte, error) {
-	return c.signWithDuration(ctx, subject, 0)
-}
+// errApprovedCSRChanged is returned when the CSR pending for a subject is no
+// longer the one its autosign policy approved. See signWithDuration.
+var errApprovedCSRChanged = errors.New("the pending CSR is not the one the autosign policy approved")
 
 // asciiLower lowercases A-Z and leaves every other byte alone, which is the
 // case-insensitivity DNS actually has. Deliberately not strings.ToLower: see
@@ -644,9 +643,11 @@ func (c *CA) checkSubjectAltNames(subject string, csr *x509.CertificateRequest) 
 }
 
 // signWithDuration is the actual internal signing implementation.
-// ttl=0 means use the default certValidity.
+// ttl=0 means use the default certValidity. approved, when not nil, is the CSR
+// an autosign policy judged, and the pending CSR must still be exactly it;
+// nil signs whatever is pending, as an operator's sign does.
 // c.mu must be held by the caller.
-func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Duration) ([]byte, error) {
+func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Duration, approved []byte) ([]byte, error) {
 	// Fail fast on an uninitialised CA (caller skipped Init(), or it failed)
 	// before we bother reading a CSR from storage, so Sign() returns a clear
 	// ErrNotInitialized rather than a misleading "CSR not found". The actual
@@ -664,6 +665,18 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 	csrPEM, err := c.Storage.GetCSR(ctx, subject)
 	if err != nil {
 		return nil, fmt.Errorf("CSR not found for %s: %w", subject, err)
+	}
+
+	// SECURITY: an autosign decision covers the request it was made on and no
+	// other. SaveRequest runs the policy holding only the subject lock, and
+	// every path that writes or deletes a CSR takes that lock, so this cannot
+	// differ while the lock holds. It is here for when the lock does not: a
+	// distributed lock can lapse under a process paused past its lease
+	// (docs/development/locking.md, rule 6), and the policy's run is the
+	// longest such window SaveRequest has.
+	// NIST 800-53: SI-7 (Software, Firmware, and Information Integrity)
+	if approved != nil && !bytes.Equal(csrPEM, approved) {
+		return nil, fmt.Errorf("refusing to autosign %s: %w", subject, errApprovedCSRChanged)
 	}
 
 	block, _ := pem.Decode(csrPEM)
@@ -1255,6 +1268,11 @@ func (c *CA) CleanMultiple(ctx context.Context, subjects []string) CleanResult {
 // one is refused with a *DuplicateCertError unless AllowDuplicateCerts is set
 // — see checkDuplicateLocked. Clean is what makes such a subject submittable
 // again.
+//
+// The caller must NOT hold c.mu. Lock ordering: the subject lock for the whole
+// call; an autosign slot inside it, for an executable policy; c.mu taken and
+// released in turn, never across the slot wait or the autosign policy -- see
+// docs/development/locking.md.
 func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bool, error) {
 	if err := ValidateSubject(subject); err != nil {
 		return false, err
@@ -1305,40 +1323,95 @@ func (c *CA) SaveRequest(ctx context.Context, subject string, csrPEM []byte) (bo
 	// autosign sequence. This prevents TOCTOU races where two concurrent
 	// SaveRequest calls (same or different replicas) both pass the duplicate
 	// check and both save, or both autosign.
+	//
+	// c.mu is held for the check and the save, and again for the signature,
+	// but not while the autosign policy runs: an executable may take up to its
+	// timeout, and everything that reads the CA's caches -- the revocation
+	// check on every authenticated request, the readiness probe, OCSP, the
+	// metrics scrape -- would wait for it (#664). The subject lock alone is
+	// what the decision needs: every path that writes or deletes this
+	// subject's CSR takes it, so what the policy approves is still what is
+	// pending when the signature is made. (Not every path that deletes its
+	// certificate does: CleanupExpiredCerts prunes expired ones under the crl
+	// lock and c.mu. The decision does not rest on the certificate.)
 	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()
 	var autosigned bool
 	lockErr := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-
-		// OpenVox Server's duplicate-certificate policy, ahead of the save and
-		// of autosigning as upstream runs it: refuse a subject that already
-		// has a pending CSR, a signed certificate or a revoked one, unless
-		// allow_duplicate_certs is set.
-		if err := c.checkDuplicateLocked(ctx, subject); err != nil {
-			return err
-		}
-
-		if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
-			return fmt.Errorf("failed to save CSR for %s: %w", subject, err)
-		}
-
-		shouldSign, err := CheckAutosign(c.AutosignConfig, csr, csrPEM)
-		if err != nil {
-			return fmt.Errorf("autosign check failed for %s: %w", subject, err)
-		}
-
-		if shouldSign {
-			slog.Debug("Autosigning CSR", "subject", subject)
-			if _, err := c.sign(ctx, subject); err != nil {
+		// OpenVox Server's duplicate-certificate policy, ahead of the save
+		// and of autosigning as upstream runs it: refuse a subject that
+		// already has a pending CSR, a signed certificate or a revoked one,
+		// unless allow_duplicate_certs is set. With save false it only
+		// checks.
+		checkDuplicate := func(save bool) error {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if err := c.checkDuplicateLocked(ctx, subject); err != nil {
 				return err
 			}
-			autosigned = true
+			if !save {
+				return nil
+			}
+			if err := c.Storage.SaveCSR(ctx, subject, csrPEM); err != nil {
+				return fmt.Errorf("failed to save CSR for %s: %w", subject, err)
+			}
 			return nil
 		}
 
-		slog.Debug("CSR saved, awaiting manual signing", "subject", subject)
+		// A policy that needs one of the autosign slots waits for it before
+		// the CSR is saved, and gives up while there is still time to run it
+		// and sign, so a request that cannot be served leaves nothing behind:
+		// the agent's next submission is a new one, judged afresh, rather
+		// than its own CSR refused as a duplicate.
+		// Duplicates are refused before the queue, since a waiting agent
+		// resubmits on every poll and has no business taking a place in it.
+		if c.autosignNeedsSlot() {
+			if err := checkDuplicate(false); err != nil {
+				return err
+			}
+		}
+		var shouldSign bool
+		if err := func() error {
+			release, err := c.acquireAutosignSlot(ctx)
+			if err != nil {
+				slog.Warn("No autosign slot came free before the request's deadline; nothing was saved",
+					"subject", subject, "limit", autosignConcurrency,
+					"remedy", "the agent submits again on its next run; if this recurs, the autosign policy is too slow for the rate at which agents enrol")
+				return fmt.Errorf("autosign check failed for %s: %w", subject, err)
+			}
+			defer release()
+
+			if err := checkDuplicate(true); err != nil {
+				return err
+			}
+			shouldSign, err = CheckAutosign(c.AutosignConfig, csr, csrPEM)
+			if err != nil {
+				return fmt.Errorf("autosign check failed for %s: %w", subject, err)
+			}
+			return nil
+		}(); err != nil {
+			return err
+		}
+
+		if !shouldSign {
+			slog.Debug("CSR saved, awaiting manual signing", "subject", subject)
+			return nil
+		}
+
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		slog.Debug("Autosigning CSR", "subject", subject)
+		if _, err := c.signWithDuration(ctx, subject, 0, csrPEM); err != nil {
+			if errors.Is(err, errApprovedCSRChanged) {
+				// The HTTP layer reports this as an internal failure and
+				// cannot say why; this is where the operator finds out.
+				slog.Error("Refusing to autosign: the pending CSR changed while the autosign policy ran",
+					"subject", subject,
+					"remedy", "the subject lock was lost during the run, so check the storage backend's lock lease and the CA process for long pauses; then review the pending CSR and sign or reject it")
+			}
+			return err
+		}
+		autosigned = true
 		return nil
 	})
 	if lockErr != nil {
