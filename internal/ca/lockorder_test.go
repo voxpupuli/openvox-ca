@@ -31,6 +31,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"runtime"
 	"sort"
 	"strconv"
@@ -42,6 +43,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/voxpupuli/openvox-ca/internal/storage"
+	"github.com/voxpupuli/openvox-ca/internal/testutil"
 )
 
 // This file automates docs/development/locking.md's **Lock ordering** section
@@ -84,8 +86,10 @@ import (
 //     passive: it records what the operations a spec calls actually do, so a
 //     `WithLock` site no spec reaches contributes no edge and could be inverted
 //     without failing anything here. The driven set is Init, Generate,
-//     SaveRequest, Sign, Renew, AutoRenew, RenewStored, Revoke and Clean here, plus ImportCA
-//     in caimportlock_test.go; it is a minority of
+//     SaveRequest, Sign, SignWithTTL, DeleteRequest, Renew, AutoRenew,
+//     RenewStored, Revoke, RevokeSerial, Clean, ReissueCRL, CleanupExpiredCerts,
+//     ReconcileSuperseded and ImportCA here, plus ImportCA again in
+//     caimportlock_test.go; it is a minority of
 //     the call sites, and the counting rule is `c.Storage.WithLock` in non-test
 //     `internal/ca` plus the sites in caImport.go that lock through a passed-in
 //     store. Derive the totals from the tree rather than trusting a number
@@ -93,10 +97,11 @@ import (
 //     more than one branch, and a literal count in a comment goes stale in a
 //     merge that conflicts with nothing and fails no spec. Untouched, among
 //     others:
-//     `SignWithTTL` and `DeleteRequest` (signing.go), `ImportCertificate`
-//     (importcert.go), `ImportCACertificate` (caImport.go),
-//     `RevokeSerial` (revoke.go), `CleanupExpiredCerts` (cleanup.go),
-//     `seedSupportingState` (init.go), and the CRL refresh paths (crl.go). Extending the coverage
+//     `ImportCertificate` (importcert.go), `ImportCACertificate` (caImport.go),
+//     `seedSupportingState` (init.go), GenerateWithOptions' ReplaceExisting
+//     path (generate.go), ReconcileManaged (managedcert.go), and the CRL
+//     refresh paths (RefreshCRLIfDue in crl.go, RefreshCRLChainFile in
+//     crlchainfile.go). Extending the coverage
 //     means driving the caller, not editing the table — which is the same kind
 //     of manual step renewrace_test.go needs, moved from "add an Entry" to "add
 //     an operation". The gain over the per-caller table is that ONE new
@@ -121,9 +126,12 @@ import (
 //     for that path, so the path is out of scope rather than misrepresented.
 //     locking.md covers it in prose, and the rule-9 spec below pins the part of
 //     it that has operator-visible consequences.
-//   - It asserts nothing about *which* operation took an edge. The per-caller
-//     question is renewrace_test.go's, and answering it twice in two shapes
-//     would mean two places to update for one change.
+//   - The edge table asserts nothing about *which* operation took an edge. The
+//     per-caller question is renewrace_test.go's, and answering it twice in two
+//     shapes would mean two places to update for one change. A different
+//     question is pinned here, by the per-mutation table further down: which
+//     lock classes each driven operation acquires, and how many times, because
+//     that is protocol (locking.md, rule 11).
 //
 // The boundary above is why the first spec is a control on the instrumentation
 // itself rather than on the CA.
@@ -204,10 +212,12 @@ var subjectClass = lockSubjectPrefix + "<name>"
 // One legitimate edge is knowingly absent, and this is where a future reader
 // should look before concluding something broke.
 //
-// PR #261 adds a `bootstrap` → `hmac-key` nesting: MigrateService holds
-// `bootstrap` across RebuildInventoryHMAC, which calls EnsureHMACKey. It is
-// unlisted because `hmac-key` does not exist on this branch's base, and listing
-// a name that no constant defines would be worse than omitting it.
+// MigrateService nests `bootstrap` → `hmac-key`: it holds `bootstrap` across
+// RebuildInventoryHMAC, which can call EnsureHMACKey. The table deliberately
+// does not list it. It keys pairs by lock name rather than by (store, name),
+// and MigrateService takes `bootstrap` on two stores, so locking.md carries
+// that path in prose and AGENTS.md ("Locking and concurrency") says this table
+// must not gain it.
 //
 // It does not fire here today, and the reason is narrower than "nothing in this
 // package migrates" — internal/ca DOES drive MigrateService, in
@@ -222,10 +232,10 @@ var subjectClass = lockSubjectPrefix + "<name>"
 //
 // The second condition is one fixture away from flipping: seedCA in
 // internal/storage/migrate_test.go deliberately seeds a 14-byte `hmac_key`, and
-// a spec here copying that shape would reach the nesting. If that happens, or
-// when #261 lands, the fix is to add the pair below together with the matching
-// line in locking.md's Lock ordering section — it is a legitimate edge, not a
-// regression, and the failure message will not know the difference.
+// a spec here copying that shape would reach the nesting, which the failure
+// message would report as a violation. It is not one, and the fix is not to
+// add the pair: keep migration fixtures off this observer, as the narrow scope
+// in point 1 already does.
 var allowedLockNesting = map[[2]string]string{
 	{subjectClass, lockNameCRL}: "locking.md, Lock ordering: `subject:<name>` → `crl` → `c.mu`. " +
 		"Taken by Revoke, Clean, Renew, AutoRenew, RenewStored, ReconcileManaged and GenerateWithOptions " +
@@ -411,6 +421,27 @@ func (o *lockOrderObserver) totalAcquisitions() int {
 	return total
 }
 
+// takenSince returns, per lock class, how many acquisitions have been made since
+// before, a copy of names taken earlier by snapshot.
+func (o *lockOrderObserver) takenSince(before map[string]int) map[string]int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := map[string]int{}
+	for name, n := range o.names {
+		if d := n - before[name]; d > 0 {
+			out[lockClass(name)] += d
+		}
+	}
+	return out
+}
+
+// snapshot copies the per-name acquisition counts, for takenSince.
+func (o *lockOrderObserver) snapshot() map[string]int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return maps.Clone(o.names)
+}
+
 func (o *lockOrderObserver) cmuViolations() []string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -500,6 +531,137 @@ var _ = Describe("The tier-1 lock ordering graph", func() {
 				"every ordering assertion in this file is vacuous. WithLock prefers the "+
 				"Locker tier: if FilesystemBackend has gained an AcquireLock, acquisitions "+
 				"now bypass AcquireSameHostLock and this wrapper must be moved to match.")
+	})
+
+	// Which named lock guards each mutation is covered by the 1.0.0 public API
+	// (releasing.md, item 4; locking.md, rule 11): replicas of two 1.x
+	// releases must exclude one another, so a mutation that moves to another
+	// lock, gains one or drops one is a major-release change. Each entry runs
+	// one operation against the fixture and requires exactly the lock classes
+	// locking.md's lock table assigns it, counted, since setup takes the same
+	// names. Two bootstrap mutations, ImportCA and a fresh store's Init (which
+	// also takes hmac-key), are specs of their own after this one, because each
+	// needs a fresh store.
+	//
+	// The mutations locking.md assigns locks to and this does not drive are
+	// listed in the file's header comment, under "The paths these specs drive":
+	// each needs a fixture of its own (a certificate from outside the
+	// inventory, a CA certificate to rotate in, a managed-certificate
+	// configuration, a CRL chain file) and is left to the specs beside it.
+	pendingCSR := func() []byte {
+		GinkgoHelper()
+		p, err := csrFor("node2.test")
+		Expect(err).NotTo(HaveOccurred())
+		return p
+	}
+
+	DescribeTable("takes exactly the named locks locking.md assigns each mutation",
+		func(setup func(), op func() error, want map[string]int) {
+			setup()
+			before := obs.snapshot()
+			Expect(op()).To(Succeed())
+			Expect(obs.takenSince(before)).To(Equal(want),
+				"which named lock guards a mutation is public API (docs/development/releasing.md, "+
+					"locking.md rule 11): changing it needs a major release, and locking.md's lock table "+
+					"changes with it")
+		},
+		// node2.test, which holds nothing yet: node1.test is signed in the
+		// fixture, so a CSR for it would be refused as a duplicate.
+		Entry("SaveRequest", func() {}, func() error {
+			_, err := myCA.SaveRequest(ctx, "node2.test", pendingCSR())
+			return err
+		}, map[string]int{subjectClass: 1}),
+		Entry("Sign", func() {
+			_, err := myCA.SaveRequest(ctx, "node2.test", pendingCSR())
+			Expect(err).NotTo(HaveOccurred())
+		}, func() error {
+			_, err := myCA.Sign(ctx, "node2.test")
+			return err
+		}, map[string]int{subjectClass: 1}),
+		Entry("DeleteRequest", func() {
+			_, err := myCA.SaveRequest(ctx, "node2.test", pendingCSR())
+			Expect(err).NotTo(HaveOccurred())
+		}, func() error { return myCA.DeleteRequest(ctx, "node2.test") }, map[string]int{subjectClass: 1}),
+		Entry("Generate", func() {}, func() error {
+			_, err := myCA.Generate(ctx, "node3.test", nil)
+			return err
+		}, map[string]int{subjectClass: 1}),
+		Entry("Revoke", func() {}, func() error { return myCA.Revoke(ctx, "node1.test") },
+			map[string]int{subjectClass: 1, lockNameCRL: 1}),
+		Entry("Clean", func() {}, func() error { return myCA.Clean(ctx, "node1.test") },
+			map[string]int{subjectClass: 1, lockNameCRL: 1}),
+		Entry("AutoRenew", func() {}, func() error {
+			_, err := myCA.AutoRenew(ctx, ownCrt)
+			return err
+		}, map[string]int{subjectClass: 1, lockNameCRL: 1}),
+		Entry("Renew", func() {}, func() error {
+			_, err := myCA.Renew(ctx, "node1.test", csrPEM, ownCrt)
+			return err
+		}, map[string]int{subjectClass: 1, lockNameCRL: 1}),
+		Entry("ReissueCRL", func() {}, func() error { return myCA.ReissueCRL(ctx) },
+			map[string]int{lockNameCRL: 1}),
+		Entry("SignWithTTL", func() {
+			_, err := myCA.SaveRequest(ctx, "node2.test", pendingCSR())
+			Expect(err).NotTo(HaveOccurred())
+		}, func() error {
+			_, err := myCA.SignWithTTL(ctx, "node2.test", time.Hour)
+			return err
+		}, map[string]int{subjectClass: 1}),
+		Entry("RevokeSerial", func() {}, func() error {
+			return myCA.RevokeSerial(ctx, strings.ToUpper(ownCrt.SerialNumber.Text(16)), true)
+		}, map[string]int{lockNameCRL: 1}),
+		Entry("RenewStored", func() {}, func() error {
+			_, err := myCA.RenewStored(ctx, "node1.test", nil)
+			return err
+		}, map[string]int{subjectClass: 1, lockNameCRL: 1}),
+		Entry("CleanupExpiredCerts", func() {}, func() error {
+			_, err := myCA.CleanupExpiredCerts(ctx, time.Hour)
+			return err
+		}, map[string]int{lockNameCRL: 1}),
+		// An empty pending list is read without the lock, by design (the job
+		// runs on every replica forever), so the sweep is pinned both ways.
+		Entry("ReconcileSuperseded, with nothing pending", func() {}, func() error {
+			_, err := myCA.ReconcileSuperseded(ctx)
+			return err
+		}, map[string]int{}),
+		Entry("ReconcileSuperseded, with a supersession pending", func() {
+			myCA.SupersedeAfter = time.Hour
+			_, err := myCA.AutoRenew(ctx, ownCrt)
+			Expect(err).NotTo(HaveOccurred())
+		}, func() error {
+			_, err := myCA.ReconcileSuperseded(ctx)
+			return err
+		}, map[string]int{lockNameCRL: 1}),
+	)
+
+	It("takes bootstrap and crl, once each, to import a CA", func() {
+		dir := GinkgoT().TempDir()
+		fresh := newLockOrderObserver(dir)
+		keyPEM, crtPEM, _, err := testutil.GenerateTestCA()
+		Expect(err).NotTo(HaveOccurred())
+		before := fresh.snapshot()
+		Expect(ImportCA(ctx, storage.NewWithBackend(fresh, dir+"/private"), crtPEM, keyPEM, nil)).To(Succeed())
+		Expect(fresh.takenSince(before)).To(Equal(map[string]int{lockNameBootstrap: 1, lockNameCRL: 1}),
+			"which named lock guards a mutation is public API (docs/development/releasing.md, "+
+				"locking.md rule 11): changing it needs a major release")
+	})
+
+	It("takes hmac-key and bootstrap, once each, to initialise a fresh store", func() {
+		// The bootstrap and hmac-key mutations: a CA's first Init mints the
+		// inventory's integrity key and then the CA itself. Covered like the
+		// table above.
+		dir := GinkgoT().TempDir()
+		fresh := newLockOrderObserver(dir)
+		c := New(storage.NewWithBackend(fresh, dir+"/private"), AutosignConfig{Mode: "off"}, "puppet.test")
+		c.CAKeyConfig = KeyConfig{Algo: KeyAlgoECDSA, Size: 256}
+		before := fresh.snapshot()
+		Expect(c.Init(ctx)).To(Succeed())
+		Expect(fresh.takenSince(before)).To(Equal(map[string]int{
+			// A literal: the name is storage's, unexported there, and the
+			// name itself is the cross-replica protocol.
+			"hmac-key": 1, lockNameBootstrap: 1,
+		}), "which named lock guards a mutation is public API (docs/development/releasing.md, "+
+			"locking.md rule 11): changing it needs a major release")
 	})
 
 	// The callers that nest two named locks, one Ginkgo entry each (two for
