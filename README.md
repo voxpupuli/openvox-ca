@@ -97,7 +97,15 @@ every release:
 $ docker pull ghcr.io/voxpupuli/openvox-ca:latest
 ```
 
-`latest` first appears with the 1.0.0 release; until then, pull `edge`.
+`latest` first appears with the 1.0.0 release; until then, pull `edge`. `edge`
+moves with every merge to `main`, and before 1.0.0 a merge can break things, so
+pin the digest you tested rather than the tag, and read what changed before you
+move it:
+
+```console
+$ docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/voxpupuli/openvox-ca:edge
+ghcr.io/voxpupuli/openvox-ca@sha256:…
+```
 
 Every tag comes in two variants: distroless (the unsuffixed tags, also
 published with a `-distroless` suffix) and Alpine (`-alpine`). See [container
