@@ -61,9 +61,12 @@ rule wins.
    work against), or that must reach every replica before a feature is turned
    on, says so in its release notes.
 5. **Metrics**, which are what to alert on. The name and label names of every
-   `openvoxca_*` series, and the label values the shipped alerts or the
-   documentation filter on, such as `reason="tampered"` and the `state` values.
-   Renaming or removing such a value is a breaking change; adding one is not.
+   `openvoxca_*` series, the label values the shipped alerts or the
+   documentation filter on, such as `reason="tampered"` and the `state` values,
+   and the condition each series and label value counts, as
+   [the metrics reference](../metrics.md) describes it. Renaming or removing
+   such a value, or changing what it counts, is a breaking change; adding one
+   is not.
 6. **The monitoring mixin's alert names and `_config` keys**, as published at a
    release tag. Routing and silences are keyed on the alert names, and an
    override on the `_config` key names: a renamed key would leave an override
@@ -82,16 +85,17 @@ rule wins.
    `/etc/puppetlabs/puppet/ssl/ca`. For the tarballs: `openvox-ca.service` and
    the `/usr/local/bin` path its `ExecStart` names. For every release: the
    artefact names (tarballs, packages, `checksums.txt`, the `.spdx.json` and
-   `.cdx.json` SBOMs, `provenance.sigstore.json`) and the signing identities and
-   provenance type the
+   `.cdx.json` SBOMs, `provenance.sigstore.json`), and the signing identities
+   and the SLSA provenance predicate type (`slsaprovenance1`) the
    [verification steps](../../README.md#verifying-what-you-downloaded) pin.
 9. **Log fields.** Structured field names, such as `client.cn` and
    `client.domain`; the field values the documentation tells you to match on,
    such as `reason="route requires admin access"`, the three shapes of
    `client.domain` and the `renewal` values; and the `event` value of each
-   audit record, from the closed set
-   [#666](https://github.com/voxpupuli/openvox-ca/issues/666) documents. Fields
-   are how you find and join the records behind an alert.
+   audit record, from the closed set the documentation lists. No record carries
+   one yet: [#666](https://github.com/voxpupuli/openvox-ca/issues/666) adds the
+   field and that list before 1.0.0. Fields are how you find and join the
+   records behind an alert.
 
 Not covered, so free to change in a minor or patch release:
 
@@ -112,14 +116,18 @@ Not covered, so free to change in a minor or patch release:
 - **The mixin's alert thresholds and durations.** They are tuning. Override
   them through the mixin's `_config`, whose key names are covered above, and
   vendor the mixin at the same release tag as the server you run.
-- **SBOM and attestation formats.** The SBOMs' document format and version,
-  hence the SPDX predicate type an image attestation carries, and the Sigstore
-  bundle format follow the tools that generate them and may change in any
-  release. Read `spdxVersion` from the document rather than hard-coding it.
+- **SBOM formats and the attestation bundle format.** The SBOMs' document
+  format and version, hence the SPDX predicate type an image's SBOM attestation
+  carries, and the Sigstore bundle format follow the tools that generate them
+  and may change in any release. Read `spdxVersion` from the document rather
+  than hard-coding it. The SLSA provenance predicate type item 8 names stays
+  covered.
 - **The default of a performance or capacity setting**: a cache or memory size,
   a timeout, a concurrency budget, or an interval that bounds only how fresh a
-  report or a display is. Such a default moves when a better one is found, and a
-  value you set keeps its meaning. Every other default is covered and changes
+  report or a display is, such as `ocsp_index_sync_interval_sec` (the mixin's
+  `ocspIndexSyncWindow` moves with its default, which is one more reason to
+  vendor the mixin at the server's tag). Such a default moves when a better one
+  is found, and a value you set keeps its meaning. Every other default is covered and changes
   only in a major release. That includes one that grants access, accepts input
   or relaxes a refusal (`allow_public_status`, `client_revocation_policy`,
   `allow_subject_alt_names`, the `insecure_*` settings, rate limits that refuse
@@ -129,8 +137,7 @@ Not covered, so free to change in a minor or patch release:
   which is breaking in either direction; and one that bounds how long a
   revocation, or tampering with the inventory, takes to be acted on or reported,
   such as `crl_sync_interval_sec`, `crl_chain_refresh_interval_sec`,
-  `client_crl_refresh_interval_sec`, `ocsp_index_sync_interval_sec`,
-  `superseded_cert_sweep_interval_sec`, `file_export`'s `interval_sec` and
+  `client_crl_refresh_interval_sec`, `superseded_cert_sweep_interval_sec`, `file_export`'s `interval_sec` and
   `inventory_verify_interval_sec`, where lengthening is breaking and shortening
   is not.
 

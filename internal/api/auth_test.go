@@ -813,8 +813,9 @@ var _ = Describe("Auth Middleware", func() {
 	// The denial log is the operator's only handle on a 403: the HTTP metrics
 	// carry no path label, so a tier change that breaks someone's tooling is
 	// otherwise a bare counter. docs/migrating-from-puppet-server.md tells them
-	// what to grep for, field by field, which makes these strings a contract
-	// rather than a convenience.
+	// what to grep for, field by field. The field names and values are covered
+	// by the public-API declaration (releasing.md); the message text is pinned
+	// as a runbook aid, which that declaration does not promise.
 	Context("denial logging", func() {
 		// captureLog installs a text handler over a buffer for the duration of
 		// the spec, as internal/ca/autosign_test.go does.

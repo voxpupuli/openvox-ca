@@ -285,7 +285,8 @@ the inventory, in-memory caches) must follow
   on the CA-import path and `bootstrap` → `hmac-key` on the migration path; all
   are one-way and `bootstrap` is never held with a subject lock. Lock names are a
   stable cross-replica protocol — never invent or rename one casually, and from
-  1.0.0 renaming one needs a major release.
+  1.0.0 renaming one, or changing which named lock guards a mutation, needs a
+  major release.
 - Holding two *different* named locks at once is protocol as well, not just the
   names. Such a pair must appear in locking.md's **Lock ordering** section and
   in `allowedLockNesting` (`internal/ca/lockorder_test.go`), added together, and
