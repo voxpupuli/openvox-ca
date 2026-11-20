@@ -341,16 +341,20 @@ mut 's/"suffix": "-alpine"/"suffix": ""/'                            # two unsuf
 
 The merge job's check that every tag got its alias copy is the same: CI never
 fails it. Run the tag-list part of its *Create multi-arch manifest* step with
-the alias line writing over the file instead of appending to it, and it should
-print `::error::expected 6 tags with the -distroless alias copies, but the list
-holds 3` and exit 1:
+each mutation below. The first writes the alias copies over the file instead
+of appending them, and should print `::error::expected 6 tags with the
+-distroless alias copies, but the list holds 3`. The second names the copies
+wrongly, keeping their count, and should print `::error::r/i:1.0.0 has no alias
+copy named r/i:1.0.0-distroless in the list`. Both exit 1:
 
 ```bash
 yq -r '.jobs.merge.steps[] | select(.name == "Create multi-arch manifest") | .run' \
     .github/workflows/container-images.yml | sed -n '1,/publishing:/p' > /tmp/tags.sh
-sed "/+ \$alias/s/>> \/tmp\/tags.txt/> \/tmp\/tags.txt/" /tmp/tags.sh > /tmp/tags-mut.sh
-DOCKER_METADATA_OUTPUT_JSON='{"tags":["r/i:1.0.0","r/i:1.0","r/i:latest"]}' \
-    ALIAS=-distroless bash /tmp/tags-mut.sh
+mut() { sed "$1" /tmp/tags.sh > /tmp/tags-mut.sh &&
+    DOCKER_METADATA_OUTPUT_JSON='{"tags":["r/i:1.0.0","r/i:1.0","r/i:latest"]}' \
+    ALIAS=-distroless bash /tmp/tags-mut.sh; }
+mut '/+ \$alias/s/>> \/tmp\/tags.txt/> \/tmp\/tags.txt/'   # copies overwrite
+mut "s/'.tags\[\] + \$alias'/'.tags[] + \"-\" + \$alias'/"    # copies misnamed
 ```
 
 ## Image build context check

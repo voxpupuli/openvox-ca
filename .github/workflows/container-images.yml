@@ -493,16 +493,25 @@ jobs:
           jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON" > /tmp/tags.txt
           if [ -n "$ALIAS" ]; then
             jq -r --arg alias "$ALIAS" '.tags[] + $alias' <<< "$DOCKER_METADATA_OUTPUT_JSON" >> /tmp/tags.txt
-            # Every computed tag, and its alias copy: the verify step below
-            # checks only what this file holds, so a short list would pass it.
+            # Every computed tag, and its alias copy, and nothing else: the
+            # verify step below checks only what this file holds, so a short
+            # list, or one whose copies are misnamed, would pass it. Each copy
+            # is looked for by name, built here in the shell rather than by the
+            # jq above, so a wrong expression there cannot also be the check.
             # CI only takes the passing branch; see docs/development/testing.md
-            # for the mutation to run whenever you edit this.
+            # for the mutations to run whenever you edit this.
             want=$(( 2 * $(jq '.tags | length' <<< "$DOCKER_METADATA_OUTPUT_JSON") ))
             got=$(grep -c . /tmp/tags.txt)
             if [ "$got" -ne "$want" ]; then
               echo "::error::expected $want tags with the $ALIAS alias copies, but the list holds $got"
               exit 1
             fi
+            while IFS= read -r tag; do
+              if ! grep -qxF -- "${tag}${ALIAS}" /tmp/tags.txt; then
+                echo "::error::$tag has no alias copy named ${tag}${ALIAS} in the list"
+                exit 1
+              fi
+            done < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
           fi
           echo "publishing:"; sed 's/^/  /' /tmp/tags.txt
 
