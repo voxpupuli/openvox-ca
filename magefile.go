@@ -1947,9 +1947,13 @@ var (
 // only, so an edit that moves one site and not the others passes all of them.
 // The fixture shares no data with a published image, but it is what the
 // compose suites run, so a fixture left on an old uid stops them exercising the
-// one shipped. The values are compared with each other rather than with a
-// literal, so moving the uid means editing the sites and not this check. Wired
-// into dev:check.
+// one shipped. The values are compared with each other first, so an edit that
+// moves one site names the site, and then with publishedImageUID: the uid the
+// images run as is covered by the 1.0.0 public API (releasing.md, item 8),
+// because operators set file ownership and security contexts by it. Moving it
+// everywhere at once is therefore a major-release change, which means editing
+// that constant, releasing.md and the docs that state it, not only the sites.
+// Wired into dev:check.
 func verifyImageUIDs() error {
 	alpine, err := os.ReadFile(alpineDockerfilePath)
 	if err != nil {
@@ -1969,6 +1973,10 @@ func verifyImageUIDs() error {
 	}
 	return verifyImageUIDsIn(alpine, distroless, values, fixture)
 }
+
+// publishedImageUID is the uid and gid the published images run the CA as.
+// See verifyImageUIDs: changing it needs a major release.
+const publishedImageUID = 65532
 
 // verifyImageUIDsIn is verifyImageUIDs over caller-supplied content, split out
 // so the refusal branches are testable without touching the real files.
@@ -2039,6 +2047,12 @@ func verifyImageUIDsIn(alpine, distroless, values, fixture []byte) error {
 				"each can read data another wrote, but they disagree: %s",
 				strings.Join(all, ", "))
 		}
+	}
+	if want := strconv.Itoa(publishedImageUID); sites[0].value != want {
+		return fmt.Errorf("the images and the chart run the CA as uid and gid %s, not the published %s: "+
+			"the uid is public API (docs/development/releasing.md), so moving it needs a major release, "+
+			"and publishedImageUID, releasing.md and the docs that state it change with it",
+			sites[0].value, want)
 	}
 	return nil
 }

@@ -2929,13 +2929,18 @@ var _ = Describe("verifyImageUIDs", func() {
 		Expect(verifyImageUIDsIn(goodAlpine, goodDistroless, goodValues, goodFixture)).To(Succeed())
 	})
 
-	// Compared with each other, not with a literal: moving every site together
-	// is the change the check must allow.
-	It("accepts the uid moving everywhere at once", func() {
+	// The sites are compared with each other and then with publishedImageUID,
+	// so moving every site together is refused: the uid is public API, and
+	// moving it needs a major release and a releasing.md update.
+	It("refuses the uid moving everywhere at once, which is a major-release change", func() {
+		// Consistent, so the agreement check passes; the published uid is what
+		// refuses it.
 		Expect(verifyImageUIDsIn(alpine("USER 4242:4242"),
 			distroless("ARG CA_UID=4242", "USER ${CA_UID}:${CA_UID}"),
 			values("  runAsUser: 4242\n", "  runAsGroup: 4242\n", "  fsGroup: 4242\n"),
-			fixture("USER 4242:4242"))).To(Succeed())
+			fixture("USER 4242:4242"))).To(MatchError(SatisfyAll(
+			ContainSubstring("not the published 65532"),
+			ContainSubstring("needs a major release"))))
 	})
 
 	DescribeTable("refuses one site that disagrees",
