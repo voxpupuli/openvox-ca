@@ -318,6 +318,55 @@ var _ = Describe("Collector", func() {
 		Expect(series(g, "openvoxca_clean_failures_total", "step", "delete_csr")).To(Equal(0.0))
 	})
 
+	// The label values the shipped mixin's alerts filter on are public API
+	// (releasing.md, item 5), and an alert that filters on a value the
+	// exporter has stopped emitting matches nothing and never fires, without
+	// a word. So every label="value" or label!="value" on an openvoxca_*
+	// series in mixin/alerts.libsonnet must be a value this collector emits
+	// for that series, against a CA holding every state. A rename on either
+	// side fails here: one in the exporter needs a major release, one in the
+	// mixin breaks the alert. Filters on another exporter's series, or on a
+	// series this collector does not emit, fail too, and want their own spec.
+	It("emits every label value the shipped alerts filter on", func() {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "mixin", "alerts.libsonnet"))
+		Expect(err).NotTo(HaveOccurred())
+		var code []string
+		for _, line := range strings.Split(string(raw), "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(line), "//") {
+				code = append(code, line)
+			}
+		}
+		selectorRE := regexp.MustCompile(`(?s)(openvoxca_[a-z_]+)\{([^}]*)\}`)
+		filterRE := regexp.MustCompile(`([a-z_]+)!?="([^"]+)"`)
+
+		type filter struct{ metric, label, value string }
+		var filters []filter
+		for _, sel := range selectorRE.FindAllStringSubmatch(strings.Join(code, "\n"), -1) {
+			for _, f := range filterRE.FindAllStringSubmatch(sel[2], -1) {
+				filters = append(filters, filter{sel[1], f[1], f[2]})
+			}
+		}
+		// The floor: the mixin filters on inventory reasons and leaf states
+		// today, so an extractor that finds nothing is broken, not satisfied.
+		Expect(filters).To(ContainElements(
+			filter{"openvoxca_inventory_verify_failures_total", "reason", "tampered"},
+			filter{"openvoxca_leaf_certificate_info", "state", "requested"},
+			filter{"openvoxca_leaf_certificate_not_after_timestamp_seconds", "state", "revoked"},
+		))
+
+		signCert("signed-node")
+		signCert("revoked-node")
+		Expect(myCA.Revoke(ctx, "revoked-node")).To(Succeed())
+		requestCert("pending-node")
+		g := gather(metrics.NewCollector(myCA))
+
+		for _, f := range filters {
+			Expect(g.findByLabels(f.metric, map[string]string{f.label: f.value})).NotTo(BeNil(),
+				"mixin/alerts.libsonnet filters %s on %s=%q, and the exporter emits no such series: "+
+					"the alert can never match it", f.metric, f.label, f.value)
+		}
+	})
+
 	It("reports CA certificate and CRL metrics", func() {
 		g := gather(metrics.NewCollector(myCA))
 
