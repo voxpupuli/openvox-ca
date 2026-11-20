@@ -2477,7 +2477,12 @@ after that is killed, the CSR stays pending for an operator, the agent gets a
 `500` that ends its run, and the CA logs the timeout at `ERROR`. Only the
 executable is killed, not processes it started, so a
 script should not leave children running
-([#660](https://github.com/voxpupuli/openvox-ca/issues/660)).
+([#660](https://github.com/voxpupuli/openvox-ca/issues/660)). While it runs, the
+CA holds its CA-wide lock, so every request authenticated with a client
+certificate and every readiness probe waits for it
+([#664](https://github.com/voxpupuli/openvox-ca/issues/664)). Keep the script
+fast, and read standard input to the end before doing anything slow, as the
+example's `csr_pem=$(cat)` does.
 
 ### The autosign executable's path
 

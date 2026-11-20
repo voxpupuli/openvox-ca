@@ -801,6 +801,10 @@ where a failure stops the CA, and again before every run. A plugin carried over
 from an existing deployment, such as one in a group-writable code tree, may
 need tightening before cutover. The rules, their two exemptions and the opt-out
 are in [the autosign executable's path](configuration.md#the-autosign-executables-path).
+A plugin also runs with a fixed `PATH` and none of the CA's other environment
+variables, so one that reads its settings from the environment, or calls a tool
+outside that `PATH` by its bare name, needs changing too; see
+[autosigning](configuration.md#autosigning).
 
 ### No `puppet cert` compatibility shim
 
