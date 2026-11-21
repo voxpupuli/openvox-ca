@@ -1988,11 +1988,8 @@ func (s *StorageService) verifyInventoryHMACLocked(ctx context.Context, hmacKey 
 	if !hmac.Equal(storedMAC, computedMAC) {
 		// Name the integrity scheme we computed under. A mismatch usually means
 		// genuine tampering, but it also fires when a backend is served under a
-		// different scheme than the stored value was written with. The one known
-		// way to get there is a ca_key_file/ca_cert_file server on a build of
-		// main from before v1.0.0-alpha1, which stored a whole-blob HMAC over
-		// what is now read as a hash chain. Surfacing the scheme lets an operator
-		// tell the two apart.
+		// different scheme than the stored value was written with. Surfacing the
+		// scheme lets an operator tell the two apart.
 		scheme := s.inventoryScheme()
 		slog.Warn("inventory HMAC mismatch; integrity check failed", "scheme", scheme,
 			"repair", inventoryRepairHint)
