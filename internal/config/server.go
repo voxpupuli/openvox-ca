@@ -280,11 +280,11 @@ type ServerConfig struct {
 	// one without a gap — which is what makes a certificate other parties are
 	// actively verifying safe to renew at all.
 	//
-	// It is also a deliberate weakening, and since it is the default it is one
-	// every deployment inherits on upgrade: for the length of the window the
+	// It is also a deliberate weakening, and since it is the default every
+	// deployment has it unless it sets 0: for the length of the window the
 	// replaced certificate — and, on the CSR-based re-key path, the replaced
-	// private key — is still a credential this CA accepts. Set 0 to restore the
-	// previous behaviour. What keeps the window bounded rather than open-ended
+	// private key — is still a credential this CA accepts. Set 0 to revoke the
+	// predecessor inside the renewal instead. What keeps the window bounded rather than open-ended
 	// is ca.CA.refuseIfSuperseded, which stops a certificate inside its window
 	// renewing itself into a fresh full-lifetime successor.
 	//

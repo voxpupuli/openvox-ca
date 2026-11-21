@@ -355,11 +355,11 @@ var ErrMetricsUnanswered = errors.New("an earlier request for the signer's metri
 //
 // The number has to clear the slowest thing the signer child can legitimately
 // be doing, which is not a local signature. Under ca_key_provider: openbao the
-// child's own Sign is a network round trip bounded at about 2x LoginTimeout
-// (10s by default, so ~20s). Two minutes leaves room for an operator who has
-// raised that substantially, while still turning an indefinite hang into an
-// error. An operator raising LoginTimeout past a minute should know this
-// ceiling exists.
+// child's own Sign is a network round trip bounded at about 2x the OpenBao
+// client's LoginTimeout, which no setting exposes and so stays at its 10s
+// default (~20s). Two minutes leaves ample room while still turning an
+// indefinite hang into an error. If LoginTimeout ever becomes configurable,
+// this ceiling has to move with it.
 const defaultRemoteSignTimeout = 2 * time.Minute
 
 // ErrSignTimeout is returned when the isolated signer did not answer within the

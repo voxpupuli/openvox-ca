@@ -112,7 +112,9 @@ const levelTrace = slog.Level(-8)
 // go_* and process_* series (metrics.RoleLabel). The first three are the
 // default process tree; roleSingleProcess is --single-process, where one process
 // both holds the key and serves the API, so neither child's name describes it.
-// The offline subcommands that log report their own command name instead.
+// The offline generate and rebuild-inventory-hmac report their own command
+// name instead; csr and import-ca-cert install no logger, so what they log goes
+// to stderr through Go's default logger with no role.
 const (
 	roleLauncher      = "launcher"
 	roleSigner        = "signer"
