@@ -426,6 +426,63 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(ContainSubstring("X509 CRL"))
 		})
 
+		Context("when the CRL cannot be read", func() {
+			// docs/api.md documents 404 for a missing CRL and 503 for a
+			// storage failure, where OpenVox Server answers 500. Before #688
+			// every read error answered 404, so an outage looked like a CA
+			// that had never published a CRL.
+			var (
+				backend *getFaultBackend
+				handler http.Handler
+			)
+
+			BeforeEach(func() {
+				ctx := context.Background()
+				dir := GinkgoT().TempDir()
+				backend = &getFaultBackend{Backend: storage.NewFilesystemBackend(dir), fail: map[string]bool{}}
+				store := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+				Expect(store.EnsureDirs(ctx)).To(Succeed())
+				Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+				Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+				Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+				Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+				Expect(store.TouchInventory(ctx)).To(Succeed())
+				faultCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+				Expect(faultCA.Init(ctx)).To(Succeed())
+				handler = api.New(faultCA).Routes()
+			})
+
+			getCRL := func() *httptest.ResponseRecorder {
+				rr := httptest.NewRecorder()
+				handler.ServeHTTP(rr, httptest.NewRequest("GET", "/certificate_revocation_list/ca", nil))
+				return rr
+			}
+
+			It("answers 404 when the CRL is missing", func() {
+				Expect(getCRL().Code).To(Equal(http.StatusOK), "unfaulted, the CRL is served")
+				Expect(backend.Delete(context.Background(), storage.KeyCRL)).To(Succeed())
+				rr := getCRL()
+				Expect(rr.Code).To(Equal(http.StatusNotFound))
+				Expect(rr.Body.String()).To(ContainSubstring("CRL not found"))
+			})
+
+			It("answers 503, with the cause in the log and not the body, when reading the CRL fails", func() {
+				Expect(getCRL().Code).To(Equal(http.StatusOK), "unfaulted, the CRL is served")
+				logBuf := &bytes.Buffer{}
+				orig := slog.Default()
+				slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+				DeferCleanup(func() { slog.SetDefault(orig) })
+
+				backend.fail[storage.KeyCRL] = true
+				rr := getCRL()
+				Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+				Expect(rr.Body.String()).To(ContainSubstring("could not read the CRL; see the server log"))
+				Expect(rr.Body.String()).NotTo(ContainSubstring("backend unavailable"),
+					"the cause can name storage paths, so it stays out of the response")
+				Expect(logBuf.String()).To(ContainSubstring("backend unavailable"))
+			})
+		})
+
 		It("serves the whole stored chain, not just this CA's own block", func() {
 			// The point of chain preservation is that the chain reaches an
 			// agent: Puppet's default certificate_revocation = chain makes the

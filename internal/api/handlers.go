@@ -803,7 +803,17 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 
 	crlPEM, err := s.CA.Storage.GetCRL(r.Context())
 	if err != nil {
-		http.Error(w, "CRL not found", http.StatusNotFound)
+		// 404 only when no CRL is stored. Any other error is a read the CA
+		// could not complete, and answering 404 for it would make a storage
+		// outage look like a CA that has never published a CRL. 503 is this
+		// API's answer for that, where OpenVox Server answers 500; the cause
+		// goes to the log, not the body, because it can name storage paths.
+		if errors.Is(err, fs.ErrNotExist) {
+			http.Error(w, "CRL not found", http.StatusNotFound)
+			return
+		}
+		slog.Warn("GET certificate_revocation_list/ca: could not read the CRL", "error", err)
+		http.Error(w, "could not read the CRL; see the server log", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
