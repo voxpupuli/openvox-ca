@@ -590,7 +590,8 @@ func truncateSAN(s string) string {
 // wherever it appears rather than only when it appears alone — a CSR asking for
 // its own name beside another is refused for the other one, not for its own.
 // That is distinct from PromoteCNToSAN, which adds that entry when a CSR
-// carries none; this tolerates it when the CSR carries it itself.
+// carries no DNS SAN, whatever other kinds it carries; this tolerates it when
+// the CSR carries it itself.
 func (c *CA) checkSubjectAltNames(subject string, csr *x509.CertificateRequest) error {
 	if c.AllowSubjectAltNames {
 		return nil
@@ -603,15 +604,10 @@ func (c *CA) checkSubjectAltNames(subject string, csr *x509.CertificateRequest) 
 	// Unlike upstream, which reads a CSR's SANs through a helper that
 	// enumerates only DNS and IP names — so an email- or URI-only CSR reads as
 	// having none and passes its gate untouched — this covers all four kinds
-	// crypto/x509 parses.
-	//
-	// That coverage is enforcement only, and stops at the short-circuit above.
-	// signWithDuration threads nothing but DNS names onto the certificate, so
-	// with the policy ON a CSR requesting an IP, email or URI SAN signs and
-	// loses it silently — #241's defect, not something this gate repairs. What
-	// four-kind coverage buys is that with the policy OFF such a request is
-	// refused rather than quietly trimmed. When #241 lands and all four kinds
-	// are carried through, this comment stops needing the qualification.
+	// crypto/x509 parses, which are the four signWithDuration copies onto the
+	// certificate. The set judged here and the set issued must stay the same:
+	// a kind copied but not judged would be issued on request with the policy
+	// off.
 	own := "DNS:" + asciiLower(subject)
 	disallowed := make([]string, 0, len(requested))
 	for _, name := range requested {
@@ -720,12 +716,24 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		return nil, err
 	}
 
-	dnsNames := csr.DNSNames
+	// Every SAN the CSR carries reaches the certificate, all four kinds, as
+	// OpenVox Server's create-agent-extensions copies the CSR's SAN extension
+	// whole. checkSubjectAltNames has already judged the full set, so nothing
+	// arrives here that policy refused.
+	sans := subjectAltNames{
+		DNSNames:       csr.DNSNames,
+		IPAddresses:    csr.IPAddresses,
+		EmailAddresses: csr.EmailAddresses,
+		URIs:           csr.URIs,
+	}
 	// RFC 2818 §3.1: TLS clients match the server name against SANs, not the
-	// CN. When the CSR carries no SANs and promotion is enabled, add the CN as
-	// a DNS SAN so that the issued certificate works with modern TLS stacks.
-	if c.PromoteCNToSAN && len(dnsNames) == 0 && csr.Subject.CommonName != "" {
-		dnsNames = []string{csr.Subject.CommonName}
+	// CN. When the CSR carries no DNS SAN and promotion is enabled, add the CN
+	// as one so that the issued certificate works with modern TLS stacks. Keyed
+	// on DNS names rather than on every kind, deliberately: a certificate
+	// holding only an IP SAN still cannot be verified by hostname, and
+	// upstream adds the CN unconditionally.
+	if c.PromoteCNToSAN && len(sans.DNSNames) == 0 && csr.Subject.CommonName != "" {
+		sans.DNSNames = []string{csr.Subject.CommonName}
 	}
 
 	// SECURITY: Copy Puppet OID extensions from the CSR, excluding
@@ -740,7 +748,7 @@ func (c *CA) signWithDuration(ctx context.Context, subject string, ttl time.Dura
 		}
 	}
 
-	certPEM, err := c.issueLeafLocked(ctx, subject, csr.Subject, csr.PublicKey, subjectAltNames{DNSNames: dnsNames}, extraExtensions, nil, ttl)
+	certPEM, err := c.issueLeafLocked(ctx, subject, csr.Subject, csr.PublicKey, sans, extraExtensions, nil, ttl)
 	if err != nil {
 		return nil, err
 	}

@@ -664,6 +664,10 @@ nodes will fail to sign until you set:
 allow_subject_alt_names: true
 ```
 
+With it on, every SAN a CSR requests — DNS, IP, email or URI — is issued, as
+OpenVox Server issues them. An agent's `dns_alt_names = IP:10.0.0.1` reaches the
+certificate as an IP SAN.
+
 A request refused for its alt names stays queued and, as upstream, refuses the
 node's resubmissions, so once the setting is changed, sign it
 (`openvox-ca-ctl sign --certname <name>`) or reject it

@@ -395,7 +395,10 @@ no fingerprints, subject alternative names or authorisation extensions, does
 not group the lines under headings, and has no `--format json`
 ([#648](https://github.com/voxpupuli/openvox-ca/issues/648)). A script that
 needs those reads them from `GET /puppet-ca/v1/certificate_statuses/all`
-instead (see [docs/api.md](api.md#certificate-statuses-list)).
+instead (see [docs/api.md](api.md#certificate-statuses-list)), which lists a
+certificate's DNS and IP SANs but not its email or URI ones: those are only in
+the certificate or request itself (see [subject alternative names requested by a
+CSR](configuration.md#subject-alternative-names-requested-by-a-csr)).
 
 ## Offline subcommands on the server binary
 

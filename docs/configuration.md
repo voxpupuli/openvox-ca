@@ -150,7 +150,7 @@ ca_subject_province: ""
 ca_path_length: -1    # -1 = unconstrained, 0 = leaf certs only, N = N levels of intermediates
 ca_validity_days: 0   # 0 = built-in default (~5 years); positive integer overrides
 leaf_validity_days: 0 # 0 = built-in default (~5 years); positive integer overrides
-promote_cn_to_san: true # add the CN as a DNS SAN when a CSR carries none (RFC 2818); first issuance only
+promote_cn_to_san: true # add the CN as a DNS SAN when a CSR carries no DNS SAN (RFC 2818); first issuance only
 allow_subject_alt_names: false # let a CSR request SANs of its own; see "Subject alternative names requested by a CSR"
 allow_duplicate_certs: false # let a CSR replace a pending one or queue beside a certificate; see "Duplicate certificate requests"
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
@@ -2613,10 +2613,11 @@ refused at signing time.
 A CSR whose only SAN is a DNS entry equal to its own certname is always allowed,
 whatever the setting: agents send that to comply with RFC 2818, and it asks for
 nothing the certname does not already grant. That is distinct from
-`promote_cn_to_san`, which *adds* that entry when a CSR carries none. That
-applies on first issuance only: a [renewal](api.md#certificate-renewal), re-key
-included, keeps the SANs its certificate already has, so a certificate issued
-without one gains it only by being cleaned and signed again.
+`promote_cn_to_san`, which *adds* that entry when a CSR carries no DNS SAN —
+whether or not it carries IP, email or URI ones. That applies on first issuance
+only: a [renewal](api.md#certificate-renewal), re-key included, keeps the SANs
+its certificate already has, so a certificate issued without one gains it only
+by being cleaned and signed again.
 
 Turn it on when nodes legitimately need extra names — a load-balanced service
 answering to several hostnames, say — and prefer a narrow autosign policy
@@ -2626,14 +2627,22 @@ alongside it:
 allow_subject_alt_names: true
 ```
 
-Note what turning it on does *not* yet buy. Only DNS names are carried onto an
-issued certificate today, so a CSR requesting an IP, email or URI SAN is signed
-with the setting on and that entry is silently dropped — the certificate comes
-back without it, and the mismatch surfaces later as a failed TLS verification
-rather than as a refusal at signing time. With the setting off the same request
-is refused outright, which is the louder of the two failures.
-[#241](https://github.com/voxpupuli/openvox-ca/issues/241) adds the
-carry-through; this caveat goes when it lands.
+With the setting on, every SAN the CSR requests is issued as requested — DNS,
+IP, email and URI alike — as OpenVox Server issues them. With it off, a request
+for any of the four is refused, apart from the certname exemption above. There
+is nothing in between: to accept some names and not others, leave the setting
+on and decide in an [autosign policy executable](#autosigning), which receives
+the whole CSR on stdin. A CSR whose IP SAN is an IPv4-mapped IPv6 address
+(`::ffff:192.0.2.1`, 16 bytes on the wire) is refused when it is submitted,
+whatever the setting, because Go's X.509 parser rejects it; agents that write
+the address as plain IPv4 are unaffected.
+
+Before signing a request by hand, know that neither review view shows every
+name it will be issued with. `GET /certificate_status/{subject}` lists only its
+DNS and IP SANs, as OpenVox Server's does, and `openvox-ca-ctl list` shows no
+SANs at all. To see email and URI entries too, fetch the request itself with
+`GET /certificate_request/{subject}` and read it with `openssl req -noout
+-text`.
 
 The refusal is deliberately terse to the requester: it names no entries, so a
 client cannot use it to discover which names the CA would issue. The specifics

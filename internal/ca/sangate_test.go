@@ -25,6 +25,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -40,6 +41,16 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
+
+// uriStrings renders URI SANs for comparison, as ca.IPAddressStrings does
+// addresses.
+func uriStrings(uris []*url.URL) []string {
+	out := make([]string, 0, len(uris))
+	for _, u := range uris {
+		out = append(out, u.String())
+	}
+	return out
+}
 
 // These exercise the AllowSubjectAltNames policy, which decides whether a
 // submitted CSR may name anything beyond its own certname. The gate lives on
@@ -308,6 +319,137 @@ var _ = Describe("Subject alternative name policy", func() {
 			certPEM, err := myCA.Sign(ctx, "web06")
 			Expect(err).NotTo(HaveOccurred())
 			Expect(parse(certPEM).DNSNames).To(ConsistOf("web06.example.com", "alt.example.com"))
+		})
+
+		// The gate judges all four kinds, so with it on all four must reach
+		// the certificate: OpenVox Server copies a CSR's SAN extension whole,
+		// and a kind judged but not issued is signed and then silently missing,
+		// which surfaces only as a TLS verification failure later.
+		It("carries IP, email and URI SANs onto the certificate alongside DNS ones", func() {
+			spiffe, err := url.Parse("spiffe://example.com/ns/default/sa/web10")
+			Expect(err).NotTo(HaveOccurred())
+			submit("web10", sanCSR("web10", func(t *x509.CertificateRequest) {
+				t.DNSNames = []string{"web10.example.com"}
+				t.IPAddresses = []net.IP{net.ParseIP("10.0.0.1"), net.ParseIP("2001:db8::1")}
+				t.EmailAddresses = []string{"ops@example.com"}
+				t.URIs = []*url.URL{spiffe}
+			}))
+
+			certPEM, err := myCA.Sign(ctx, "web10")
+			Expect(err).NotTo(HaveOccurred())
+			cert := parse(certPEM)
+			Expect(cert.DNSNames).To(ConsistOf("web10.example.com"))
+			Expect(ca.IPAddressStrings(cert.IPAddresses)).To(ConsistOf("10.0.0.1", "2001:db8::1"))
+			Expect(cert.EmailAddresses).To(ConsistOf("ops@example.com"))
+			Expect(uriStrings(cert.URIs)).To(ConsistOf("spiffe://example.com/ns/default/sa/web10"))
+		})
+
+		// One kind at a time, so a regression dropping a single kind names it.
+		// Each also pins promotion beside that kind: with no DNS SAN requested
+		// the CN is added whatever else the CSR carries, not only beside an IP.
+		DescribeTable("carries a SAN of each non-DNS kind when it is the only one requested",
+			func(mutate func(*x509.CertificateRequest), issued func(*x509.Certificate) []string, want string) {
+				submit("node-y", sanCSR("node-y", mutate))
+				certPEM, err := myCA.Sign(ctx, "node-y")
+				Expect(err).NotTo(HaveOccurred())
+				cert := parse(certPEM)
+				Expect(issued(cert)).To(ConsistOf(want))
+				Expect(cert.DNSNames).To(ConsistOf("node-y"),
+					"the CN must still be promoted when the CSR requests no DNS SAN")
+			},
+			Entry("an IP address",
+				func(t *x509.CertificateRequest) { t.IPAddresses = []net.IP{net.ParseIP("192.0.2.20")} },
+				func(c *x509.Certificate) []string { return ca.IPAddressStrings(c.IPAddresses) },
+				"192.0.2.20"),
+			Entry("an email address",
+				func(t *x509.CertificateRequest) { t.EmailAddresses = []string{"node-y@example.com"} },
+				func(c *x509.Certificate) []string { return c.EmailAddresses },
+				"node-y@example.com"),
+			Entry("a URI",
+				func(t *x509.CertificateRequest) {
+					u, err := url.Parse("urn:example:node-y")
+					Expect(err).NotTo(HaveOccurred())
+					t.URIs = []*url.URL{u}
+				},
+				func(c *x509.Certificate) []string { return uriStrings(c.URIs) },
+				"urn:example:node-y"),
+		)
+
+		It("still promotes the CN when the CSR carries several SAN kinds but no DNS one", func() {
+			// promote_cn_to_san keys on DNS names, not on every kind: a
+			// certificate holding only IP or email SANs cannot be verified by
+			// hostname, and OpenVox Server adds the CN whatever else is there.
+			// The table above covers each kind alone; this is the mix.
+			submit("web11", sanCSR("web11", func(t *x509.CertificateRequest) {
+				t.IPAddresses = []net.IP{net.ParseIP("10.0.0.11")}
+				t.EmailAddresses = []string{"web11@example.com"}
+			}))
+
+			certPEM, err := myCA.Sign(ctx, "web11")
+			Expect(err).NotTo(HaveOccurred())
+			cert := parse(certPEM)
+			Expect(cert.DNSNames).To(ConsistOf("web11"))
+			Expect(ca.IPAddressStrings(cert.IPAddresses)).To(ConsistOf("10.0.0.11"))
+			Expect(cert.EmailAddresses).To(ConsistOf("web11@example.com"))
+		})
+
+		It("carries them through the autosign path too", func() {
+			autoCA := ca.New(store, ca.AutosignConfig{Mode: "true"}, "puppet.test")
+			autoCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+			autoCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
+			autoCA.AllowSubjectAltNames = true
+			Expect(autoCA.Init(ctx)).To(Succeed())
+
+			signed, err := autoCA.SaveRequest(ctx, "auto02", sanCSR("auto02", func(t *x509.CertificateRequest) {
+				t.IPAddresses = []net.IP{net.ParseIP("10.0.0.2")}
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(signed).To(BeTrue(), "autosign: true should have signed the request")
+
+			certPEM, err := store.GetCert(ctx, "auto02")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ca.IPAddressStrings(parse(certPEM).IPAddresses)).To(ConsistOf("10.0.0.2"))
+		})
+
+		It("keeps them through renewal once the policy is turned off again", func() {
+			// The renewal paths already carried all four kinds; what was
+			// missing was a CSR-issued certificate that held them. Renewal
+			// must not lose them, nor consult the policy that admitted them.
+			submit("web12", sanCSR("web12", func(t *x509.CertificateRequest) {
+				t.IPAddresses = []net.IP{net.ParseIP("10.0.0.12")}
+				t.EmailAddresses = []string{"web12@example.com"}
+			}))
+			certPEM, err := myCA.Sign(ctx, "web12")
+			Expect(err).NotTo(HaveOccurred())
+			original := parse(certPEM)
+			myCA.AllowSubjectAltNames = false
+
+			renewed, err := myCA.AutoRenew(ctx, original)
+			Expect(err).NotTo(HaveOccurred())
+			cert := parse(renewed)
+			Expect(ca.IPAddressStrings(cert.IPAddresses)).To(ConsistOf("10.0.0.12"))
+			Expect(cert.EmailAddresses).To(ConsistOf("web12@example.com"))
+		})
+
+		It("never issues an IPv4-mapped IP SAN, because the CSR carrying one is refused at submission", func() {
+			// crypto/x509 refuses to parse a 16-byte ::ffff:a.b.c.d SAN, in a
+			// certificate and in a request alike, so a CSR asking for one never
+			// reaches the queue and cannot produce a certificate this CA, and
+			// every Go TLS peer, would then be unable to read. The extension is
+			// built by hand because CreateCertificateRequest would write the
+			// address as 4 bytes.
+			mapped, err := asn1.Marshal([]asn1.RawValue{{
+				Class: asn1.ClassContextSpecific, Tag: 7, Bytes: net.ParseIP("::ffff:192.0.2.11").To16(),
+			}})
+			Expect(err).NotTo(HaveOccurred())
+			csrPEM := sanCSR("web13", func(t *x509.CertificateRequest) {
+				t.ExtraExtensions = []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 17}, Value: mapped}}
+			})
+
+			_, err = myCA.SaveRequest(ctx, "web13", csrPEM)
+			Expect(err).To(MatchError(ContainSubstring("IPv4-mapped")))
+			_, err = store.GetCSR(ctx, "web13")
+			Expect(errors.Is(err, fs.ErrNotExist)).To(BeTrue(), "the refused CSR must not be queued")
 		})
 	})
 

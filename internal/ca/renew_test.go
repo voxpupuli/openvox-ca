@@ -462,8 +462,9 @@ var _ = Describe("CA AutoRenew", func() {
 	})
 
 	It("carries the original certificate's DNS SANs forward unchanged", func() {
-		// A CSR-issued openvox-ca cert carries only DNS SANs, so this asserts
-		// DNSNames; the IP/email/URI SAN types are covered by the next spec.
+		// This CSR requests no SANs, so its only one is the promoted CN and
+		// this asserts DNSNames; the IP/email/URI SAN types are covered by the
+		// next spec, and on a CSR-issued certificate by sangate_test.go.
 		csrPEM, _ := buildCSR("autorenew-sans-node")
 		_, err := myCA.SaveRequest(ctx, "autorenew-sans-node", csrPEM)
 		Expect(err).NotTo(HaveOccurred())
@@ -479,9 +480,11 @@ var _ = Describe("CA AutoRenew", func() {
 	})
 
 	It("carries non-DNS SANs (IP, email, URI) forward, e.g. from a legacy-CA cert", func() {
-		// openvox-ca only ever issues DNS SANs itself, but a leaf imported
-		// from a legacy CA can carry IP/email/URI SANs that services depend
-		// on. Mint such a cert directly and prove auto-renewal preserves them.
+		// A leaf imported from a legacy CA can carry IP/email/URI SANs that
+		// services depend on, as can a managed certificate or one signed from a
+		// CSR with allow_subject_alt_names on. Mint such a cert directly, which
+		// needs neither setting nor configuration, and prove auto-renewal
+		// preserves them.
 		now := time.Now().UTC()
 		uri, err := url.Parse("spiffe://puppet.test/node/legacy-sans-node")
 		Expect(err).NotTo(HaveOccurred())
