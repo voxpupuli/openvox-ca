@@ -131,12 +131,13 @@ memory_reserve_launcher: ""  # launcher's fixed share; "" = built-in default (8M
 memory_reserve_signer: ""    # signer's fixed share; "" = built-in default (24MiB)
 memory_budget_percent: 0     # share of a cgroup ceiling the tree may claim; 0 = default (90)
 # Key generation options (applied only when bootstrapping a new CA or generating leaf certs).
+# Either half of a pair may be set alone. A size with no algorithm means RSA of
+# that size; an algorithm with no size takes that key's default below, so
+# `leaf_key_algo: rsa` alone is RSA 2048 and `ca_key_algo: rsa` alone RSA 4096.
+# A size the chosen algorithm does not accept is refused at startup.
 ca_key_algo: ""       # "rsa" (default) or "ecdsa"
 ca_key_size: 0        # RSA: 2048/3072/4096 (default 4096); ECDSA: 256/384/521 (default 256)
 leaf_key_algo: ""     # "rsa" (default) or "ecdsa"
-# Either key may be set without the other: a size with no algorithm means that
-# size with the default algorithm (RSA). A size the chosen algorithm does not
-# accept is refused at startup.
 leaf_key_size: 0      # RSA: 2048/3072/4096 (default 2048); ECDSA: 256/384/521 (default 256)
 # CA certificate subject fields (applied only when bootstrapping a new CA).
 ca_subject_org: ""

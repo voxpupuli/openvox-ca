@@ -112,10 +112,7 @@ func (c *CA) HasCAKey(ctx context.Context) (bool, error) {
 // ErrKeyProviderKeyNotFound so the caller can name the flag that would create
 // it.
 func (c *CA) LoadOrCreateCAKey(ctx context.Context, create bool) (crypto.Signer, error) {
-	keyCfg := c.CAKeyConfig
-	if keyCfg.Algo == "" {
-		keyCfg = DefaultCAKeyConfig
-	}
+	keyCfg := c.caKeyConfig()
 
 	if c.KeyProvider != nil {
 		key, err := c.KeyProvider.Load(ctx)

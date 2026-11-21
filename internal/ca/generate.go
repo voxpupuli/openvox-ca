@@ -139,8 +139,8 @@ type GenerateOptions struct {
 // signature deliberately has no extension parameter: an HTTP caller must not be
 // able to reach the AuthGrants seam, and cannot without a source change here.
 //
-// The key algorithm and size are controlled by CA.LeafKeyConfig; defaults
-// to RSA 2048 when not set.
+// The key algorithm and size are controlled by CA.LeafKeyConfig, resolved by
+// leafKeyConfig; RSA 2048 when not set.
 //
 // Returns ErrCertExists (wrapped) if a valid (non-revoked) certificate already
 // exists for subject.
