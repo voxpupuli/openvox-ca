@@ -1451,9 +1451,13 @@ func newRootCmd() *cobra.Command {
 			}
 			defer func() { _ = rt.Close() }()
 			store := rt.Store
-			if err := store.EnsureDirs(ctx); err != nil {
-				return fmt.Errorf("failed to create CA directories: %w", err)
-			}
+			// No EnsureDirs here: CA.Init's first storage step is EnsureDirs,
+			// and nothing before it needs the store prepared. In the frontend
+			// role the signer has done it by the time the handshake returns,
+			// which is what makes the GetCACert below safe. A call here as well
+			// ran the schema check twice on every start, each under its own
+			// migration budget, and had the frontend contend with the signer
+			// for the migration lock before it even began waiting for it.
 
 			// Frontend-mode signer handshake: connect to the signer, then read
 			// the CA cert through the storage service so an overlay-mounted
