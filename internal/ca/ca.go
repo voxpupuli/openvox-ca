@@ -423,17 +423,20 @@ type CA struct {
 	// via the metrics exporter (openvoxca_crl_sync_failures_total) for alerting.
 	crlSyncFailures atomic.Uint64
 
-	// supersedeFailures counts failures to schedule or carry out a delayed
-	// revocation: a supersession the renewal path could not record, a
-	// pending-revocation list that could not be read or parsed, a sweep pass
-	// that could not take the CRL lock or write the list back, and each pass
-	// that left an entry unrevoked or discarded one whose serial it could never
-	// revoke. A pass counts once however many entries it failed on. Distinct from crlUpdateFailures, which counts failures to
-	// amend the CRL — an entry can be lost here without the CRL ever being
-	// touched. While it rises, a certificate that a renewal replaced may still
-	// be a valid credential, and on a lost entry nothing else records that it
-	// should not be. Exposed via the metrics exporter
-	// (openvoxca_supersede_failures_total) for alerting.
+	// supersedeFailures counts failures to retire a certificate a renewal or a
+	// managed certificate's reissue replaced: an immediate revocation that did
+	// not happen, whatever stopped it, including the revocation of a
+	// certificate a managed reissue signed and could not store, a supersession
+	// the renewal path could not record, a pending-revocation list that could not be read or parsed, a
+	// sweep pass that could not take the CRL lock or write the list back, and
+	// each pass that left an entry unrevoked or discarded one whose serial it
+	// could never revoke. A pass counts once however many entries it failed on.
+	// Distinct from crlUpdateFailures, which counts failures to amend the CRL —
+	// an entry can be lost here without the CRL ever being touched, and an
+	// immediate revocation counts in both when it reached the CRL work. While
+	// it rises, a certificate that was replaced may still be a valid
+	// credential, and nothing else records that it should not be. Exposed via
+	// the metrics exporter (openvoxca_supersede_failures_total) for alerting.
 	supersedeFailures atomic.Uint64
 
 	// cleanFailures counts the steps of a Clean that failed, one counter per

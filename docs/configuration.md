@@ -786,8 +786,8 @@ look:
 > (`AutoRenew: failed to retire replaced certificate`) and the renewal is allowed
 > to stand, with no retry. So a chain file that is unreadable at that moment does
 > not block the renewal — it skips that one revocation permanently, and the
-> superseded certificate stays valid until it expires. `openvoxca_crl_update_failures_total`
-> counts it. Grep for that message alongside a rising
+> superseded certificate stays valid until it expires. `openvoxca_supersede_failures_total`
+> counts it, and `OpenVoxCASupersedeFailing` fires on it. Grep for that message alongside a rising
 > `openvoxca_crl_chain_refresh_failures_total`: the warning names the serial, and
 > revoking by subject will not reach it — the replacement is what makes it a
 > renewal, so `revoke --certname` retires that instead. Retire it with
@@ -2989,10 +2989,9 @@ Alert on these records directly, for example with a Loki
 `openvox-ca generate` runs offline with no `/metrics`, and the signer has no
 listener and is the process that judges the frontend, so the frontend cannot
 be trusted to count its refusals. The other conditions the documentation tells
-you to watch for have a [metric](metrics.md), except two that are still
-log-only for now: a best-effort immediate revocation after a renewal or a
-managed reissue that fails once, and a managed reissue that keeps failing. A
-future audit event follows the same `<subject>.<action>` form.
+you to watch for have a [metric](metrics.md), except one that is still
+log-only for now: a managed reissue that keeps failing. A future audit event
+follows the same `<subject>.<action>` form.
 
 ## Graceful shutdown
 
