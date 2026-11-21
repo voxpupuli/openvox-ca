@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -146,16 +147,27 @@ var _ = Describe("which process the exporter's go_* and process_* series describ
 				Skip("process_* for another PID is read from /proc, which only Linux has")
 			}
 			exporter.AddProcess("signer", sibling())
-			mfs := gather()
+
+			// A process that has only just exec'd can read 0 resident: the
+			// kernel sums its per-CPU RSS counters lazily, so /proc/<pid>/stat
+			// lags the first pages it touches. Measured on Linux 7.0, 363 of
+			// 2000 fresh `sleep`s read 0 at once and every one read non-zero
+			// within 2ms (#683). So gather until the sibling reports memory,
+			// bounded, so a collector that never reads it still fails here.
+			var mfs []*dto.MetricFamily
+			Eventually(func(g Gomega) {
+				mfs = gather()
+				sib, ok := gaugeFor(mfs, "process_resident_memory_bytes", "signer")
+				g.Expect(ok).To(BeTrue(), "no process_resident_memory_bytes for the sibling")
+				g.Expect(sib).To(BeNumerically(">", 0))
+			}).WithTimeout(2 * time.Second).Should(Succeed())
 			Expect(roleValues(mfs, "process_resident_memory_bytes")).To(ConsistOf("frontend", "signer"))
 
-			// sleep(1) is a few hundred KiB resident; a Go test binary is tens
-			// of MiB. Equal values would mean the sibling's collector read this
+			// sleep is a few hundred KiB resident; a Go test binary is tens of
+			// MiB. Equal values would mean the sibling's collector read this
 			// process instead.
 			own, _ := gaugeFor(mfs, "process_resident_memory_bytes", "frontend")
-			sib, ok := gaugeFor(mfs, "process_resident_memory_bytes", "signer")
-			Expect(ok).To(BeTrue())
-			Expect(sib).To(BeNumerically(">", 0))
+			sib, _ := gaugeFor(mfs, "process_resident_memory_bytes", "signer")
 			Expect(sib).To(BeNumerically("<", own))
 		})
 
