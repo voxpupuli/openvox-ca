@@ -106,8 +106,8 @@ func signLeafWithAuthRole(subject, role string) []byte {
 }
 
 // signLeafWithIPs builds a leaf certificate for subject signed directly by the
-// cached test CA, carrying the given IP address SANs beside a DNS SAN — which
-// the normal signing path never produces, since it copies DNS SANs only.
+// cached test CA, carrying the given IP address SANs beside a DNS SAN. Minted
+// directly so the fixture needs no CSR signed with allow_subject_alt_names on.
 // Returns the certificate PEM, ready for ImportCertificate.
 func signLeafWithIPs(subject string, ips ...net.IP) []byte {
 	return signLeaf(&x509.Certificate{

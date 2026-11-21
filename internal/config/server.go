@@ -230,7 +230,7 @@ type ServerConfig struct {
 	// when TLS is configured.
 	InsecureAllowPlainHTTPGenerate bool `yaml:"insecure_allow_plain_http_generate"`
 
-	// PromoteCNToSAN adds the CN as a DNS SAN when the CSR has no SANs (default: true).
+	// PromoteCNToSAN adds the CN as a DNS SAN when the CSR has no DNS SAN (default: true).
 	PromoteCNToSAN bool `yaml:"promote_cn_to_san"`
 	// AllowSubjectAltNames lets a submitted CSR request Subject Alternative
 	// Names of its own (default: false, matching OpenVox Server's

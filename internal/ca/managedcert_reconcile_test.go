@@ -784,7 +784,7 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		// managed certificate, and both are asserted here rather than left to
 		// the call graph: AllowSubjectAltNames is what a *request* may ask for,
 		// and PromoteCNToSAN adds the Common Name when a request carries no
-		// names. A managed certificate's names come from a file an
+		// DNS name. A managed certificate's names come from a file an
 		// administrator wrote, so neither applies -- and both are set to the
 		// value that would change the outcome if they did.
 		myCA.AllowSubjectAltNames = false
