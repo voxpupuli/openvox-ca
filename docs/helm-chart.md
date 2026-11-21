@@ -746,15 +746,14 @@ than 5.8, a `subPath` mount into a root-owned directory (not under
 `configMount`, itself a ConfigMap volume root) is what keeps the check on: see
 [the autosign executable's path](configuration.md#the-autosign-executables-path).
 
-A plugin runs while the CA holds its CA-wide lock, so the readiness probe waits
-for it. The chart leaves that probe at the Kubernetes defaults (a one-second
-timeout, every 10 seconds, three failures), so a plugin that runs for 20 seconds
-or more can take the pod out of the Service until it finishes. A plugin that
-leaves a process holding standard input unread can hold the lock with no limit,
-even after the plugin itself exits, so read standard input to the end first.
-Keep it fast; see [autosigning](configuration.md#autosigning),
-[#664](https://github.com/voxpupuli/openvox-ca/issues/664) and
-[#660](https://github.com/voxpupuli/openvox-ca/issues/660).
+A plugin does not hold up the readiness probe, the agents' authenticated
+requests or the metrics scrape while it runs, but each CSR it is deciding waits
+for it, and each CA process runs at most 8 at once, so a slow plugin delays
+enrolment for every node that submits behind it. The CA kills a plugin after
+30 seconds, along with anything it started that has not left its process group.
+Keep it fast, and read standard input to the end first; see
+[autosigning](configuration.md#autosigning) and
+[concurrent autosign runs](configuration.md#concurrent-autosign-runs).
 
 ## Monitoring
 
