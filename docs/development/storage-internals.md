@@ -56,14 +56,13 @@ itself, which nothing else would write again.
     └── <sha256(name)>.lock         not a logical key   0660
 ```
 
-`ca_key` is the one key whose path is resolved rather than fixed. It is
-`ca_key.pem`, where OpenVox Server keeps it, unless only `private/ca_key.pem`
-exists, in which case that file is read and written in place. The location is
-decided from the files' existence alone (`caKeyLocation` in
-`internal/storage/filesystem.go`), so `Exists` and the startup permission check
-never read the key, which the frontend process must not hold. Both present with
-different contents is `ErrCAKeyConflict` from `Get`, `Put` and `Delete`, the
-operations that handle the key itself (`checkCAKeyConflict`).
+`ca_key` is `ca_key.pem`, where OpenVox Server keeps it. `Exists` and the
+startup permission check (`CAKeyFile` in `internal/storage/filesystem.go`)
+decide from the file's existence alone and never read the key, which the
+frontend process must not hold. A `ca_key.pem` that is a symlink leading nowhere
+is `ErrCAKeyLinkBroken` from `Get`, `Put`, `Delete` and `Exists`, never "no
+key": read as absent, it would have `migrate` skip the key and `Init` take the
+no-key branches.
 
 `locks/` is the exception to the mapping above: its files are not blobs and have
 no logical key, so `Get`/`Put`/`List`/`Migrate` never touch them. They are the

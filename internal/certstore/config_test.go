@@ -343,9 +343,10 @@ managed_certs:
 
 		It("refuses the certname \"ca\", naming the entry and the remedy", func() {
 			// No key for "ca" is generated on any path, because the one
-			// written to private/ would be the CA's own (#495). A managed
-			// certificate's key goes to its own store, but "ca" is refused
-			// here too, at configuration load rather than on the first pass.
+			// written to private/ would be taken for the CA's own (#495). A
+			// managed certificate's key goes to its own store, but "ca" is
+			// refused here too, at configuration load rather than on the
+			// first pass.
 			err := decode(`
 managed_certs:
   - certname: ca
