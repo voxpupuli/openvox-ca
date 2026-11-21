@@ -93,13 +93,13 @@ flight — see its row below.
 
 | Lock name | Serialises | Taken by |
 | --- | --- | --- |
-| `bootstrap` | First-run CA generation; seeding supporting state (CRL/inventory/serial) for a mounted cert+key; importing a CA certificate, with or without its key; whole-store migration | `CA.Init`, `CA.seedSupportingState`, `ImportCACertificate`, `ImportCAWithOptions` (and `ImportCA`, which calls it), `storage.MigrateService` (which reuses the name deliberately so a migration and a bootstrapping server exclude each other) |
+| `bootstrap` | First-run CA generation; seeding supporting state (CRL/inventory/serial) for a mounted cert+key; creating a CA key with no certificate yet (`csr --create-key`); importing a CA certificate, with or without its key; whole-store migration | `CA.Init`, `CA.seedSupportingState`, `CA.LoadOrCreateCAKey`, `ImportCACertificate`, `ImportCAWithOptions` (and `ImportCA`, which calls it), `storage.MigrateService` (which reuses the name deliberately so a migration and a bootstrapping server exclude each other) |
 | `crl` | Every CRL read-modify-write (read entries → re-sign → write), **and** the pending-supersession list's read-modify-write, which has to be mutual with the revocations it schedules | `Revoke`, `RevokeSerial`, `ReissueCRL`, `RefreshCRLIfDue`, `CleanupExpiredCerts`, `RefreshCRLChainFile` (the `crl_chain_file` job, on every replica on a timer), `ImportCAWithOptions` (and `ImportCA`, which calls it), `ImportCACertificate`, `ReconcileSuperseded`, the revoke step inside `Clean` and `GenerateWithOptions`, and the retire step inside `Renew`, `AutoRenew`, `RenewStored`, `ReconcileManaged` — "retire" because only those four can defer it to the list; `Clean` and `GenerateWithOptions` always revoke inline. `ReconcileManaged` also revokes inline on one arm — a store write that fails *after* signing retires the certificate it just issued immediately, since nothing ever saw that key and no overlap is owed to anybody |
 | `subject:<name>` | The whole lifecycle of one subject: duplicate check or evict/save CSR/sign/delete CSR/renew/import/clean/revoke/generate/reconcile | `SaveRequest`, `Sign`, `SignWithTTL`, `DeleteRequest`, `Renew`, `AutoRenew`, `RenewStored`, `Clean`, `ImportCertificate`, `Revoke`, `Generate`/`GenerateWithOptions`, `ReconcileManaged` |
 | `hmac-key` | Generating and persisting the inventory HMAC key when none is usable — a cold start, or a stored blob of the wrong length | `StorageService.EnsureHMACKey`, reached from `CA.Init` → `InitHMAC`, from `MigrateService` → `RebuildInventoryHMAC`, and from the offline `openvox-ca rebuild-inventory-hmac` → `RebuildInventoryHMAC` (only where it has to mint a key, i.e. a stored blob of the wrong length). Deliberately **not** `bootstrap`: the migration already holds that name across the rebuild, and `WithLock` is not reentrant |
 | `sql-schema-migrate` | One schema-migration run, so two replicas starting at once do not migrate concurrently (SQL backends only) | `SQLBackend.EnsureReady` |
 | `inventory-decompose` | One-time legacy inventory blob conversion (etcd and redis backends) on the first start after upgrading | `EtcdBackend.decomposeLegacyInventory` and `RedisBackend.decomposeLegacyInventory`, from `EnsureReady` |
-| `capability-probe` | Nothing. Acquired and released immediately by `StorageService.SupportsDistributedLocking` to find out whether this backend coordinates locks across processes at all | The offline `openvox-ca generate` and `rebuild-inventory-hmac` pre-flights. The name sits deliberately outside every namespace above so a probe can never contend with an operation in flight |
+| `capability-probe` | Nothing. Acquired and released immediately by `StorageService.SupportsDistributedLocking` to find out whether this backend coordinates locks across processes at all | `StorageService.AcquireInstanceLock`, so every taker of `store-instance` below unless it already knows the answer, plus the offline `openvox-ca generate` and `rebuild-inventory-hmac` pre-flights, which pass their answer on when they got one. The name sits deliberately outside every namespace above so a probe can never contend with an operation in flight |
 | `store-instance` | The store as a whole, for as long as a process is running against it. Taken **outside `WithLock`**, through `StorageService.AcquireInstanceLock` → `InstanceLocker`, so it never reaches a cross-node lock and needs no ordinal: it applies only where `SupportsDistributedLocking` is false, and those backends have no SQL advisory lock to reach. Acquired without waiting, and refused with the holder's identity rather than a timeout | The server (the launcher, or a single-process server — never the signer or frontend children, which are inside an instance that already holds it), `openvox-ca-ctl setup`/`import`/`migrate`, and the offline `csr`/`generate`/`import-ca-cert`/`rebuild-inventory-hmac` (which takes it only on its `--yes-re-bless` path, never to report). Like `capability-probe` the name sits outside every namespace above, so the lock proving an instance is alone can never contend with that instance's own work |
 
 How each backend provides the distributed lock (a summary — the full per-backend
@@ -415,16 +415,17 @@ loop.
 ## Lock ordering
 
 Nested acquisition follows a fixed order. The request paths share one chain, and
-there is a second, narrower nesting on the CA-import path:
+there are two further, narrower nestings, on the CA-import and migration paths:
 
 ```text
 subject:<name>  →  crl  →  c.mu  →  (StorageService internal mutexes)
 bootstrap       →  crl                    (the CA-import paths only)
+bootstrap       →  hmac-key               (MigrateService only; see below)
 ```
 
-Both are one-way. `bootstrap` and `subject:<name>` are never held together at
-all, so the two lines do not compose into a single chain — which is why they are
-written as two.
+All are one-way. `bootstrap` and `subject:<name>` are never held together at
+all, so the lines do not compose into a single chain — which is why they are
+written separately.
 
 - The pending-supersession list deliberately has **no lock name of its own**.
   Its read-modify-write must exclude the sweep that rewrites it — an append
@@ -575,9 +576,9 @@ The costs of this choice are deliberate and documented:
 
 - A replica's in-memory caches learn about other replicas' activity only when
   this process next writes them: `cachedCRL` staleness for authentication is
-  [#171](https://github.com/voxpupuli/openvox-ca/issues/171) (being fixed by
-  [PR #182](https://github.com/voxpupuli/openvox-ca/pull/182)'s background
-  sync), and `serialIndex`/`ocspCache` staleness for OCSP was
+  [#171](https://github.com/voxpupuli/openvox-ca/issues/171) (fixed by
+  `SyncCRLCache`, a background poll on `crl_sync_interval_sec`), and
+  `serialIndex`/`ocspCache` staleness for OCSP was
   [#183](https://github.com/voxpupuli/openvox-ca/issues/183), now reconciled by
   `SyncSerialIndex` on `ocsp_index_sync_interval_sec` — see the entry below for
   the lock discipline that pass uses, which is not this section's.
@@ -666,8 +667,8 @@ path — still provides no cross-replica guarantee anyway.
    [sql.go](../../internal/storage/sql.go), which is how those backends keep
    singleton locks out of the hashed key space — see rule 11. "Can reach a SQL
    backend" is the test, not "is a singleton": `inventory-decompose` is a
-   singleton that only the etcd backend takes, so reserving it would claim a
-   key nothing uses.
+   singleton that only the etcd and Redis backends take, so reserving it would
+   claim a key nothing uses.
 
    For a name declared in `internal/storage` this is **enforced**, not just
    asked for: `SQLLockNameConstantsAreRegistered` walks the package source for
@@ -676,9 +677,10 @@ path — still provides no cross-replica guarantee anyway.
    that check — `internal/storage` cannot import `internal/ca` — so for those
    this rule is the only thing standing.
 8. **SQL pool sizing:** on PostgreSQL/MySQL every *held* distributed lock pins
-   one pooled connection. A single in-flight
-   `Revoke`/`Clean`/`Renew`/`AutoRenew`/`RenewStored` needs at least three
-   connections at once — one for the `subject:<name>` lock,
+   one pooled connection. A single in-flight `Revoke`, `Clean`, `Renew`,
+   `AutoRenew`, `RenewStored`, `ReconcileManaged` or `GenerateWithOptions`
+   (any path that nests `subject:<name>` → `crl`, listed under Lock ordering)
+   needs at least three connections at once — one for the `subject:<name>` lock,
    a second for the nested `crl` lock, and a third for the reads/writes inside
    the revocation step — so `sql_max_open_conns` must be at least 3 per
    concurrently mutating request. `Revoke` joined that list when it took the
@@ -1047,11 +1049,11 @@ state when the document was last updated and is not guaranteed exhaustive.
   `SupportsDistributedLocking`/`SupportsAtomicInventory`, and still tells the
   operator to stop the server: neither is made true by the same-host tier, and
   the inventory append above is why.
-- [#171](https://github.com/voxpupuli/openvox-ca/issues/171) — `cachedCRL` is
+- ~~[#171](https://github.com/voxpupuli/openvox-ca/issues/171) — `cachedCRL` is
   per-replica, so authentication and renewal keep accepting a certificate
-  revoked elsewhere until this process re-signs the CRL.
-  [PR #182](https://github.com/voxpupuli/openvox-ca/pull/182) fixes it with a
-  background poll (monotonic in the CRL number, deliberately lock-free).
+  revoked elsewhere until this process re-signs the CRL.~~ Fixed:
+  `SyncCRLCache` re-reads the stored CRL every `crl_sync_interval_sec`,
+  monotonic in the CRL number and taking no distributed lock.
 - ~~[#183](https://github.com/voxpupuli/openvox-ca/issues/183) — OCSP's
   `serialIndex` is built once at startup, so certificates issued on another
   replica answer `unknown`; the `ocspCache` half can even keep serving a
@@ -1259,7 +1261,8 @@ is how the two came to disagree before.
 
 That per-caller coverage is not the whole graph, and cannot be: it is a
 hand-maintained list of callers — three `Entry` lines plus the standalone
-`Revoke` spec beside them — so a further caller that nests two locks, or a
+`Revoke` spec beside them, and the `ReconcileManaged` spec in its own file —
+so a further caller that nests two locks, or a
 first caller that nests two *different* names, is protected by nothing until
 somebody extends it.
 [lockorder_test.go](../../internal/ca/lockorder_test.go) covers the graph
@@ -1335,7 +1338,7 @@ would:
   one. Out of scope here rather than misrepresented; rule 9's operator-visible
   half is pinned by the spec above.
 
-`GenerateWithOptions` is a fifth holder of both locks, on its `ReplaceExisting`
+`GenerateWithOptions` also holds both locks, on its `ReplaceExisting`
 path. Neither mechanism above reaches it: it is not in the per-caller fixture,
 and the edge observer does not drive it either — that spec's setup calls
 `Generate`, which takes `subject:<name>` alone and so records no pair. It is a

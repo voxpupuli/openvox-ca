@@ -42,8 +42,8 @@ itself, which nothing else would write again.
 ├── ca_pub.pem                      (KeyCAPubKey)
 ├── ca_crl.pem                      (KeyCRL)
 ├── serial                          (KeySerial)
-├── inventory.txt                   (KeyInventory)
-├── .inventory.hmac                 (KeyInventoryHMAC)
+├── inventory.txt                   (KeyInventory)      0600
+├── .inventory.hmac                 (KeyInventoryHMAC)  0600
 ├── superseded.json                 (KeySuperseded)     0600
 ├── private/
 │   ├── .inventory_hmac_key         (KeyHMACKey)        0600
@@ -334,7 +334,9 @@ Lock names, holders, and ordering are documented in
 - **PostgreSQL** uses session-level advisory locks. The lock name is mapped to
   the `bigint` key `pg_advisory_lock` requires through a *partitioned* key
   space, not a uniform hash: a reserved singleton name (`bootstrap`, `crl`,
-  `sql-schema-migrate`) takes a namespaced base plus its hand-assigned ordinal,
+  `sql-schema-migrate`, `hmac-key`; the authoritative list is
+  `reservedLockOrdinals`) takes a namespaced base plus its hand-assigned
+  ordinal,
   with bit 63 clear, and every other name — every `subject:<name>` — takes the
   leading 64 bits of SHA-256 over the domain-separated name with bit 63 set. The
   two halves cannot meet, so no subject name can reach a singleton's key; see
@@ -381,7 +383,8 @@ It asserts the safe condition positively — an `Unlocker` it does not recognise
 reads as unenforced — because the failure direction of the negative form is to
 convert "cannot be shown to be quiet" into "proceed". It keys on which lock was
 taken rather than on the unlocker's type: every named lock (`crl`, `bootstrap`,
-`subject:<name>`) is implemented the same way, and holding one of those says
+`hmac-key`, `subject:<name>`) is implemented the same way, and holding one of
+those says
 nothing about being the only instance.
 
 | Backend | `SupportsDistributedLocking` | `SupportsAtomicInventory` |
