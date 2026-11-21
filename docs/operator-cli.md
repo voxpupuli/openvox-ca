@@ -313,12 +313,14 @@ openvox-ca-ctl import \
                                # parse; other PEM block types are ignored and
                                # not stored.
                                #
-                               # With crl_chain_file configured on the server,
-                               # that file is authoritative instead: ancestors
-                               # imported here but absent from it are dropped
-                               # on the next CRL amendment. See "Publishing an
-                               # upstream CRL chain" in the configuration
-                               # guide.
+                               # With crl_chain.file or crl_chain.urls
+                               # configured on the server, that decides which
+                               # ancestors are published instead: ancestors
+                               # imported here but absent from the file are
+                               # dropped on the next CRL amendment, and ones no
+                               # URL serves on the next authoritative fetch
+                               # round. See "Publishing an upstream CRL chain"
+                               # in the configuration guide.
 # The bundle must be a complete chain, nearest first, ending at a self-signed
 # root, and every certificate in it must be within its validity window. If the
 # CA's key is held by a provider rather than a file, there is no --private-key
@@ -546,8 +548,10 @@ carries, their CRLs must be published too or agents running `chain` fail
 verification — and a CRL for an issuer *not* in the bundle is discarded and
 alerts, because nothing here can verify it. `openvox-ca-ctl import --crl-chain`
 seeds them where the key is a file; where the key is held by a provider there is
-no `--private-key` to pass, so use `crl_chain_file` in the server configuration
-instead, which re-reads the ancestors on a timer and needs no key at all. See
+no `--private-key` to pass, so use the `crl_chain` block in the server
+configuration instead — `crl_chain.urls` to fetch the ancestors' CRLs, or
+`crl_chain.file` to re-read a bundle — which keeps them current on a timer and
+needs no key at all. See
 [Publishing an upstream CRL chain](configuration.md#publishing-an-upstream-crl-chain).
 
 Three further rules, all checked before anything is written, and all worth

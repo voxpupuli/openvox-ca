@@ -442,6 +442,30 @@ everything else the server chose. `cmd/openvox-ca-ctl/list_test.go` pins both
 the escaping and the alignment, so the exemption cannot return on a rationale
 that does not hold.
 
+## Outbound HTTP: `internal/httpclient`
+
+A feature that fetches from URLs the operator configures takes an
+`http_config` block (`config.HTTPClientConfig`) and builds its client with
+`httpclient.New`, rather than constructing an `http.Client` of its own. Three
+clients predate the rule or fall outside it and keep their own: the OpenBao key
+provider, which has its own `openbao.*` TLS settings, and the two that talk to
+this CA itself — `openvox-ca-ctl` and the server's `healthcheck` subcommand.
+One builder is what makes its rules hold for every request: at most
+`MaxRedirects` redirects and never from https to http, credentials applied per
+request so that net/http drops them on a redirect to anything but the original
+host or a subdomain of it, credentials read from files only, and every file
+read through `internal/boundedfile`, so a hung mount fails a request rather than
+wedging its caller.
+
+`http_config` is modelled on Prometheus's `<http_config>`
+(`github.com/prometheus/common/config.HTTPClientConfig`), and is a subset with
+deliberate differences, which `docs/configuration.md` lists. **Before adding a
+field, read the Prometheus type and give the field its name and shape wherever
+the two overlap in function**, so that an operator who knows one can write the
+other. Add the difference to the docs table if it behaves differently. An inline
+credential stays out: the configuration is often a ConfigMap, and the
+`*_file` forms are the ones the chart never has to refuse.
+
 ## Compatibility contracts (do not rename)
 
 openvox-ca is a drop-in for the OpenVox/Puppet Server CA. The following

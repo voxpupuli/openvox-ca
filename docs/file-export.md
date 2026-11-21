@@ -67,7 +67,7 @@ checks the table implies, a configuration is refused when:
 
 - two targets name the same file (after cleaning the path);
 - a target is inside `cadir`, or is one of the CA's own files (`ca_cert_file`,
-  `ca_key_file`, `crl_chain_file`, `tls_cert`, `tls_key`, a `client_ca` anchor or
+  `ca_key_file`, `crl_chain.file`, `tls_cert`, `tls_key`, a `client_ca` anchor or
   CRL, the config file itself, and the rest of the set the
   [managed-certificate path check](configuration.md#managed-certificates)
   reserves);

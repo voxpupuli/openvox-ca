@@ -61,6 +61,7 @@ type healthServer struct {
 	mu     sync.Mutex
 	paths  []string
 	status int
+	body   string
 }
 
 func (h *healthServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +74,7 @@ func (h *healthServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(status)
+	_, _ = w.Write([]byte(h.body))
 }
 
 func (h *healthServer) requested() []string {
@@ -144,6 +146,36 @@ var _ = Describe("healthcheck subcommand", func() {
 		},
 		Entry("503 while the CA is not ready", http.StatusServiceUnavailable, "answered HTTP 503"),
 		Entry("a redirect", http.StatusFound, "answered HTTP 302"),
+	)
+
+	DescribeTable("names the not_ready reason the body carries, quoted",
+		func(body, want string) {
+			srv := httptest.NewTLSServer(&healthServer{status: http.StatusServiceUnavailable, body: body})
+			DeferCleanup(srv.Close)
+			_, err := runHealthcheck("--config", cfgPath, "--port", listenerPort(srv.Listener))
+			Expect(err).To(MatchError(ContainSubstring(want)))
+			Expect(err.Error()).NotTo(ContainSubstring("\x1b"), "the reason is the server's text, so it is quoted")
+		},
+		Entry("a pod held for its upstream CRL chain",
+			`{"status":"not_ready","reason":"waiting_for_upstream_crl_chain"}`,
+			`answered HTTP 503 (reason "waiting_for_upstream_crl_chain")`),
+		Entry("a reason carrying a control sequence",
+			`{"status":"not_ready","reason":"\u001b[2Jforged"}`,
+			`(reason "\x1b[2Jforged")`),
+	)
+
+	// Without a reason to name, the message ends at the status code: an empty
+	// reason is not printed, and a body that is not JSON is not either.
+	DescribeTable("names no reason when the body carries none",
+		func(body string) {
+			srv := httptest.NewTLSServer(&healthServer{status: http.StatusServiceUnavailable, body: body})
+			DeferCleanup(srv.Close)
+			_, err := runHealthcheck("--config", cfgPath, "--port", listenerPort(srv.Listener))
+			Expect(err).To(MatchError(MatchRegexp(`answered HTTP 503$`)))
+		},
+		Entry("a JSON body with no reason", `{"status":"not_ready"}`),
+		Entry("an empty reason", `{"status":"not_ready","reason":""}`),
+		Entry("an HTML error page from a proxy", `<html><body>Service Unavailable</body></html>`),
 	)
 
 	It("reports the status code, never the reason phrase the server chose", func() {

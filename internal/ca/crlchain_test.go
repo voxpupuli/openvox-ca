@@ -611,7 +611,7 @@ var _ = Describe("CRL chain read failures", func() {
 		// lock cannot be taken the closure never runs, so nothing beneath it
 		// counts anything and the error only ever reached a log line.
 		//
-		// It bites hardest where crl_chain_file is *not* configured, which is the
+		// It bites hardest where crl_chain.file is *not* configured, which is the
 		// common deployment: the background refresher fails every tick, this
 		// CA's own CRL runs to NextUpdate, and every series reads healthy.
 		ctx := context.Background()
@@ -831,7 +831,7 @@ var _ = Describe("CRL chain read failures", func() {
 	})
 
 	It("blames the file, not storage, when a revoke reaches it through the signing path", func() {
-		// The refresh job is not the only reader of crl_chain_file. Revoke,
+		// The refresh job is not the only reader of crl_chain.file. Revoke,
 		// cleanup and reissue all reach it through signCRLLocked, which had no
 		// exemption -- so a file the operator had broken moved
 		// crl_update_failures on every revocation, sending whoever answered

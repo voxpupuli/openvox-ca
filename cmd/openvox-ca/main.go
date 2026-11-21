@@ -544,7 +544,8 @@ func applyCAConfig(myCA *ca.CA, cfg *serverConfig) error {
 		myCA.CRLURLs = []string{cfg.CRLUrl}
 	}
 	myCA.CRLValidityDays = cfg.CRLValidityDays
-	myCA.CRLChainFile = cfg.CRLChainFile
+	myCA.CRLChainFile = cfg.CRLChain.File
+	myCA.SetCRLChainURLs(cfg.CRLChain.URLs)
 
 	if cfg.CAKeyAlgo != "" || cfg.CAKeySize != 0 {
 		myCA.CAKeyConfig = ca.KeyConfig{
@@ -1764,6 +1765,17 @@ func newRootCmd() *cobra.Command {
 					runClientCRLReloader(ctx, cfg, srv.AuthConfig.Domains, crlMetrics,
 						cfg.ClientCRLRefreshInterval())
 				})
+			}
+
+			// Before the jobs and the listener: the crl_chain.urls fetch job
+			// releases this hold, and the readiness probe must never see a
+			// moment where the CA is initialised but the hold not yet taken.
+			if len(cfg.CRLChain.URLs) > 0 && myCA.HoldReadinessForUpstreamChain(ctx) {
+				// Worded for every reason the hold is taken: an empty store, or
+				// one whose chain could not be read, which the CA has already
+				// logged on its own.
+				slog.Warn("Readiness is held until a crl_chain.urls fetch round " +
+					"stores an upstream CRL")
 			}
 
 			// Periodic upkeep. Which jobs a configuration runs is decided by

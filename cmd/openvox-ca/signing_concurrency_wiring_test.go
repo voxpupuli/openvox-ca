@@ -16,7 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 // The step whose absence is silent, and the same guard config_test.go's
-// "crl_chain_file wiring" block exists for.
+// "crl_chain wiring" block exists for.
 //
 // signing_concurrency_test.go covers resolveSigningConcurrency in isolation and
 // the file/env layering in isolation. Neither notices if the one line in
