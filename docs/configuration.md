@@ -2470,26 +2470,30 @@ environment of the CA's own processes included. Trust it as you trust the CA
 key. It runs in the CA's working directory, and whatever it writes to standard
 output or standard error is discarded. It has 30 seconds: one still running
 after that is killed, the CSR stays pending for an operator, the agent gets a
-`500` that ends its run, and the CA logs the timeout at `ERROR`. Only the
-executable is killed, not processes it started, so a
-script should not leave children running
-([#660](https://github.com/voxpupuli/openvox-ca/issues/660)). From start to
-exit, whatever it reads, the CA holds its CA-wide lock, and everything that
-reads the CA's in-memory state waits for it
-([#664](https://github.com/voxpupuli/openvox-ca/issues/664)). That includes
-every request authenticated with a certificate this CA issued, every readiness
-probe and metrics scrape, `certificate_statuses`, and, with
-[`enable_ocsp`](#serving-ocsp) set, every OCSP request. Any CSR submission
-starts a run, and submitting one needs no authentication; the per-address
-[`csr_rate_limit`](#rate-limit) bounds how often a client can start one, not
-how long it holds the lock. So keep the script
+`500` that ends its run, and the CA logs the timeout at `ERROR`. On Linux and
+other Unix systems the executable runs in a process group of its own, and the
+timeout kills the whole group, so anything the script started goes with it
+unless it has left the group (with `setsid`, for instance). A script that exits
+by itself within the 30 seconds keeps anything it started in the background on
+purpose.
+
+Read standard input to the end first, as the example's `csr_pem=$(cat)` does.
+A process the script starts can inherit standard input, and the CA waits at
+most 2 seconds after the script ends for it to be released. If the script
+exited zero, the request is still signed and the CA logs a `WARN` saying a
+process it started was holding standard input. A non-zero exit is still a
+refusal, and a timeout is still the timeout above.
+
+The CA does not hold its CA-wide lock while the executable runs, so
+authentication, readiness probes, metrics scrapes, `certificate_statuses` and
+OCSP do not wait for it. Only another request for the same certname does. Any
+CSR submission starts a run, and submitting one needs no authentication: the
+per-address [`csr_rate_limit`](#rate-limit) bounds how often a client can start
+one, and runs for different certnames overlap, up to 8 at a time (see
+[concurrent autosign runs](#concurrent-autosign-runs)). So keep the script
 fast, and give anything whose duration an outside party can influence, such as a
 lookup keyed on the certname or a call to an external service, a short timeout
-of its own. Read standard input to the end first, as the example's
-`csr_pem=$(cat)` does: while a process the script started still holds standard
-input unread, the CA can wait on it with no limit, past the 30 seconds and with
-the CA-wide lock held, whether the script itself timed out or exited normally
-([#660](https://github.com/voxpupuli/openvox-ca/issues/660)).
+of its own: a slow run holds one of the 8 for as long as it lasts.
 
 ### The autosign executable's path
 
