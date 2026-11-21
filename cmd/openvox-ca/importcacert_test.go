@@ -144,6 +144,28 @@ var _ = Describe("openvox-ca import-ca-cert", func() {
 		Expect(certs[1].Subject.CommonName).To(Equal("Test Root CA"))
 	})
 
+	// #681: the CRL the import signs for a CA that has none yet took the
+	// package default, whatever crl_validity_days said.
+	It("signs the CA's first CRL for crl_validity_days", func() {
+		cfg := "ca_key_algo: ecdsa\nca_key_size: 256\ncrl_validity_days: 7\n"
+		Expect(os.WriteFile(emptyCf, []byte(cfg), 0o644)).To(Succeed())
+
+		csrPEM, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")
+		Expect(err).NotTo(HaveOccurred())
+		signed := signCSRAsParent([]byte(csrPEM), chain.RootCert, chain.RootKey, chain.RootPEM)
+		Expect(os.WriteFile(bundle, signed, 0o644)).To(Succeed())
+		_, err = runImport("--cadir", caDir, "--cert-bundle", bundle)
+		Expect(err).NotTo(HaveOccurred())
+
+		blob, err := storage.New(caDir).GetCRL(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(blob)
+		Expect(block).NotTo(BeNil())
+		crl, err := x509.ParseRevocationList(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(crl.NextUpdate.Sub(crl.ThisUpdate)).To(Equal(7 * 24 * time.Hour))
+	})
+
 	It("refuses a certificate that does not match the CA key", func() {
 		// The single check that makes importing without a private key safe.
 		_, err := runCSR("--cadir", caDir, "--hostname", "puppet.example.com", "--create-key")

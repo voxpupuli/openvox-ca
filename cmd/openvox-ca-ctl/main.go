@@ -32,6 +32,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -970,6 +971,7 @@ func newSetupCmd() *cobra.Command {
 func newImportCmd() *cobra.Command {
 	var caDir, certBundle, privateKey, crlChain, passphraseFile string
 	var encryptKey, allowPlaintext bool
+	var crlValidityDays int
 	cmd := &cobra.Command{
 		Use:   "import",
 		Short: "Import an external CA cert/key (offline)",
@@ -978,6 +980,13 @@ func newImportCmd() *cobra.Command {
 			absDir, err := filepath.Abs(caDir)
 			if err != nil {
 				return fmt.Errorf("invalid --cadir: %w", err)
+			}
+			// The upper bound is the most days a time.Duration can hold; past
+			// it the conversion below wraps, to a negative window the import
+			// would silently replace with the default or to a short one.
+			if maxDays := int(math.MaxInt64 / int64(24*time.Hour)); crlValidityDays <= 0 || crlValidityDays > maxDays {
+				return fmt.Errorf("--crl-validity-days must be a positive number of days no greater than %d, not %d",
+					maxDays, crlValidityDays)
 			}
 
 			certPEM, err := os.ReadFile(certBundle)
@@ -1024,6 +1033,7 @@ func newImportCmd() *cobra.Command {
 				EncryptCAKey:                encryptKey,
 				KeyPassphrase:               ca.KeyPassphraseConfig{PassphraseFile: passphraseFile},
 				AllowPlaintextOverEncrypted: allowPlaintext,
+				CRLValidity:                 time.Duration(crlValidityDays) * 24 * time.Hour,
 			}
 			if err := ca.ImportCAWithOptions(cmd.Context(), store, certPEM, keyPEM, crlPEM, opts); err != nil {
 				return err
@@ -1039,6 +1049,8 @@ func newImportCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&encryptKey, "encrypt-ca-key", false, "Encrypt the CA private key at rest (an encrypted --private-key is always stored encrypted)")
 	cmd.Flags().StringVar(&passphraseFile, "ca-key-passphrase-file", "", "Path to file containing the CA key passphrase (default: the "+ca.DefaultPassphraseEnvVar+" environment variable)")
 	cmd.Flags().BoolVar(&allowPlaintext, "allow-plaintext-ca-key", false, "Allow a plaintext --private-key to replace an encrypted CA key in storage")
+	cmd.Flags().IntVar(&crlValidityDays, "crl-validity-days", int(ca.CRLValidity/(24*time.Hour)),
+		"Days the CRL import signs stays valid, when it has to sign one (neither --crl-chain nor the store holds this CA's own CRL); pass the server's crl_validity_days")
 	cmd.MarkFlagsMutuallyExclusive("encrypt-ca-key", "allow-plaintext-ca-key")
 	_ = cmd.MarkFlagRequired("cadir")
 	_ = cmd.MarkFlagRequired("cert-bundle")

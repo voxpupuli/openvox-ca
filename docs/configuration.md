@@ -155,6 +155,7 @@ promote_cn_to_san: true # add the CN as a DNS SAN when a CSR carries none (RFC 2
 allow_subject_alt_names: false # let a CSR request SANs of its own; see "Subject alternative names requested by a CSR"
 allow_duplicate_certs: false # let a CSR replace a pending one or queue beside a certificate; see "Duplicate certificate requests"
 crl_validity_days: 0  # 0 = built-in default (30 days); positive integer overrides
+                      # (openvox-ca-ctl import cannot read this file: pass it --crl-validity-days)
 csr_rate_limit: 60    # max CSR submissions per IP per minute; 0 = disable rate limiting; see "Rate limit"
 ocsp_rate_limit: 300  # max OCSP requests per IP per minute while enable_ocsp is set; 0 = disable
 rate_limit_ipv6_prefix_length: 128  # IPv6 bits counted as one client by both limits; 64 = one budget per /64; no effect behind a proxy, see "Rate limit"
