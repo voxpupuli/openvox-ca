@@ -151,7 +151,7 @@ worth paging on depends on the deployment; see the
 
 | Metric | Description |
 | --- | --- |
-| `openvoxca_ca_ready` | `1` when the CA has finished initialising, else `0`. |
+| `openvoxca_ca_ready` | `1` when the CA has finished initialising, else `0`. Initialisation only: it stays `1` while `/healthz/ready` is held for [`crl_chain.urls`](configuration.md#fetching-upstream-crls) on a store with no upstream CRL. No series reports that hold: `/healthz/ready`'s `reason` (`waiting_for_upstream_crl_chain`), or the pod's readiness in kube-state-metrics, is what does. `openvoxca_crl_chain_fetch_last_success_timestamp_seconds == 0` and `OpenVoxCAUpstreamCRLNeverFetched` are a precondition of it, not evidence: both also hold on a ready pod restarted during an upstream outage on a store that already has a chain. |
 | `openvoxca_collector_scrape_success` | `1` if the last CA-state gather succeeded, else `0` (e.g. storage unavailable, or the gather overran its 10-second budget). |
 | `openvoxca_collector_scrape_duration_seconds` | Time taken to gather the storage-derived metrics: the CRL, delayed-revocation and leaf certificate series. |
 | `openvoxca_collector_last_success_timestamp_seconds` | When this replica last gathered from storage successfully. Absent until the first success, never `0`. While `scrape_success` is `0`, the storage-derived series below are the ones gathered at this time — see [When a gather fails](#when-a-gather-fails). Per replica: aggregate with `min` to ask whether any replica is stale, `max` whether all are, never `sum`. |
@@ -245,7 +245,7 @@ and the panel would read fresh while showing the held value.
 
 | Metric | Description |
 | --- | --- |
-| `openvoxca_crl_number` | Monotonic CRL sequence number (`cRLNumber`). Expect it to advance without any revocation having happened: a re-sign bumps it, and with [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) configured, so does a change to the upstream chain. The number need only increase, so this is harmless — but do not treat a rise as evidence that something was revoked. |
+| `openvoxca_crl_number` | Monotonic CRL sequence number (`cRLNumber`). Expect it to advance without any revocation having happened: a re-sign bumps it, and with [`crl_chain.urls` or `crl_chain.file`](configuration.md#publishing-an-upstream-crl-chain) configured, so does a change to the upstream chain. The number need only increase, so this is harmless — but do not treat a rise as evidence that something was revoked. |
 | `openvoxca_crl_this_update_timestamp_seconds` | CRL `ThisUpdate` time. |
 | `openvoxca_crl_next_update_timestamp_seconds` | CRL `NextUpdate` (expiry) time. |
 | `openvoxca_crl_revoked_certificates` | Number of certificates currently listed in the CRL. |
@@ -259,33 +259,36 @@ revocation it briefly trails `openvoxca_crl_number`. A gap that persists is a
 replica still admitting certificates the rest of the fleet has revoked — see
 [watching revocation propagate](#watching-revocation-propagate) below for the
 query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
-> **What the failure counter does and does not see.** It counts a CRL that
-> could not be re-signed or written, *or read*, on any of the five paths that
-> write one (revoke by subject, revoke by serial, CRL reissue, background
-> refresh, expired-cert cleanup).
-> The read half is `readStoredCRL`'s doing: it increments before returning, on
-> every path that calls it, which is what makes this counter cover all five
-> rather than only the one that noticed. On the revoke paths alone it also counts
-> a malformed serial, or an inventory read that failed while resolving the
-> subject's serial — which on the filesystem backend includes an **integrity
-> MAC that no longer verifies**, since both revoke paths verify there, so a
-> tamper signal can surface here too, under a CRL name (see the [inventory
-> integrity threat
+> **What the failure counter does and does not see.** It counts a CRL that could
+> not be re-signed or written, *or read*, on any of the eight paths that write
+> one (revoke by subject, revoke by serial, CRL reissue, background refresh,
+> expired-cert cleanup, the superseded-certificate sweep, the `crl_chain.file`
+> refresh, and the [`crl_chain.urls`](configuration.md#fetching-upstream-crls)
+> merge). The read half is `readStoredCRL`'s doing: it increments before
+> returning, on every path that re-signs — the `crl_chain.file` refresh reaches
+> it through its reissue, and counts its own earlier read of the stored chain in
+> its error arm — which is what makes this counter cover all eight rather than
+> only the one that noticed. The merge also counts a CA bundle it could not read
+> and a published chain it could not decode, since either stops the CRL being
+> amended and neither is a fetched URL's fault. On the revoke paths alone it
+> also counts a malformed serial, or an inventory read that failed while
+> resolving the subject's serial — which on the filesystem backend includes an
+> **integrity MAC that no longer verifies**, since both revoke paths verify
+> there, so a tamper signal can surface here too, under a CRL name (see the
+> [inventory integrity threat
 > model](development/inventory-store.md#inventory-integrity-threat-model-and-rationale)).
 > Alert on `openvoxca_inventory_verify_failures_total{reason="tampered"}`
 > ([inventory verification](#inventory-verification)) for that, not on this.
-> That last one
-> includes a revocation whose wait for the per-subject lock spent the 60-second
-> budget behind another goroutine *in this process* on the single-node backends,
-> which reach the read with the deadline already gone; see
+> That last one includes a revocation whose wait for the per-subject lock spent
+> the 60-second budget behind another goroutine *in this process* on the
+> single-node backends, which reach the read with the deadline already gone; see
 > [revocation cost](api.md#certificate-status). So a queued revocation is a
 > benign cause of this alert on filesystem and SQLite, once a second failure
-> lands within its window (see [storage-retry alerts](#storage-retry-alerts)).
-> A wait for another
-> *process* on the host is refused at acquisition instead and never reaches the
-> read, so it does not move this counter — see the uncounted list below. The
-> revoke path is the shared revoke-by-serial code, so it also covers
-> `DELETE /certificate_status` (`puppet cert clean`) and the best-effort
+> lands within its window (see [storage-retry alerts](#storage-retry-alerts)). A
+> wait for another *process* on the host is refused at acquisition instead and
+> never reaches the read, so it does not move this counter — see the uncounted
+> list below. The revoke path is the shared revoke-by-serial code, so it also
+> covers `DELETE /certificate_status` (`puppet cert clean`) and the best-effort
 > revocation of a superseded certificate on renewal, which on a busy fleet is
 > the likeliest source of a rising count. That last one is counted on
 > [`openvoxca_supersede_failures_total`](#delayed-supersession) too, every arm
@@ -296,33 +299,33 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > the serial,
 > and the certificate they left valid is one revoking by subject cannot reach:
 > the replacement is what makes it a renewal, so `revoke --certname` would
-> retire that instead. That is
-> specific to a failure on the *immediate* path — nothing recorded the
-> predecessor, so nothing but its serial addresses it. Where
+> retire that instead. That is specific to a failure on the *immediate* path —
+> nothing recorded the predecessor, so nothing but its serial addresses it.
+> Where
 > [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession)
 > grants a window, which is the default, a predecessor is on the pending list
 > and revoking the subject does retire it. Retire an unrecorded one with
-> `openvox-ca-ctl revoke --serial <hex>`; see
-> [revocation by serial](api.md#revocation-by-serial). The `Clean:` warnings are
-> qualified differently: they name the serial only once the revocation reached
-> the CRL, and the certificate they leave behind is still reachable by subject
-> until a replacement is issued.
+> `openvox-ca-ctl revoke --serial <hex>`; see [revocation by
+> serial](api.md#revocation-by-serial). The `Clean:` warnings are qualified
+> differently: they name the serial only once the revocation reached the CRL,
+> and the certificate they leave behind is still reachable by subject until a
+> replacement is issued.
 >
 > It also counts a write path that could not take the CRL lock at all, on the
-> five writers that go through `withCRLLockCounted` or its background twin
-> `withCRLLockYielding` — revoke by subject, revoke by serial and reissue
-> through the first, refresh and cleanup through the second. The closure never
-> runs in that case, so nothing beneath it could count anything. Refresh and
-> cleanup are background jobs: they stand aside while any foreground CRL work
-> is waiting for the lock (a revocation, a clean or a reissue) and give up
-> after 15 seconds rather than 60. So a run of foreground CRL work lasting a
-> whole 15 seconds counts here too, as a refresh or cleanup step that did not
-> happen, and the server logs it as
+> six writers that go through `withCRLLockCounted` or its background twin
+> `withCRLLockYielding` — revoke by subject, revoke by serial, reissue and the
+> `crl_chain.urls` merge through the first, refresh and cleanup through the
+> second. The closure never runs in that case, so nothing beneath it could count
+> anything. Refresh and cleanup are background jobs: they stand aside while any
+> foreground CRL work is waiting for the lock (a revocation, a clean or a
+> reissue) and give up after 15 seconds rather than 60. So a run of foreground
+> CRL work lasting a whole 15 seconds counts here too, as a refresh or cleanup
+> step that did not happen, and the server logs it as
 > `waiting to acquire lock "crl" behind a priority caller` (see
 > [locking](development/locking.md#revocations-go-before-background-work)).
 > A wait that a shutdown ends is not counted: the process is stopping, and the
 > pass did not fail.
-> The `crl_chain_file` refresh is a background job on the same terms, and
+> The `crl_chain.file` refresh is a background job on the same terms, and
 > counts a lock it could not take on this same counter itself rather than
 > through the helper (a failure there is not the file's
 > fault, so it does not touch `openvoxca_crl_chain_refresh_failures_total`). The
@@ -400,24 +403,38 @@ those instead.
 
 ### Upstream CRL chain
 
+Which of these series exist depends on the configured source, so a missing
+series is not evidence of which source is live. The four unlabelled counters
+(`..._refresh_failures_total`, `..._discarded_total`, `..._regressed_total`
+and `..._removed_total`) are exported on every CA, reading `0` where nothing
+counts them. `..._refresh_failures_total` is about `crl_chain.file` alone, so
+under `crl_chain.urls` it stays at `0`, and a failed merge there counts in
+`openvoxca_crl_update_failures_total` instead.
+`..._last_read_timestamp_seconds` exists only with `crl_chain.file`, and the
+two `..._fetch_*` series only with `crl_chain.urls`, one per entry.
+`..._next_update_timestamp_seconds` follows what is stored, so it appears
+wherever an upstream CRL is published, an imported one included.
+
 | Metric | Description |
 | --- | --- |
 | `openvoxca_crl_chain_next_update_timestamp_seconds` | NextUpdate of each **upstream** CRL in the stored blob — every block this CA did not issue — labelled by `issuer`. Deliberately a separate series from the unlabelled CRL metrics above: an expiring upstream CRL is fixed at the parent CA, not here, so it has its own alert and runbook. |
-| `openvoxca_crl_chain_last_read_timestamp_seconds` | When `crl_chain_file` was last read successfully, or `0` if it never has been. Exported **only where `crl_chain_file` is configured**, so `absent()` means the feature is off and `== 0` means it is on but the file has never been opened — a wrong path, or a mount that never landed. That case moves no counter and would otherwise look healthy; `OpenVoxCAUpstreamCRLNeverRead` alerts on it. It does **not** detect a `subPath` mount: that reads successfully forever, so this advances exactly as it does on a healthy file. See [the `subPath` note](configuration.md#publishing-an-upstream-crl-chain) for what does. |
-| `openvoxca_crl_chain_refresh_failures_total` | Counter of failed `crl_chain_file` reads — unreadable, unparseable, not ending on a PEM block boundary, or too large. Counted where the file is read, so it moves on every CRL amendment as well as on each refresh pass; the visible symptom is that **revocation fails** until the file is fixed, as well as ancestor CRLs ageing. A failure of the refresh pass for some *other* reason — a lock it could not take, storage it could not read — deliberately moves `openvoxca_crl_update_failures_total` instead, so this counter's runbook stays "check the file". The chain already published is left in place either way. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
-| `openvoxca_crl_chain_discarded_total` | Counter of discards: one per CRL dropped from `crl_chain_file`, each time the file is evaluated, because no certificate in the stored CA bundle signed it. The file is evaluated on every CRL amendment as well as on each refresh pass, so with a static bad file the value tracks revocation rate rather than the number of bad CRLs — alert on `increase(...) > 0`, not on the value. **Alert on this** — the shipped mixin does. It is the only signal that the published chain is *smaller* than the file says: a discarded CRL has no series of its own to go missing from. The remedy is to complete the CA bundle; a CRL passed over for being *stale* is counted separately, below. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
-| `openvoxca_crl_chain_removed_total` | Counter of ancestors `crl_chain_file` has stopped listing while their CRL was published. The removal is honoured — the file is authoritative — but it cannot be undone here, because this CA cannot re-sign another CA's list, and the ancestor's own `..._next_update_timestamp_seconds` series simply stops existing, which no alert can fire on. A deliberate removal increments this on the pass that applies it; a `cat` glob that matched one file fewer increments it identically, which is why it is worth alerting on. It also counts a second cause with the same outcome: a published ancestor whose certificate has left the stored CA bundle, so nothing signs its CRL any more and it can no longer be published. Its remedy is to re-import the bundle with that certificate — not to touch the file — and the log line names which cause fired. An incomplete bundle can therefore move this counter and `..._discarded_total` together: discarded for the copy the file carries, removed for the copy already published. Counted once per *ancestor* on both arms, not once per CRL: the first deduplicates by signing certificate, the second by issuer distinguished name, since there is no signer left to key on. Two published CRLs from one ancestor removed together therefore count once. Once per *removal*, too, rather than per evaluation: a rewriting pass reads the file twice — once to decide a rewrite is needed, once to build what it publishes — and only the pass that publishes counts, so one lost ancestor adds exactly 1. That is the difference between this counter and `..._discarded_total` / `..._regressed_total`, which describe what the file currently holds and so re-count on every evaluation while the condition stands. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
-| `openvoxca_crl_chain_regressed_total` | Counter of CRLs in `crl_chain_file` passed over because the published chain already carried a newer one from the same ancestor. The published CRL is kept, so revocation is unaffected — this is not a failure, and deliberately does not block CRL amendment the way an unreadable file does. A rising value means the file is stale, rolled back or being replayed; the remedy is whatever refreshes the file, **not** the CA bundle, which must already be complete or the CRL would have failed its signature check. Counted per CRL per evaluation, like the discard counter, so alert on `increase(...) > 0`. Zero and static without `crl_chain_file`. Resets to `0` on process restart. |
+| `openvoxca_crl_chain_last_read_timestamp_seconds` | When `crl_chain.file` was last read successfully, or `0` if it never has been. Exported **only where `crl_chain.file` is configured**, so `absent()` means the feature is off and `== 0` means it is on but the file has never been opened — a wrong path, or a mount that never landed. That case moves no counter and would otherwise look healthy; `OpenVoxCAUpstreamCRLNeverRead` alerts on it. It does **not** detect a `subPath` mount: that reads successfully forever, so this advances exactly as it does on a healthy file. See [the `subPath` note](configuration.md#publishing-an-upstream-crl-chain) for what does. |
+| `openvoxca_crl_chain_refresh_failures_total` | Counter of failed `crl_chain.file` reads — unreadable, unparseable, not ending on a PEM block boundary, or too large. Counted where the file is read, so it moves on every CRL amendment as well as on each refresh pass; the visible symptom is that **revocation fails** until the file is fixed, as well as ancestor CRLs ageing. A failure of the refresh pass for some *other* reason — a lock it could not take, storage it could not read — deliberately moves `openvoxca_crl_update_failures_total` instead, so this counter's runbook stays "check the file". The chain already published is left in place either way. Zero and static without `crl_chain.file`. Resets to `0` on process restart. |
+| `openvoxca_crl_chain_discarded_total` | Counter of discards: one per CRL dropped from `crl_chain.file`, each time the file is evaluated, because no certificate in the stored CA bundle signed it, or because it is a delta CRL or carries an issuing distribution point and so is not its issuer's full list. The file is evaluated on every CRL amendment as well as on each refresh pass, so with a static bad file the value tracks revocation rate rather than the number of bad CRLs — alert on `increase(...) > 0`, not on the value. **Alert on this** — the shipped mixin does. It is the only signal that the published chain is *smaller* than the file says: a discarded CRL has no series of its own to go missing from. With `crl_chain.urls` it counts once per fetch round per entry instead, and the entry also counts as a fetch failure. The remedy is to complete the CA bundle, or, for a delta or IDP-scoped CRL, to point the source at its issuer's full CRL — the `WARN` line says which; a CRL passed over for being *stale* is counted separately, below. Zero and static without `crl_chain.file` or `crl_chain.urls`. Resets to `0` on process restart. |
+| `openvoxca_crl_chain_removed_total` | Counter of ancestors `crl_chain.file` has stopped listing while their CRL was published. The removal is honoured — the file is authoritative — but it cannot be undone here, because this CA cannot re-sign another CA's list, and the ancestor's own `..._next_update_timestamp_seconds` series simply stops existing, which no alert can fire on. A deliberate removal increments this on the pass that applies it; a `cat` glob that matched one file fewer increments it identically, which is why it is worth alerting on. It also counts a second cause with the same outcome: a published ancestor whose certificate has left the stored CA bundle, so nothing signs its CRL any more and it can no longer be published. Its remedy is to re-import the bundle with that certificate — not to touch the file — and the log line names which cause fired. An incomplete bundle can therefore move this counter and `..._discarded_total` together: discarded for the copy the file carries, removed for the copy already published. Counted once per *ancestor* on both arms, not once per CRL: the first deduplicates by signing certificate, the second by issuer distinguished name, since there is no signer left to key on. Two published CRLs from one ancestor removed together therefore count once. Once per *removal*, too, rather than per evaluation: a rewriting pass reads the file twice — once to decide a rewrite is needed, once to build what it publishes — and only the pass that publishes counts, so one lost ancestor adds exactly 1. That is the difference between this counter and `..._discarded_total` / `..._regressed_total`, which describe what the file currently holds and so re-count on every evaluation while the condition stands. With `crl_chain.urls`, it counts ancestors dropped by an authoritative fetch round — every entry yielding its issuer's full CRL from the CA bundle, every entry fetched over `https://` or `file:///`, none serving this CA's own CRL, no two naming the same ancestor — because no entry served them. Zero and static without `crl_chain.file` or `crl_chain.urls`. Resets to `0` on process restart. |
+| `openvoxca_crl_chain_regressed_total` | Counter of CRLs in `crl_chain.file` passed over because the published chain already carried a newer one from the same ancestor. The published CRL is kept, so revocation is unaffected — this is not a failure, and deliberately does not block CRL amendment the way an unreadable file does. A rising value means the file is stale, rolled back or being replayed; the remedy is whatever refreshes the file, **not** the CA bundle, which must already be complete or the CRL would have failed its signature check. With `crl_chain.urls` it counts an entry serving an older CRL than the one published, once per fetch round; the entry also counts as a fetch failure. On a CA with several replicas and mirror entries, a short burst just after an upstream republishes — a mirror lagging the CRL another replica already published, re-counted by the fetch job's backoff retries until the mirror catches up — is harmless; a rise that persists is not. Counted per CRL per evaluation, like the discard counter, so alert on `increase(...) > 0`. Zero and static without `crl_chain.file` or `crl_chain.urls`. Resets to `0` on process restart. |
+| `openvoxca_crl_chain_fetch_last_success_timestamp_seconds` | When each [`crl_chain.urls`](configuration.md#fetching-upstream-crls) entry last yielded a usable, current CRL — verified against the CA bundle, unexpired, and newer than or equal to the one published — labelled by `url`, or `0` if it never has. Exported for **every configured entry from startup**, so `== 0` means never fetched and absence means the entry is not configured. A transfer that succeeded but delivered nothing usable does not advance it, nor does a round refused for making the published upstream chain larger than 4 MiB, nor one whose merge failed on the lock or storage (counted in `openvoxca_crl_update_failures_total` instead). `time() - ...` is the age of what that entry last delivered; the shipped mixin alerts on it (`OpenVoxCAUpstreamCRLFetchStale`, after `crlChainFetchStaleSeconds`, 3h), because the expiry warning can stay quiet for days after fetching stops. Keep that threshold at least twice `crl_chain.refresh_interval_sec`, or a single failed round fires it; a healthy entry fires only once the interval exceeds the threshold plus the rule's 15-minute `for:` (see [the mixin's thresholds](../mixin/README.md#configurable-thresholds)). Resets to `0` on process restart. |
+| `openvoxca_crl_chain_fetch_failures_total` | Counter of fetch rounds in which a `crl_chain.urls` entry did not yield a usable, current CRL, labelled by `url`: a connection, TLS or HTTP failure, a response that is not exactly one CRL, one over 4 MiB as received or a CRL over 4 MiB as PEM, a CRL no certificate in the CA bundle signed, a delta or IDP-scoped CRL, one older than the CRL already published, or an expired one; or, in a round whose CRLs together would make the published upstream chain larger than 4 MiB, every entry that would otherwise have succeeded — so every entry failing at once, each fetching cleanly, points at that cap. A response with a `200` that holds anything else counts. An entry serving this CA's own CRL counts too; a mirror that lags another entry for the same ancestor counts only if it is older than the published CRL. The `WARN` log line names the reason. A failing entry never blocks revocation or shrinks the published chain — only an authoritative round can remove an ancestor, counted by `openvoxca_crl_chain_removed_total` — and a merge that fails for a reason that is not the entry's — a lock, storage — moves `openvoxca_crl_update_failures_total` instead. The mixin's `OpenVoxCAUpstreamCRLFetchFailing` fires on `crlChainFetchFailureThreshold` (2) of these in `crlChainFetchWindow` (3h); under a fault that never clears the job's backoff is capped at `crl_chain.refresh_interval_sec`, so that window must be at least `(threshold + 1) x refresh_interval_sec`. Resets to `0` on process restart. |
 
 The gauge appears whenever the stored blob holds a CRL this CA did not issue —
 which includes a chain brought in by `openvox-ca-ctl import --crl-chain` on a
-deployment that has never set `crl_chain_file`. That is deliberate: an ancestor
+deployment that has never set `crl_chain.file`. That is deliberate: an ancestor
 CRL ages the same way whether or not anything is refreshing it, and it is
 precisely the import-only deployment where nothing is. The remedy differs,
-though, and the alert text names `crl_chain_file` because that is the standing
-fix. On an import-only deployment, read
+though, and the alert text names `crl_chain.urls` and `crl_chain.file` because
+those are the standing fix. On an import-only deployment, read
 `OpenVoxCAUpstreamCRLExpiringSoon`/`Expired` as "re-import the chain with a
-current one, or configure [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain)
+current one, or configure [`crl_chain`](configuration.md#publishing-an-upstream-crl-chain)
 so it stays current by itself".
 
 > **No series tracks the chain's length either, so watch the log.** Keep the
@@ -1048,8 +1065,11 @@ certificate a renewal or managed reissue replaced that could not be retired,
 immediately or after its window (`openvoxca_supersede_failures_total`), the
 [upstream CRL
 chain](#upstream-crl-chain) (an ancestor nearing or past its `NextUpdate`, and
-the four ways `crl_chain_file` goes wrong — unreadable, a CRL discarded, one
-rolled back, one removed — plus a file that has never been read at all),
+the four ways the chain goes wrong — `crl_chain.file` unreadable, a CRL
+discarded, one rolled back, one removed — plus a file that has never been read
+at all, and for `crl_chain.urls` an entry failing, never fetched, or gone stale:
+`OpenVoxCAUpstreamCRLFetchFailing`, `OpenVoxCAUpstreamCRLNeverFetched` and
+`OpenVoxCAUpstreamCRLFetchStale`),
 [client trust domains](#client-trust-domains) whose revocation material has gone
 unusable or stale (`OpenVoxCAClientCRLUnusable`, `OpenVoxCAClientCRLRefusals` and
 `OpenVoxCAClientCRLStale`, and only where `client_ca` is configured), and
@@ -1097,12 +1117,21 @@ the [mixin README](https://github.com/voxpupuli/openvox-ca/tree/main/mixin#confi
 Two failures is enough margin for the CRL-update alert because a restart only
 counts there when it breaks an amendment or a refresh pass in flight, which is
 rare, whereas the two syncs fail on nearly every restart. With
-[`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) set it is
-narrower: the upstream chain refresh takes the same lock, reads the same CRL and
-counts its failures into the same counter on its own hourly pass, started
-alongside the CRL refresh, so a restart that overlaps both passes counts two and
-fires. To keep those silent, set the mixin's `crlUpdateThreshold` to `3` and
-`crlUpdateWindow` to `4h`.
+[`crl_chain.file` or `crl_chain.urls`](configuration.md#publishing-an-upstream-crl-chain)
+set it is narrower: the upstream chain refresh, or the fetch merge, takes the
+same lock, reads the same CRL and counts its failures into the same counter on
+its own pass, started alongside the CRL refresh, so a restart that overlaps
+them can count two and fire. A fetch round whose merge failed waits the full
+interval before the next, like the file's pass, rather than taking the
+backoff a failed entry gets (30 seconds, doubling up to the interval), so a
+longer outage still counts once per
+hour. To keep those silent, set the mixin's `crlUpdateThreshold` to `3` and
+`crlUpdateWindow` to `4h`. Those numbers assume the hourly default
+`refresh_interval_sec`: a shorter one counts more often (at 900 seconds, a
+storage outage longer than about 15 minutes reaches two from that job alone),
+so raise the threshold to match. The exception is a fresh store held unready for
+`crl_chain.urls`, which keeps that backoff until a merge lands, because it has
+nothing to serve until then: a restart there can count several.
 
 One failure the CA does not retry falls below the CRL-update threshold: a
 best-effort revocation, which the CA logs and abandons rather than returning an

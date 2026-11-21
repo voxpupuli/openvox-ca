@@ -138,13 +138,14 @@ two scopes are applied independently, to different material, so the number of
 certificates in the bundle governs `cert_scope` and tells you nothing about
 `crl_scope`: a CA that issued its own root has one certificate in its bundle,
 where `cert_scope` is a no-op, and can still hold a multi-block CRL blob from
-`import --crl-chain` or from `crl_chain_file`, where `crl_scope` is not.
+`import --crl-chain` or from the `crl_chain` block (`crl_chain.urls` or
+`crl_chain.file`), where `crl_scope` is not.
 
 Setting `crl_scope: self` on a target that feeds agents doing full-chain
 revocation checking drops every ancestor CRL from what they receive, which is
-the material `crl_chain_file` exists to distribute. Under `chain` the value is a
-multi-block PEM, which a consumer expecting exactly one CRL has to handle; that
-trade-off is the reason `self` exists.
+the material the `crl_chain` block exists to distribute. Under `chain` the value
+is a multi-block PEM, which a consumer expecting exactly one CRL has to handle;
+that trade-off is the reason `self` exists.
 
 Exports and the HTTP endpoints therefore agree by default: `/certificate/ca` and
 `/certificate_revocation_list/ca` always serve the full chain, because Puppet

@@ -121,7 +121,7 @@ type Target struct {
 	// Both default to "chain": the stored blob verbatim. A "self" default would
 	// narrow a target silently, with no configuration choosing it -- a
 	// consumer's trust bundle losing its intermediates, and a CRL blob losing
-	// every ancestor block, which is the material crl_chain_file exists to
+	// every ancestor block, which is the material crl_chain exists to
 	// distribute. Narrowing is therefore
 	// something an operator opts into per target, and it matches what the HTTP
 	// endpoints serve: GET /certificate/ca and the CRL endpoint always return

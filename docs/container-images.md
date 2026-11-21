@@ -206,7 +206,7 @@ itself. The private keys are written `0600`, readable by their owner alone, and
 openvox-ca never changes the owner or mode of an existing file. Re-own a Docker
 or Podman volume or bind mount to `65532:65532` before starting the container,
 and do it for every volume the CA reads, not only its `--cadir`: a
-`crl_chain_file` kept on another volume and left unreadable fails every chain
+`crl_chain.file` kept on another volume and left unreadable fails every chain
 refresh. Under Kubernetes the Helm chart runs the pod as `65532:65532` through
 `podSecurityContext`. Where the kubelet applies `fsGroup` to the volume, as it
 does to most PersistentVolumeClaims and to `emptyDir`, it re-groups data another
@@ -257,10 +257,15 @@ $ podman run -d --name openvox-ca \
     … ghcr.io/voxpupuli/openvox-ca:latest
 ```
 
-The check requests `/healthz/ready` every 30 seconds and marks the
-container unhealthy after three failures in a row. The first two minutes are a
-grace period, because the first start generates the CA key; the first check
-that passes ends it.
+The check requests `/healthz/ready` every 30 seconds and marks the container
+unhealthy after three failures in a row. The first two minutes are a grace
+period, because the first start generates the CA key; the first check that
+passes ends it. With [`crl_chain.urls`](configuration.md#fetching-upstream-crls)
+set on a store holding no upstream CRL at all (or one whose stored chain cannot
+be read), readiness also waits for a fetch round to store one, so an upstream
+that cannot be reached shows here as an unhealthy container. The check's output,
+in `docker inspect`, then ends `answered HTTP 503 (reason
+"waiting_for_upstream_crl_chain")`.
 
 The check is its own process. It sees the container's environment and the
 server's config file, but not the arguments the server was started with:
@@ -277,8 +282,10 @@ server's config file, but not the arguments the server was started with:
   such as `--tls-cert` on the command line under `OPENVOX_CA_CONFIG=/dev/null`,
   needs nothing repeated.
 - **Certificate.** It does not verify the server's certificate. It sends no
-  credentials and reads nothing but the status code, and it has no way to know
-  which name or CA a deployment's certificate should verify against: a CA
+  credentials, and reads only the status code and, on a failure, the
+  `not_ready` reason, which it prints quoted and which cannot change its
+  result. It also has no way to know which name or CA a deployment's
+  certificate should verify against: a CA
   serving its own certificate, which cannot be verified at all, is still
   reported healthy.
 

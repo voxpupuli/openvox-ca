@@ -661,7 +661,7 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 
 	// The chain refresh takes the lock through a closure of its own rather
 	// than withCRLLockYielding, so it needs the same exemption pinned apart.
-	It("does not count a crl_chain_file refresh whose wait a shutdown ended", func() {
+	It("does not count a crl_chain.file refresh whose wait a shutdown ended", func() {
 		myCA.sweep = sweepTuning{stepBudget: 10 * time.Second, stepPause: 10 * time.Millisecond}
 		path := filepath.Join(dir, "chain.pem")
 		Expect(os.WriteFile(path, nil, 0o600)).To(Succeed())
@@ -1442,7 +1442,7 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 		Expect(sweepStepPause).To(BeNumerically(">", storage.RedisLockPollMaxBackoff))
 	})
 
-	It("lets the crl_chain_file read time out inside the refresh job's step", func() {
+	It("lets the crl_chain.file read time out inside the refresh job's step", func() {
 		Expect(crlChainReadTimeout).To(BeNumerically("<", sweepStepBudget))
 	})
 })

@@ -63,8 +63,9 @@ type ClientCA struct {
 	// anchor is trusted by configuration, so revoking one is an operator
 	// action — remove or replace this entry — not a CRL event.
 	//
-	// Not to be confused with crl_chain_file, which points the other way: that
-	// one carries this CA's own ancestors' CRLs and is published to agents.
+	// Not to be confused with crl_chain (its file or its urls), which points
+	// the other way: it carries this CA's own ancestors' CRLs and is published
+	// to agents.
 	CRLFile string `yaml:"crl_file"`
 
 	// AdminCNs are common names granted admin authority when presented by a
@@ -99,7 +100,7 @@ type ClientCAConfig struct {
 
 // ClientCRLRefreshInterval resolves how often foreign CRL bundles are re-read,
 // falling back to an hour when unset or non-positive -- the same bound
-// crl_chain_file uses, and for the same reason: the file is refreshed by
+// crl_chain.file uses, and for the same reason: the file is refreshed by
 // whatever already delivers it, and this only notices.
 func (c *ClientCAConfig) ClientCRLRefreshInterval() time.Duration {
 	if c.ClientCRLRefreshIntervalSec > 0 {

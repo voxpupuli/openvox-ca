@@ -274,7 +274,7 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'An upstream CRL published by the OpenVox CA is approaching its NextUpdate.',
-              description: 'The CRL issued by {{ $labels.issuer }} and republished by {{ $labels.instance }} reaches NextUpdate in {{ $value | humanizeDuration }}. openvox-ca cannot reissue it: refresh crl_chain_file from the issuing CA.',
+              description: 'The CRL issued by {{ $labels.issuer }} and republished by {{ $labels.instance }} reaches NextUpdate in {{ $value | humanizeDuration }}. openvox-ca cannot reissue it: get a current one from the issuing CA, through crl_chain.urls or crl_chain.file.',
             },
           },
           {
@@ -284,15 +284,17 @@
             labels: { severity: 'critical' } + $._config.alertLabels,
             annotations: {
               summary: 'An upstream CRL published by the OpenVox CA has expired.',
-              description: 'The CRL issued by {{ $labels.issuer }} and republished by {{ $labels.instance }} is past its NextUpdate. Agents using the default certificate_revocation = chain will fail verification against the whole chain. Refresh crl_chain_file from the issuing CA.',
+              description: 'The CRL issued by {{ $labels.issuer }} and republished by {{ $labels.instance }} is past its NextUpdate. Agents using the default certificate_revocation = chain will fail verification against the whole chain. Get a current CRL from the issuing CA, through crl_chain.urls or crl_chain.file.',
             },
           },
           {
             alert: 'OpenVoxCAUpstreamCRLDiscarded',
             // The chain shrinking is not visible in the expiry series above:
-            // a discarded CRL simply has no series at all. This is the only
-            // signal that the published chain is smaller than crl_chain_file
-            // says it should be.
+            // a discarded CRL simply has no series at all. For crl_chain.file
+            // this is the only signal that the published chain is smaller than
+            // the file says it should be. A crl_chain.urls entry's discard keeps
+            // the ancestor's published CRL, and counts as that entry's fetch
+            // failure too, so OpenVoxCAUpstreamCRLFetchFailing names its URL.
             expr: 'increase(openvoxca_crl_chain_discarded_total{%(selector)s}[%(window)s]) > 0' % {
               selector: $._config.openvoxCASelector,
               window: $._config.crlChainWindow,
@@ -300,16 +302,17 @@
             'for': $._config.crlChainFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'The OpenVox CA is discarding CRLs from crl_chain_file.',
-              description: '{{ $labels.instance }} dropped a CRL from crl_chain_file because no certificate in its CA bundle signed it, so the published chain is smaller than the file says. Check that the file holds CRLs from this CA\'s own ancestors and that the bundle is complete. If the file is stale rather than the bundle incomplete, OpenVoxCAUpstreamCRLRegressed is the alert for that.',
+              summary: 'The OpenVox CA is discarding upstream CRLs it was given.',
+              description: '{{ $labels.instance }} dropped an upstream CRL from crl_chain.file or crl_chain.urls because no certificate in its CA bundle signed it, or because it is a delta or IDP-scoped CRL rather than its issuer\'s full list; the CA log says which. From crl_chain.file, the published chain is then smaller than the file says; from a crl_chain.urls entry, that ancestor\'s published CRL is kept, and OpenVoxCAUpstreamCRLFetchFailing names the entry. Check that they hold CRLs from this CA\'s own ancestors and that the bundle is complete. If the source is stale rather than the bundle incomplete, OpenVoxCAUpstreamCRLRegressed is the alert for that.',
             },
           },
           {
             alert: 'OpenVoxCAUpstreamCRLRegressed',
             // Deliberately not folded into OpenVoxCAUpstreamCRLDiscarded. Both
-            // mean "a CRL in the file was not published", and there the
-            // similarity ends: a discard is fixed by completing the CA bundle,
-            // a regression by fixing whatever writes the file. Sharing a counter
+            // mean "a CRL from crl_chain.file or a crl_chain.urls entry was not
+            // published", and there the similarity ends: a discard is fixed by
+            // completing the CA bundle, a regression by fixing whatever
+            // refreshes the source. Sharing a counter
             // sent a paged responder to verify a bundle that was already
             // complete -- it has to be, or the CRL would have failed the
             // signature check long before this comparison.
@@ -321,7 +324,7 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'The OpenVox CA is being offered stale upstream CRLs.',
-              description: 'crl_chain_file on {{ $labels.instance }} carries an upstream CRL older than the one already published, so it was passed over and the newer one kept. Revocation is unaffected. The file is stale, rolled back or being replayed: check whatever refreshes it. If the ancestor legitimately restarted its CRL numbering (a CA rebuilt from backup, still using the same key), drop it from the file for one publish cycle and then add the new CRL back -- with nothing published to compare against, it is accepted. Publishing the older list would have un-revoked, fleet-wide, everything that ancestor revoked in between.',
+              description: 'An upstream CRL offered to {{ $labels.instance }} -- by crl_chain.file, or by a crl_chain.urls entry -- is older than the one already published, so it was passed over and the newer one kept. Revocation is unaffected. The source is stale, rolled back or being replayed: check whatever refreshes the file, or the upstream behind the URL, which OpenVoxCAUpstreamCRLFetchFailing names. If the ancestor legitimately restarted its CRL numbering (a CA rebuilt from backup, still using the same key), drop it from the publish for one cycle and then add it back -- with nothing published to compare against, it is accepted. For crl_chain.file, drop it from the file. For crl_chain.urls, remove its entry, and any mirror of it; the removal then needs an authoritative round -- every entry yielding its issuer\'s full CRL, every entry over https:// or file:///, none serving this CA\'s own CRL, no two naming the same ancestor -- and a list with an http:// entry never has one, so see configuration.md#fetching-upstream-crls for retiring an ancestor from such a list. Publishing the older list would have un-revoked, fleet-wide, everything that ancestor revoked in between. On a CA with several replicas and mirror entries for one ancestor, a short burst of regressions just after the upstream republishes -- re-counted by the fetch job\'s retries until the mirror catches up -- is a mirror a few minutes behind, and needs nothing unless it persists.',
             },
           },
           {
@@ -339,7 +342,7 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'The OpenVox CA has dropped an ancestor CRL from its published chain.',
-              description: 'An ancestor CRL has been dropped from the published chain on {{ $labels.instance }}. The file is authoritative, so this is honoured -- and it cannot be undone here, because this CA cannot re-sign another CA\'s list. There are two ways to reach this. Either the file stopped listing the ancestor -- check whatever writes it, since a glob that matched one file fewer produces exactly this -- or the ancestor\'s own certificate has left the stored CA bundle, so nothing signs its CRL any more and it can no longer be published; the log line says which, and the second is fixed by re-importing the bundle rather than by touching the file. Agents on the default certificate_revocation = chain will stop seeing anything that ancestor revoked. Act on this when you see it rather than waiting: the removal is a single event, so this alert clears after the window closes even though the ancestor stays dropped, a restart zeroes the counter, and that ancestor\'s own expiry series has simply vanished. Nothing afterwards distinguishes the shrunken chain from a correct one.',
+              description: 'An ancestor CRL has been dropped from the published chain on {{ $labels.instance }}. The configured source is authoritative, so this is honoured -- and it cannot be undone here, because this CA cannot re-sign another CA\'s list. It happens one of three ways, and the log line says which: crl_chain.file stopped listing the ancestor (check whatever writes the file -- a glob that matched one file fewer produces exactly this); an authoritative crl_chain.urls round, meaning every entry yielded its issuer\'s full CRL, every entry was fetched over https:// or file:///, none served this CA\'s own CRL and no two named the same ancestor, no longer served it (check the URL list was meant to lose it); or the ancestor\'s own certificate has left the stored CA bundle, so nothing signs its CRL any more (re-import the bundle; the file and the URL list are not at fault). Agents on the default certificate_revocation = chain will stop seeing anything that ancestor revoked. Act on this when you see it rather than waiting: the removal is a single event, so this alert clears after the window closes even though the ancestor stays dropped, a restart zeroes the counter, and that ancestor\'s own expiry series has simply vanished. Nothing afterwards distinguishes the shrunken chain from a correct one.',
             },
           },
           {
@@ -350,7 +353,7 @@
             // healthy while the ancestors age out.
             //
             // This is expressible only because the series is exported wherever
-            // crl_chain_file is *configured* rather than once it has been read;
+            // crl_chain.file is *configured* rather than once it has been read;
             // gating on first read made absent() mean "never opened" and "not
             // using the feature" indistinguishably, so any alert on it fired
             // across the whole fleet.
@@ -360,8 +363,8 @@
             'for': $._config.crlChainFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
-              summary: 'The OpenVox CA has never read its configured crl_chain_file.',
-              description: 'crl_chain_file is set on {{ $labels.instance }} but has never been opened -- a wrong path, or a Secret that never mounted. The feature is doing nothing, and because an absent file is treated as "no statement" rather than an error, nothing else reports it. Note this does not catch a subPath mount: that reads successfully forever, so it looks healthy here and shows up as OpenVoxCAUpstreamCRLExpiringSoon instead.',
+              summary: 'The OpenVox CA has never read its configured crl_chain.file.',
+              description: 'crl_chain.file is set on {{ $labels.instance }} but has never been opened -- a wrong path, or a Secret that never mounted. The feature is doing nothing, and because an absent file is treated as "no statement" rather than an error, nothing else reports it. Note this does not catch a subPath mount: that reads successfully forever, so it looks healthy here and shows up as OpenVoxCAUpstreamCRLExpiringSoon instead.',
             },
           },
           {
@@ -374,7 +377,69 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'The OpenVox CA cannot refresh its upstream CRL chain.',
-              description: 'Refreshing crl_chain_file on {{ $labels.instance }} is failing, so the published ancestor CRLs are ageing with nothing renewing them. The existing chain is left in place; check the file is readable, parseable, ends on a PEM block boundary, and is under 4 MiB. Note this also blocks revocation until it is fixed.',
+              description: 'Refreshing crl_chain.file on {{ $labels.instance }} is failing, so the published ancestor CRLs are ageing with nothing renewing them. The existing chain is left in place; check the file is readable, parseable, ends on a PEM block boundary, and is under 4 MiB. Note this also blocks revocation until it is fixed.',
+            },
+          },
+          {
+            alert: 'OpenVoxCAUpstreamCRLFetchFailing',
+            // Counts every round in which an entry yielded nothing usable,
+            // including a transfer that succeeded: a 200 carrying an error
+            // page, the wrong issuer's CRL, a stale mirror's or an expired one.
+            // Those are exactly the failures nothing else reports: the published
+            // chain keeps what it had, and readiness, once released, never
+            // turns red again.
+            expr: 'increase(openvoxca_crl_chain_fetch_failures_total{%(selector)s}[%(window)s]) >= %(threshold)d' % {
+              selector: $._config.openvoxCASelector,
+              window: $._config.crlChainFetchWindow,
+              threshold: $._config.crlChainFetchFailureThreshold,
+            },
+            'for': $._config.crlChainFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The OpenVox CA cannot get a usable upstream CRL from one of its crl_chain.urls.',
+              description: '{{ $labels.instance }} is not getting a usable, current CRL from {{ $labels.url }}. The CA log names the reason: a connection or HTTP failure, a response that is not exactly one CRL, one over 4 MiB as received or a CRL over 4 MiB as PEM, a CRL nothing in the CA bundle signed, a delta or IDP-scoped CRL, one older than the CRL already published, an expired one, or this CA\'s own CRL. If every entry fails at once while each fetches cleanly, look for the log line \"The upstream CRLs from crl_chain.urls would make the published chain too large\": if it is there, the CRLs together would exceed 4 MiB and the round was refused as a whole. On a CA with several replicas and mirror entries, one short burst just after an upstream republishes is a mirror catching up with the CRL another replica already published. The published chain keeps what it had for that ancestor -- unless the entry served an expired CRL that is still newer, which is published anyway as strictly better -- and revocation is unaffected.',
+            },
+          },
+          {
+            alert: 'OpenVoxCAUpstreamCRLNeverFetched',
+            // The series is exported at 0 for every configured entry from
+            // startup, so this distinguishes "never succeeded" from "not
+            // configured", as OpenVoxCAUpstreamCRLNeverRead does for the file.
+            //
+            // crlChainFor's 15 minutes, deliberately, not a window of hours
+            // like its neighbours: on a store that already holds a chain --
+            // the usual switchover from crl_chain.file -- the pod is ready
+            // either way, so this is the only timely signal of a typo, a wrong
+            // issuer path or a TLS failure in the new list.
+            expr: 'openvoxca_crl_chain_fetch_last_success_timestamp_seconds{%(selector)s} == 0' % {
+              selector: $._config.openvoxCASelector,
+            },
+            'for': $._config.crlChainFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'The OpenVox CA has never fetched a usable CRL from one of its crl_chain.urls.',
+              description: '{{ $labels.instance }} has not had a usable CRL from {{ $labels.url }} since it started. Check the URL, the NetworkPolicy egress to it, and crl_chain.http_config; the CA log names the reason. On a store with no upstream CRL at all, this CA is also being held unready until a fetch round stores one. If every crl_chain.urls entry on this instance is affected at once and OpenVoxCAUpstreamCRLFetchFailing is silent, the fetches are fine and the merge is failing: see OpenVoxCACRLUpdateFailing and the CA log line "Could not merge fetched upstream CRLs".',
+            },
+          },
+          {
+            alert: 'OpenVoxCAUpstreamCRLFetchStale',
+            // Fires on age alone, so it catches a fetch that has stopped
+            // counting anything, which the failure alert cannot. The expiry
+            // alerts are measured from nextUpdate and, against a long-lived
+            // upstream CRL, stay silent for days after fetching stops.
+            expr: |||
+              time() - openvoxca_crl_chain_fetch_last_success_timestamp_seconds{%(selector)s} > %(stale)d
+              and
+              openvoxca_crl_chain_fetch_last_success_timestamp_seconds{%(selector)s} > 0
+            ||| % {
+              selector: $._config.openvoxCASelector,
+              stale: $._config.crlChainFetchStaleSeconds,
+            },
+            'for': $._config.crlChainFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'An upstream CRL from crl_chain.urls has not been refreshed recently.',
+              description: '{{ $labels.instance }} last had a usable CRL from {{ $labels.url }} {{ $value | humanizeDuration }} ago. The published copy is still being served, so nothing fails until that CRL reaches its nextUpdate; find out why the entry stopped delivering before it does. OpenVoxCAUpstreamCRLFetchFailing says why, if failures are being counted. If every crl_chain.urls entry on this instance is affected at once and OpenVoxCAUpstreamCRLFetchFailing is silent, the fetches are fine and the merge is failing: see OpenVoxCACRLUpdateFailing and the CA log line "Could not merge fetched upstream CRLs".',
             },
           },
         ],
@@ -512,9 +577,10 @@
           {
             alert: 'OpenVoxCACRLUpdateFailing',
             // The CA failed to amend the CRL — a CRL it could not re-sign,
-            // write or read, on any of the four paths that write one (revoke,
-            // reissue, refresh or expired-cert cleanup). Some callers swallow
-            // this (e.g. the best-effort revoke of a superseded cert on
+            // write or read, on any of the eight paths that write one (see
+            // crl_update_failures_total in docs/metrics.md: the crl_chain.urls
+            // merge and the crl_chain.file refresh among them). Some callers
+            // swallow this (e.g. the best-effort revoke of a superseded cert on
             // renewal), so a revoked/superseded certificate may remain valid.
             // Not every revocation that missed the CRL lands here, and which
             // ones do depends on the backend: one refused at a lock
@@ -542,7 +608,7 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'OpenVox CA is failing to update its CRL.',
-              description: 'The OpenVox CA on {{ $labels.instance }} could not amend its CRL %(threshold)d or more times in %(window)s (openvoxca_crl_update_failures_total); a single failure during a backend restart does not fire this. Revocations may not have taken effect and superseded certificates may still be valid. Check the CA logs to tell the causes apart: "Renew:"/"AutoRenew:"/"ReconcileManaged: failed to retire replaced certificate"/"Clean:" warnings are a real failure to maintain the CRL, and on filesystem or SQLite a "Revoke failed" warning on a request that took over a minute is instead a revocation that merely queued too long for its subject lock. The superseded-certificate sweep re-signs once per step of up to 100 due entries rather than once per entry, and stops at the first step it cannot write, so a failing sweep moves this counter once however many certificates were due: read a rising value as a count of failed CRL amendments, not of certificates left unrevoked, and use openvoxca_supersede_pending for those. A log line containing "behind a priority caller" from the CRL refresh, the crl_chain_file refresh or the expired-certificate cleanup is a background job that stood aside for foreground CRL work for its whole 15s budget, and is not a storage fault unless that foreground work is itself failing (look for "Revoke failed" warnings at the same time). With several replicas sweeping a large backlog at once, a step can also run out of its wait behind other replicas\' steps; that warning names the lock it was acquiring rather than a priority caller, and is contention, not a fault, while other replicas log cleanup or sweep progress. Then check CRL storage.' % {
+              description: 'The OpenVox CA on {{ $labels.instance }} could not amend its CRL %(threshold)d or more times in %(window)s (openvoxca_crl_update_failures_total); a single failure during a backend restart does not fire this. Revocations may not have taken effect and superseded certificates may still be valid. Check the CA logs to tell the causes apart: "Renew:"/"AutoRenew:"/"ReconcileManaged: failed to retire replaced certificate"/"Clean:" warnings are a real failure to maintain the CRL, and on filesystem or SQLite a "Revoke failed" warning on a request that took over a minute is instead a revocation that merely queued too long for its subject lock. The superseded-certificate sweep re-signs once per step of up to 100 due entries rather than once per entry, and stops at the first step it cannot write, so a failing sweep moves this counter once however many certificates were due: read a rising value as a count of failed CRL amendments, not of certificates left unrevoked, and use openvoxca_supersede_pending for those. A log line containing "behind a priority caller" from the CRL refresh, the crl_chain.file refresh or the expired-certificate cleanup is a background job that stood aside for foreground CRL work for its whole 15s budget, and is not a storage fault unless that foreground work is itself failing (look for "Revoke failed" warnings at the same time). With several replicas sweeping a large backlog at once, a step can also run out of its wait behind other replicas\' steps; that warning names the lock it was acquiring rather than a priority caller, and is contention, not a fault, while other replicas log cleanup or sweep progress. With crl_chain.urls or crl_chain.file set, "Could not merge fetched upstream CRLs into the published chain" or "Could not refresh the upstream CRL chain" is that job\'s pass failing, once per crl_chain.refresh_interval_sec. Then check CRL storage.' % {
                 threshold: $._config.crlUpdateThreshold,
                 window: $._config.crlUpdateWindow,
               },

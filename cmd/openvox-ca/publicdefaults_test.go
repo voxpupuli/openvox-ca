@@ -147,7 +147,7 @@ var _ = Describe("the covered defaults, as literals", func() {
 		},
 		Entry("crl_sync_interval_sec", "crl_sync_interval_sec",
 			func() time.Duration { return cfg.crlSyncInterval() }, time.Minute),
-		Entry("the CRL chain refresh interval", "crl_chain_refresh_interval_sec",
+		Entry("the CRL chain refresh interval", "crl_chain.refresh_interval_sec",
 			func() time.Duration { return cfg.crlChainRefreshInterval() }, time.Hour),
 		Entry("client_crl_refresh_interval_sec", "client_crl_refresh_interval_sec",
 			func() time.Duration { return (&config.ClientCAConfig{}).ClientCRLRefreshInterval() }, time.Hour),

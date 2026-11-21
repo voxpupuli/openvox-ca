@@ -1499,12 +1499,14 @@ Notes:
 | Drop-in for OpenVox/Puppet Server CA | yes | no (key paths change) | no (key paths change) | no (key paths change) | no (key paths change) |
 
 > **If you publish an upstream CRL chain**, note that `openvox-ca-ctl import`
-> writes to a local filesystem directory only. On every backend except
-> `filesystem` — and on any backend under `ca_key_provider: openbao` —
-> [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is not
-> merely the better way to keep ancestor CRLs current, it is the only one that
-> does not require stopping the CA. On a non-`filesystem` backend there is a
-> `migrate` round trip if you cannot deliver a file to the pod — see
+> writes to a local filesystem directory only, and on `filesystem` too it takes
+> the instance lock, so it refuses to run beside a server. On every backend,
+> then — and on any backend under `ca_key_provider: openbao` — the
+> [`crl_chain`](configuration.md#publishing-an-upstream-crl-chain) block
+> (`crl_chain.urls` or `crl_chain.file`) is not merely the better way to keep
+> ancestor CRLs current, it is the only one that does not require stopping the
+> CA. On a non-`filesystem` backend there is a `migrate` round trip if you can
+> neither fetch the CRLs nor deliver a file to the pod — see
 > [re-importing a chain](migrating-from-puppet-server.md#refreshing-ancestor-crls)
 > for it, and for the limits. Under `ca_key_provider: openbao` there is **no**
 > fallback: there is no exportable key at all.

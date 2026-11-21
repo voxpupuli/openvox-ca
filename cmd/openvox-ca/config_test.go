@@ -1211,8 +1211,10 @@ func serverEnvBindings() []serverEnvBinding {
 		{"OPENVOX_CA_LOGFILE", "/var/log/puppet.log", func(c *serverConfig) any { return &c.LogFile }, "/var/log/puppet.log"},
 		{"OPENVOX_CA_TLS_CERT", "/etc/tls/cert.pem", func(c *serverConfig) any { return &c.TLSCert }, "/etc/tls/cert.pem"},
 		{"OPENVOX_CA_TLS_KEY", "/etc/tls/key.pem", func(c *serverConfig) any { return &c.TLSKey }, "/etc/tls/key.pem"},
-		{"OPENVOX_CA_CRL_CHAIN_FILE", "/etc/tls/chain.crl", func(c *serverConfig) any { return &c.CRLChainFile }, "/etc/tls/chain.crl"},
-		{"OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", "600", func(c *serverConfig) any { return &c.CRLChainRefreshIntervalSec }, 600},
+		{"OPENVOX_CA_CRL_CHAIN_FILE", "/etc/tls/chain.crl", func(c *serverConfig) any { return &c.CRLChain.File }, "/etc/tls/chain.crl"},
+		{"OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", "600", func(c *serverConfig) any { return &c.CRLChain.RefreshIntervalSec }, 600},
+		{"OPENVOX_CA_CRL_CHAIN_URLS", "https://a.test/r.crl, file:///b.crl", func(c *serverConfig) any { return &c.CRLChain.URLs }, []string{"https://a.test/r.crl", "file:///b.crl"}},
+		{"OPENVOX_CA_CRL_CHAIN_FETCH_TIMEOUT_SEC", "45", func(c *serverConfig) any { return &c.CRLChain.FetchTimeoutSec }, 45},
 		{"OPENVOX_CA_PUPPET_SERVER", "puppet-master", func(c *serverConfig) any { return &c.PuppetServer }, "puppet-master"},
 		{"OPENVOX_CA_PUPPET_SERVER_FILE", "/etc/openvox-ca/servers.txt", func(c *serverConfig) any { return &c.PuppetServerFile }, "/etc/openvox-ca/servers.txt"},
 		{"OPENVOX_CA_NO_PP_CLI_AUTH", "true", func(c *serverConfig) any { return &c.NoPpCliAuth }, true},
@@ -1593,27 +1595,41 @@ var _ = Describe("crlChainRefreshInterval", func() {
 
 	It("is read from the config file", func() {
 		clearServerEnv()
-		cfg, err := loadServerConfig(writeTempConfig("crl_chain_refresh_interval_sec: 300\n"))
+		cfg, err := loadServerConfig(writeTempConfig("crl_chain:\n  refresh_interval_sec: 300\n"))
 		Expect(err).NotTo(HaveOccurred(), "unexpected error")
 		Expect(cfg.crlChainRefreshInterval()).To(Equal(5*time.Minute),
 			"crlChainRefreshInterval() = %v; want %v", cfg.crlChainRefreshInterval(), 5*time.Minute)
 	})
 
-	It("falls back to the default for a non-positive env value", func() {
-		// The guard is load-bearing rather than tidy: a zero or negative
-		// interval reaches time.NewTicker, which panics. The comment above has
-		// claimed as much since this Describe was written while only the yaml
-		// path was driven, so the env key -- the likelier place for an operator
-		// to put a "0" meaning "off" -- could have been let through unnoticed.
-		for _, v := range []string{"0", "-30"} {
-			clearServerEnv()
-			setEnv("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", v)
-			cfg, err := loadServerConfig("")
-			Expect(err).NotTo(HaveOccurred(), "unexpected error")
-			Expect(cfg.crlChainRefreshInterval()).To(Equal(defaultCRLChainRefreshInterval),
-				"%s must not reach time.NewTicker", v)
-		}
+	It("treats 0 from the environment as the default", func() {
+		clearServerEnv()
+		setEnv("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", "0")
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred(), "unexpected error")
+		Expect(cfg.crlChainRefreshInterval()).To(Equal(defaultCRLChainRefreshInterval))
 	})
+
+	// Refused rather than defaulted. The guard is load-bearing: a negative
+	// interval, or one large enough to wrap when multiplied into a Duration,
+	// reaches the job's timer as a non-positive wait -- a panic in the file
+	// job's ticker, a tight loop of fetches in the URL job.
+	DescribeTable("refuses an interval out of range, from the file and from the environment",
+		func(fromEnv bool, v string) {
+			clearServerEnv()
+			path := ""
+			if fromEnv {
+				setEnv("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", v)
+			} else {
+				path = writeTempConfig("crl_chain:\n  refresh_interval_sec: " + v + "\n")
+			}
+			_, err := loadServerConfig(path)
+			Expect(err).To(MatchError(ContainSubstring("crl_chain.refresh_interval_sec must be between 0")))
+		},
+		Entry("negative, from the environment", true, "-30"),
+		Entry("negative, from the file", false, "-30"),
+		Entry("past the ceiling, from the environment", true, "9223372037"),
+		Entry("past the ceiling, from the file", false, "2592001"),
+	)
 
 	It("honours the env override", func() {
 		clearServerEnv()
@@ -1923,44 +1939,107 @@ var _ = Describe("allow_duplicate_certs wiring", func() {
 	)
 })
 
-// --- crl_chain_file wiring ---
+// --- crl_chain wiring ---
 
-var _ = Describe("crl_chain_file wiring", func() {
-	// The setting is file-and-environment only, and its failure mode is total
-	// silence: a value that never reaches ca.CRLChainFile leaves the feature
-	// off with no error, no warning and no metric — the published chain simply
+var _ = Describe("crlChainFetchTimeout", func() {
+	BeforeEach(func() { clearServerEnv() })
+
+	It("defaults to 30s", func() {
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.crlChainFetchTimeout()).To(Equal(defaultCRLChainFetchTimeout))
+		Expect(defaultCRLChainFetchTimeout).To(Equal(30 * time.Second))
+	})
+
+	It("is read from the config file", func() {
+		cfg, err := loadServerConfig(writeTempConfig("crl_chain:\n  fetch_timeout_sec: 7\n"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.crlChainFetchTimeout()).To(Equal(7 * time.Second))
+	})
+
+	It("is read from the environment", func() {
+		setEnv("OPENVOX_CA_CRL_CHAIN_FETCH_TIMEOUT_SEC", "9")
+		cfg, err := loadServerConfig("")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cfg.crlChainFetchTimeout()).To(Equal(9 * time.Second))
+	})
+})
+
+var _ = Describe("crl_chain wiring", func() {
+	// Both sources are file-and-environment only, and their failure mode is
+	// total silence: a crl_chain.file that never reaches ca.CRLChainFile, or
+	// crl_chain.urls that never reach SetCRLChainURLs, leaves the feature off
+	// with no error, no warning and no metric — the published chain simply
 	// never gains the ancestor CRLs the operator configured.
 	BeforeEach(func() { clearServerEnv() })
 
 	It("is empty by default", func() {
 		cfg, err := loadServerConfig("")
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.CRLChainFile).To(BeEmpty())
+		Expect(cfg.CRLChain.File).To(BeEmpty())
 	})
 
 	It("is read from the config file", func() {
-		path := writeTempConfig("crl_chain_file: /etc/openvox-ca/upstream-crls.pem\n")
+		path := writeTempConfig("crl_chain:\n  file: /etc/openvox-ca/upstream-crls.pem\n")
 		cfg, err := loadServerConfig(path)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.CRLChainFile).To(Equal("/etc/openvox-ca/upstream-crls.pem"))
+		Expect(cfg.CRLChain.File).To(Equal("/etc/openvox-ca/upstream-crls.pem"))
 	})
 
 	It("is read from the environment, which outranks the file", func() {
-		path := writeTempConfig("crl_chain_file: /from/file.pem\n")
+		path := writeTempConfig("crl_chain:\n  file: /from/file.pem\n")
 		setEnv("OPENVOX_CA_CRL_CHAIN_FILE", "/from/env.pem")
 		cfg, err := loadServerConfig(path)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(cfg.CRLChainFile).To(Equal("/from/env.pem"))
+		Expect(cfg.CRLChain.File).To(Equal("/from/env.pem"))
 	})
 
 	It("reaches the CA, which is the step whose absence is silent", func() {
-		cfg, err := loadServerConfig(writeTempConfig("crl_chain_file: /etc/openvox-ca/upstream-crls.pem\n"))
+		cfg, err := loadServerConfig(writeTempConfig("crl_chain:\n  file: /etc/openvox-ca/upstream-crls.pem\n"))
 		Expect(err).NotTo(HaveOccurred())
 
 		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
 		Expect(applyCAConfig(myCA, cfg)).To(Succeed())
 		Expect(myCA.CRLChainFile).To(Equal("/etc/openvox-ca/upstream-crls.pem"))
 	})
+
+	// Refused while the configuration loads, which is before the --daemon
+	// fork, so the operator sees it rather than a CA that "started".
+	It("refuses crl_chain.file and crl_chain.urls together", func() {
+		_, err := loadServerConfig(writeTempConfig(
+			"crl_chain:\n  file: /f.pem\n  urls: [https://pki.test/root.crl]\n"))
+		Expect(err).To(MatchError(ContainSubstring("mutually exclusive")))
+	})
+
+	It("refuses a negative fetch timeout from the environment as from the file", func() {
+		setEnv("OPENVOX_CA_CRL_CHAIN_FETCH_TIMEOUT_SEC", "-5")
+		_, err := loadServerConfig("")
+		Expect(err).To(MatchError(ContainSubstring("fetch_timeout_sec must be between 0")))
+	})
+
+	// SetCRLChainURLs is what creates the per-URL metric state: skipped, the
+	// job would still fetch and merge, but every fetch series would vanish and
+	// the alerts on them could never fire -- the same silent step as above.
+	It("brings crl_chain.urls to the CA, with each entry's metrics in place", func() {
+		cfg, err := loadServerConfig(writeTempConfig("crl_chain:\n  urls: [https://pki.test/a.crl]\n"))
+		Expect(err).NotTo(HaveOccurred())
+
+		myCA := ca.New(storage.New(GinkgoT().TempDir()), ca.AutosignConfig{Mode: "off"}, "puppet.test")
+		Expect(applyCAConfig(myCA, cfg)).To(Succeed())
+		Expect(myCA.UpstreamFetchStatuses()).To(Equal([]ca.UpstreamFetchStatus{{URL: "https://pki.test/a.crl"}}))
+	})
+
+	// The keys moved into the crl_chain block before 1.0.0 (#663). The old
+	// top-level spellings must be refused rather than ignored: an ignored
+	// crl_chain_file is the total silence described above.
+	DescribeTable("refuses the keys it replaced",
+		func(key string) {
+			_, err := loadServerConfig(writeTempConfig(key + ": /x\n"))
+			Expect(err).To(MatchError(ContainSubstring(key)))
+		},
+		Entry("crl_chain_file", "crl_chain_file"),
+		Entry("crl_chain_refresh_interval_sec", "crl_chain_refresh_interval_sec"),
+	)
 })
 
 // --- serial_number_format: from configuration to the server ---
