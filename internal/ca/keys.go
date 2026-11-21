@@ -152,9 +152,46 @@ func validatePublicKey(pub crypto.PublicKey) error {
 	}
 }
 
+// resolveKeyConfig completes cfg, one of the CA's own key settings, from def,
+// that setting's built-in default. Each half falls back on its own: nothing
+// set is def; a size alone is that size of RSA, the default algorithm; and an
+// algorithm alone is that algorithm at def's size when it is def's algorithm,
+// or at its own built-in (P-256) when it is not. An unknown algorithm is left
+// as it is, for ValidateKeyConfig to refuse.
+//
+// It exists because the two halves were once resolved as a pair, which
+// dropped whichever one was set alone (#681): `ca_key_size: 2048` bootstrapped
+// an RSA-4096 CA, and `leaf_key_algo: rsa` generated RSA-4096 leaves rather
+// than the documented 2048, because generateKey's own zero-size default is the
+// CA's. A managed certificate's key_algo and key_size do not come through here:
+// they inherit as a pair, and the half left unset takes the algorithm's own
+// built-in, as docs/configuration.md documents.
+func resolveKeyConfig(cfg, def KeyConfig) KeyConfig {
+	if cfg.Algo == "" {
+		if cfg.Size == 0 {
+			return def
+		}
+		cfg.Algo = KeyAlgoRSA
+	}
+	if cfg.Size == 0 {
+		switch cfg.Algo {
+		case def.Algo:
+			cfg.Size = def.Size
+		case KeyAlgoECDSA:
+			cfg.Size = 256
+		}
+	}
+	return cfg
+}
+
+// caKeyConfig resolves the algorithm and size this CA bootstraps its own key
+// with, from CAKeyConfig and DefaultCAKeyConfig.
+func (c *CA) caKeyConfig() KeyConfig {
+	return resolveKeyConfig(c.CAKeyConfig, DefaultCAKeyConfig)
+}
+
 // leafKeyConfig resolves the algorithm and size this CA generates leaf keys
-// with: the configured LeafKeyConfig, or DefaultLeafKeyConfig when it says
-// nothing.
+// with, from LeafKeyConfig and DefaultLeafKeyConfig.
 //
 // One definition, because there were briefly two. The managed path tested
 // Algo-or-Size while this one tested Algo alone, and they disagreed about
@@ -163,10 +200,7 @@ func validatePublicKey(pub crypto.PublicKey) error {
 // other on a single CA. A defaulting rule with two copies is a rule that has
 // already drifted.
 func (c *CA) leafKeyConfig() KeyConfig {
-	if c.LeafKeyConfig.Algo != "" || c.LeafKeyConfig.Size != 0 {
-		return c.LeafKeyConfig
-	}
-	return DefaultLeafKeyConfig
+	return resolveKeyConfig(c.LeafKeyConfig, DefaultLeafKeyConfig)
 }
 
 // generateKey creates a fresh private key according to cfg.
@@ -181,11 +215,22 @@ func generateKey(cfg KeyConfig) (crypto.Signer, error) {
 	}
 	switch algo {
 	case KeyAlgoRSA:
-		size := cfg.Size
-		if size == 0 {
-			size = 4096
+		// One literal per size rather than passing cfg.Size through, so the
+		// key size reaching rsa.GenerateKey is visibly one of the three this
+		// CA allows. CodeQL's go/weak-crypto-key cannot see ValidateKeyConfig
+		// as the bound, and once the resolver began writing 256 (the P-256
+		// size) into Size it reported that as an RSA key size.
+		switch cfg.Size {
+		case 0, 4096:
+			return rsa.GenerateKey(rand.Reader, 4096)
+		case 3072:
+			return rsa.GenerateKey(rand.Reader, 3072)
+		case 2048:
+			return rsa.GenerateKey(rand.Reader, 2048)
+		default:
+			// Already caught by ValidateKeyConfig; unreachable.
+			return nil, fmt.Errorf("unsupported RSA key size %d", cfg.Size)
 		}
-		return rsa.GenerateKey(rand.Reader, size)
 	case KeyAlgoECDSA:
 		var curve elliptic.Curve
 		switch cfg.Size {

@@ -574,7 +574,7 @@ var _ = Describe("Resolving the leaf key configuration", func() {
 	})
 
 	It("honours a size configured without an algorithm", func() {
-		Expect(myCA.leafKeyConfig()).To(Equal(KeyConfig{Size: 4096}),
+		Expect(myCA.leafKeyConfig()).To(Equal(KeyConfig{Algo: KeyAlgoRSA, Size: 4096}),
 			"dropping the Size test here silently downgrades every leaf to the default")
 	})
 
@@ -592,7 +592,7 @@ var _ = Describe("Resolving the leaf key configuration", func() {
 	})
 
 	It("reaches the managed path through keyConfigFor", func() {
-		Expect(myCA.keyConfigFor(CertSpec{})).To(Equal(KeyConfig{Size: 4096}))
+		Expect(myCA.keyConfigFor(CertSpec{})).To(Equal(KeyConfig{Algo: KeyAlgoRSA, Size: 4096}))
 	})
 
 	It("still prefers an entry's own setting over the CA's", func() {

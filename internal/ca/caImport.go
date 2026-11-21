@@ -38,7 +38,8 @@ func ImportCA(ctx context.Context, store *storage.StorageService, certBundlePEM,
 	return ImportCAWithOptions(ctx, store, certBundlePEM, keyPEM, crlPEM, ImportCAOptions{})
 }
 
-// ImportCAOptions says how ImportCAWithOptions stores the CA key.
+// ImportCAOptions says how ImportCAWithOptions stores the CA key, and how long
+// a CRL it signs is valid for.
 type ImportCAOptions struct {
 	// EncryptCAKey writes the key encrypted under the passphrase KeyPassphrase
 	// resolves, through the encoder bootstrap uses, whatever form it was given
@@ -53,6 +54,11 @@ type ImportCAOptions struct {
 	// one in storage. Without it that import is refused with
 	// ErrPlaintextOverEncrypted.
 	AllowPlaintextOverEncrypted bool
+
+	// CRLValidity is how long the CRL the import signs, when none is given or
+	// stored, stays valid: the server's crl_validity_days, which the import
+	// cannot read for itself. Zero is the package default, CRLValidity.
+	CRLValidity time.Duration
 }
 
 // ErrPlaintextOverEncrypted reports an import that would replace an encrypted
@@ -127,6 +133,12 @@ func ImportCAWithOptions(ctx context.Context, store *storage.StorageService, cer
 		}
 	}
 	writingPlaintext := !opts.EncryptCAKey && !isEncryptedPEM(keyBlock)
+	// The same zero-means-default rule as CRLValidityDuration, repeated
+	// because an import has no CA instance to ask.
+	crlValidity := opts.CRLValidity
+	if crlValidity <= 0 {
+		crlValidity = CRLValidity
+	}
 
 	lockCtx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()
@@ -136,7 +148,7 @@ func ImportCAWithOptions(ctx context.Context, store *storage.StorageService, cer
 				return err
 			}
 		}
-		if err := ImportCAMaterial(ctx, store, certBundlePEM, storedKeyPEM, crlPEM, caKey, CRLValidity); err != nil {
+		if err := ImportCAMaterial(ctx, store, certBundlePEM, storedKeyPEM, crlPEM, caKey, crlValidity); err != nil {
 			return err
 		}
 		if !writingPlaintext {
@@ -313,7 +325,7 @@ func importCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 	// the authoritative decision is taken again under the CRL lock below, so
 	// that the read it depends on and the write that follows are atomic with
 	// respect to a concurrent revocation.
-	if _, _, _, err := planCRLImport(ctx, store, crlPEM, caCert, signer); err != nil {
+	if _, _, _, err := planCRLImport(ctx, store, crlPEM, caCert, signer, crlValidity); err != nil {
 		return err
 	}
 
@@ -374,7 +386,7 @@ func importCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 	lockCtx, cancel := context.WithTimeout(ctx, LockTimeout)
 	defer cancel()
 	if err := store.WithLock(lockCtx, lockNameCRL, func() error {
-		plan, superseded, changed, err := planCRLImport(ctx, store, crlPEM, caCert, signer)
+		plan, superseded, changed, err := planCRLImport(ctx, store, crlPEM, caCert, signer, crlValidity)
 		if err != nil {
 			return err
 		}
@@ -435,8 +447,13 @@ func importCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 // every ancestor block this branch exists to preserve *and* every revocation
 // recorded so far — silently, and looking entirely healthy afterwards, because
 // block 0 was legitimately ours. Nothing supplied means nothing to change.
+//
+// A CRL of ours that has to be signed afresh, because neither crlPEM nor the
+// store holds one, is valid for crlValidity: the setting the caller was handed.
+// Both sites once passed the package default instead, so the configured
+// validity reached only the re-signing path (#681).
 func planCRLImport(ctx context.Context, store *storage.StorageService, crlPEM []byte,
-	caCert *x509.Certificate, caKey crypto.Signer,
+	caCert *x509.Certificate, caKey crypto.Signer, crlValidity time.Duration,
 ) ([]*x509.RevocationList, int, bool, error) {
 	stored, err := storedCRLChain(ctx, store)
 	if err != nil {
@@ -462,7 +479,7 @@ func planCRLImport(ctx context.Context, store *storage.StorageService, crlPEM []
 			}
 			return ordered, dropped, true, nil
 		}
-		generated, err := newEmptyCRL(caCert, caKey, CRLValidity)
+		generated, err := newEmptyCRL(caCert, caKey, crlValidity)
 		if err != nil {
 			return nil, 0, false, err
 		}
@@ -515,7 +532,7 @@ func planCRLImport(ctx context.Context, store *storage.StorageService, crlPEM []
 		// silently un-revokes the fleet.
 		ourCRL := ownCRLIn(stored, caCert)
 		if ourCRL == nil {
-			ourCRL, err = newEmptyCRL(caCert, caKey, CRLValidity)
+			ourCRL, err = newEmptyCRL(caCert, caKey, crlValidity)
 			if err != nil {
 				return nil, 0, false, err
 			}

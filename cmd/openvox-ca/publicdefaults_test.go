@@ -46,8 +46,9 @@ import (
 //     issued certificate in internal/ca's keys_test.go;
 //   - a client_ca entry's allow_pp_cli_auth, through a loaded configuration in
 //     clientca_test.go;
-//   - the key configurations' resolvers, in internal/ca; the rows below pin
-//     the defaults those resolvers fall back to (and see #681).
+//   - how the key configurations resolve a half-set pair, in internal/ca's
+//     keyconfig_internal_test.go; the rows below pin the defaults that
+//     resolution falls back to.
 //
 // What each kind of change needs:
 //   - an access or refusal default (what is granted, accepted or refused),

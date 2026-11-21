@@ -206,10 +206,10 @@ func (c *CA) invalidateOCSPForNewlyRevokedLocked(previous, current *x509.Revocat
 // carries only ancestors and nothing of ours was stored either. Re-signing an
 // existing CRL goes through signCRLLocked, which bumps.
 //
-// validity is a parameter rather than c.crlValidity() because ImportCA has no CA
-// instance at all: it works against storage directly, so there is no
-// CRLValidityDays setting for it to honour, and it passes the package default.
-// Bootstrap does have one and passes it.
+// validity is a parameter rather than c.CRLValidityDuration() because ImportCA
+// has no CA instance at all: it works against storage directly, so it is handed
+// the validity in ImportCAOptions (openvox-ca-ctl import's --crl-validity-days).
+// Bootstrap does have a CA and passes its setting.
 func newEmptyCRL(cert *x509.Certificate, key crypto.Signer, validity time.Duration) (*x509.RevocationList, error) {
 	now := time.Now().UTC()
 	template := &x509.RevocationList{
