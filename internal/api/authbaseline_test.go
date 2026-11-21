@@ -190,9 +190,10 @@ type routeCase struct {
 //     POST /generate/{subject}, which this table does not cover
 //
 // Only three are listed below. "certificate not eligible for renewal" is
-// deliberately excluded: it is unreachable under the shipped single-anchor
-// topology, and the change that makes it reachable — trusting a second issuer
-// for client authentication — is exactly the change that must not slip past
+// deliberately excluded: it is unreachable in every shipped topology, client_ca
+// included, because renewal's own-CA tier rejects a foreign certificate in the
+// middleware first, and a change that made it reachable — letting a foreign
+// certificate past that tier — is exactly the change that must not slip past
 // this file. Left out, it lands in unrecognised403, which the route table
 // fails on, forcing a decision then. Listed, it would bucket as "admitted"
 // and the topology change would move no cell.

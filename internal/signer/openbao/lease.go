@@ -91,8 +91,9 @@ type TokenManager struct {
 	// loginTimeout bounds a single login/renew round trip (and, via
 	// Signer.Sign, a single Transit sign round trip). Captured from
 	// cfg.loginTimeout() at construction so every code path — the initial
-	// login, background re-authentication, and reactive Reauth — honours the
-	// operator's configured value rather than the built-in default.
+	// login, background re-authentication, and reactive Reauth — uses the same
+	// value. The server's configuration does not expose it, so there it is
+	// always defaultLoginTimeout (10s).
 	loginTimeout time.Duration
 
 	ctx    context.Context

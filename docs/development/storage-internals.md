@@ -16,7 +16,7 @@ interface. Every backend serves the following logical keys:
 | `ca_pubkey` | CA public key (PEM, PKIX in a `PUBLIC KEY` block, companion to `ca_cert`) | bootstrap / import / seed |
 | `ca_key` | CA private key (PEM, optionally AES-256-GCM encrypted) | bootstrap / import |
 | `crl` | Certificate Revocation List (PEM). May hold several concatenated CRLs when a chain has been imported: this CA's own first, ancestors after it. The re-sign path (`readStoredCRL`) and every reader that parses a single CRL (`loadCRLCache`) take block 0; the whole-blob consumers are `GET`/`PUT /certificate_revocation_list/ca`, `/expirations` (block 0 as `ca_crl`, every block keyed by issuer CN as `crls`, and neither if any block fails to parse), the Kubernetes exporter, `storedCRLChain` on the import path, `publishedUpstream` and `RefreshCRLChainFile` (the `crl_chain_file` job), the metrics collector's per-issuer freshness series (`UpstreamCRLStatuses`, alongside its block-0 reads), and `crlChainLocked` on the re-sign path — which preserves the stored ancestor blocks only when `crl_chain_file` is unset; with it set the file is authoritative and the stored ancestors are replaced by what it names. Revocation questions are answered from `cachedCRL`, which `loadCRLCache` fills with the block this CA signed — the newest block it signed, wherever it sits, so a stale copy of ours at block 0 is passed over as readily as an ancestor's | bootstrap, revoke, rotate, import, seed |
-| `serial` | Next leaf certificate serial counter | sign / seed |
+| `serial` | Kept for OpenVox Server's layout, written as `0001` only when absent, so a store adopted from OpenVox Server keeps its own; never read, since serials are random | seed / import |
 | `inventory` | Append-only log of issued/revoked certificates | sign / revoke / seed |
 | `inventory_hmac` | Inventory integrity head (blob HMAC, or hash chain on the structured backends: SQL, etcd, redis) | sign / revoke |
 | `hmac_key` | Integrity key for `inventory_hmac` | first run |
@@ -42,8 +42,8 @@ itself, which nothing else would write again.
 ├── ca_pub.pem                      (KeyCAPubKey)
 ├── ca_crl.pem                      (KeyCRL)
 ├── serial                          (KeySerial)
-├── inventory.txt                   (KeyInventory)
-├── .inventory.hmac                 (KeyInventoryHMAC)
+├── inventory.txt                   (KeyInventory)      0600
+├── .inventory.hmac                 (KeyInventoryHMAC)  0600
 ├── superseded.json                 (KeySuperseded)     0600
 ├── private/
 │   ├── .inventory_hmac_key         (KeyHMACKey)        0600
@@ -334,7 +334,9 @@ Lock names, holders, and ordering are documented in
 - **PostgreSQL** uses session-level advisory locks. The lock name is mapped to
   the `bigint` key `pg_advisory_lock` requires through a *partitioned* key
   space, not a uniform hash: a reserved singleton name (`bootstrap`, `crl`,
-  `sql-schema-migrate`) takes a namespaced base plus its hand-assigned ordinal,
+  `sql-schema-migrate`, `hmac-key`; the authoritative list is
+  `reservedLockOrdinals`) takes a namespaced base plus its hand-assigned
+  ordinal,
   with bit 63 clear, and every other name — every `subject:<name>` — takes the
   leading 64 bits of SHA-256 over the domain-separated name with bit 63 set. The
   two halves cannot meet, so no subject name can reach a singleton's key; see
@@ -381,7 +383,8 @@ It asserts the safe condition positively — an `Unlocker` it does not recognise
 reads as unenforced — because the failure direction of the negative form is to
 convert "cannot be shown to be quiet" into "proceed". It keys on which lock was
 taken rather than on the unlocker's type: every named lock (`crl`, `bootstrap`,
-`subject:<name>`) is implemented the same way, and holding one of those says
+`hmac-key`, `subject:<name>`) is implemented the same way, and holding one of
+those says
 nothing about being the only instance.
 
 | Backend | `SupportsDistributedLocking` | `SupportsAtomicInventory` |

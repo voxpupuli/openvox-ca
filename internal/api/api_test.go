@@ -426,6 +426,55 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(ContainSubstring("X509 CRL"))
 		})
 
+		Context("when the CRL cannot be read", func() {
+			// docs/api.md documents 404 for a missing or unreadable CRL, where
+			// OpenVox Server answers 500. #688 is expected to move the
+			// storage-failure case to 503; this pins today's answer so that
+			// change is a deliberate flip rather than a silent one.
+			var (
+				backend *getFaultBackend
+				handler http.Handler
+			)
+
+			BeforeEach(func() {
+				ctx := context.Background()
+				dir := GinkgoT().TempDir()
+				backend = &getFaultBackend{Backend: storage.NewFilesystemBackend(dir), fail: map[string]bool{}}
+				store := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+				Expect(store.EnsureDirs(ctx)).To(Succeed())
+				Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+				Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+				Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+				Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+				Expect(store.TouchInventory(ctx)).To(Succeed())
+				faultCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+				Expect(faultCA.Init(ctx)).To(Succeed())
+				handler = api.New(faultCA).Routes()
+			})
+
+			getCRL := func() *httptest.ResponseRecorder {
+				rr := httptest.NewRecorder()
+				handler.ServeHTTP(rr, httptest.NewRequest("GET", "/certificate_revocation_list/ca", nil))
+				return rr
+			}
+
+			It("answers 404 when the CRL is missing", func() {
+				Expect(getCRL().Code).To(Equal(http.StatusOK), "unfaulted, the CRL is served")
+				Expect(backend.Delete(context.Background(), storage.KeyCRL)).To(Succeed())
+				rr := getCRL()
+				Expect(rr.Code).To(Equal(http.StatusNotFound))
+				Expect(rr.Body.String()).To(ContainSubstring("CRL not found"))
+			})
+
+			It("answers 404 when reading the CRL fails", func() {
+				Expect(getCRL().Code).To(Equal(http.StatusOK), "unfaulted, the CRL is served")
+				backend.fail[storage.KeyCRL] = true
+				rr := getCRL()
+				Expect(rr.Code).To(Equal(http.StatusNotFound))
+				Expect(rr.Body.String()).To(ContainSubstring("CRL not found"))
+			})
+		})
+
 		It("serves the whole stored chain, not just this CA's own block", func() {
 			// The point of chain preservation is that the chain reaches an
 			// agent: Puppet's default certificate_revocation = chain makes the
@@ -2615,13 +2664,13 @@ var _ = Describe("API Workflow", func() {
 		})
 
 		// The two handler branches that map ErrForeignCertificate to 403 are
-		// unreachable while the middleware's trust anchor and this CA's own
-		// certificate are the same object: the middleware rejects a foreign
-		// certificate before any handler runs. They become reachable exactly
-		// when those two diverge, which is the topology the intermediate-CA
-		// work introduces — so the fixture makes them diverge deliberately,
-		// trusting a second issuer for authentication while the CA still
-		// refuses to renew its certificates.
+		// unreachable in every shipped topology, client_ca included: domain
+		// zero is built from this CA's own certificate, so the middleware
+		// rejects a foreign certificate on a renewal before any handler runs.
+		// They are a defence in depth, so the fixture makes the middleware's
+		// anchor diverge from the CA deliberately, trusting a second issuer
+		// for authentication while the CA still refuses to renew its
+		// certificates, to keep them exercised.
 		Context("when the middleware trusts an issuer the CA did not", func() {
 			var (
 				splitMux      http.Handler

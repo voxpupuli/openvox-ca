@@ -51,7 +51,7 @@ $ cosign verify ghcr.io/voxpupuli/openvox-ca@sha256:… \
 | Tag | Points at |
 | --- | --- |
 | `latest` / `latest-distroless` / `latest-alpine` | The most recent final release; pre-releases never move it, so it does not exist before 1.0.0 |
-| `1.2.3`, `1.2`, `1` (+ `-distroless`, `-alpine`) | A specific release and its semver aliases; the major-only tag (`1`) is published for v1+ releases only, so `0.x` releases have no `0` tag |
+| `1.2.3`, `1.2`, `1` (+ `-distroless`, `-alpine`) | A specific release and its semver aliases; the major-only tag (`1`) is published for v1+ releases only, so `0.x` releases have no `0` tag. A pre-release such as `1.0.0-alpha1` gets only its full version tag |
 | `edge` / `edge-distroless` / `edge-alpine` | The latest build from the default branch (`main`) |
 | `main` / `main-distroless` / `main-alpine` | Same as `edge`; the head of `main` |
 

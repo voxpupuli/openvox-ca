@@ -1445,20 +1445,13 @@ var reservedLockOrdinals = map[string]int64{
 	"bootstrap":          1,
 	"crl":                2,
 	"sql-schema-migrate": 3, // lockNameSQLMigrate, this package's own singleton
-	// hmac-key is a forward reservation for #202/#261, which adds
-	// lockNameHMACKey and takes it through StorageService.WithLock — so it
-	// reaches every backend including SQL and qualifies under the rule above.
-	// Reserved here rather than there because SQLReservedLockKeys pins this map
-	// with an exact match, so registering it from the other branch would mean
-	// editing this branch's spec; doing it here leaves that branch nothing to
-	// do. Until it lands, this is an ordinal with no caller, which costs one
-	// integer out of 2^32 and cannot collide with anything: the table is
-	// append-only, so 4 is spent either way.
+	// hmac-key is lockNameHMACKey (storage.go), which EnsureHMACKey takes
+	// through StorageService.WithLock — so it reaches every backend including
+	// SQL and qualifies under the rule above.
 	//
-	// The literal is verified, not guessed, because an append-only table cannot
-	// take back a wrong spelling: #261 declares `const lockNameHMACKey =
-	// "hmac-key"` (storage.go) and its owner confirmed the name is final before
-	// landing. Note the near-miss: `hmac_key` with an underscore is the storage
+	// The table is append-only and cannot take back a wrong spelling, so the
+	// literal must match `const lockNameHMACKey = "hmac-key"` exactly. Note the
+	// near-miss: `hmac_key` with an underscore is the storage
 	// *blob* key for the same state (see the table in
 	// docs/development/locking.md) and is a different string from the lock name.
 	"hmac-key": 4,

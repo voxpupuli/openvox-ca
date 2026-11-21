@@ -200,6 +200,20 @@ var _ = Describe("CA Lifecycle", func() {
 			Expect(hasSerial).To(BeTrue())
 		})
 
+		It("keeps a serial file that is already there", func() {
+			// A store adopted from OpenVox Server keeps that server's counter:
+			// seeding writes serial only when it is absent, as import does.
+			// docs/development/storage-internals.md states it for both.
+			Expect(seedStore.WriteSerial(context.Background(), "00FF")).To(Succeed())
+			Expect(seedCA.Init(context.Background())).To(Succeed())
+
+			_, err := seedStore.GetCRL(context.Background())
+			Expect(err).NotTo(HaveOccurred(), "Init must have seeded, or the serial was never at risk")
+			serial, err := seedStore.GetSerial(context.Background())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(serial)).To(Equal("00FF"))
+		})
+
 		It("is idempotent across repeated Init calls", func() {
 			Expect(seedCA.Init(context.Background())).To(Succeed())
 			crlBefore, err := seedStore.GetCRL(context.Background())

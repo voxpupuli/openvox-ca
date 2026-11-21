@@ -44,7 +44,7 @@ wire-compatible with your existing Puppet/OpenVox fleet.
 
 ## Features
 
-- **Puppet CA API compatibility:** all 13 endpoints used by agents and OpenVox Server, checked against responses recorded from OpenVox Server itself. The few remaining differences are listed in the [HTTP API reference](docs/api.md#differences-from-openvox-server)
+- **Puppet CA API compatibility:** the endpoints agents and OpenVox Server use, checked against responses recorded from OpenVox Server itself. The few remaining differences, including the unimplemented CRL upload, are listed in the [HTTP API reference](docs/api.md#differences-from-openvox-server)
 - **Pluggable storage:** filesystem (default; drop-in compatible with the OpenVox/Puppet Server CA layout), SQLite (single database file), or PostgreSQL / MySQL (MariaDB) / etcd / Redis (Valkey) for HA clusters; CA cert/key can be pinned to local files independently. See the [storage backends guide](docs/storage-backends.md)
 - **Pluggable CA key custody:** keep the CA private key as a local file (default) or delegate it entirely to an OpenBao Transit secrets engine key, which never leaves OpenBao — works identically on a VM (AppRole/token) or in Kubernetes (native ServiceAccount auth, no sidecar). See [OpenBao Transit-engine CA key](docs/openbao-transit.md)
 - **Autosigning:** `true`, glob-pattern file, or executable plugin modes

@@ -169,9 +169,9 @@ are a subset of what this covers: the names that must not be rebranded.
 | `checksums.txt` (SHA-256, covers the tarballs, the SBOMs and the packages) | Release workflow (`sha256sum` aggregate step) | GitHub release assets |
 | `provenance.sigstore.json` | `actions/attest`, over every line of `checksums.txt` | GitHub release assets |
 | GitHub release + auto-generated notes | `gh release create --draft --generate-notes`, then `gh release edit --draft=false` once the asset names are checked | Releases page |
-| `ghcr.io/voxpupuli/openvox-ca:{X.Y.Z,X.Y,latest}` (distroless) | *Container images* workflow | GHCR |
-| `…:{X.Y.Z,X.Y,latest}-distroless` (the same images) | *Container images* workflow | GHCR |
-| `…:{X.Y.Z,X.Y,latest}-alpine` | *Container images* workflow | GHCR |
+| `ghcr.io/voxpupuli/openvox-ca:{X.Y.Z,X.Y,X,latest}` (distroless; `X` is omitted for `v0.*`, and a pre-release gets `X.Y.Z` alone) | *Container images* workflow | GHCR |
+| `…:{X.Y.Z,X.Y,X,latest}-distroless` (the same images and the same omissions) | *Container images* workflow | GHCR |
+| `…:{X.Y.Z,X.Y,X,latest}-alpine` (the same omissions) | *Container images* workflow | GHCR |
 | `ghcr.io/voxpupuli/openvox-ca-charts/openvox-ca:X.Y.Z` | *Helm chart* workflow | GHCR (OCI, separate package) |
 
 Every tarball, SBOM and package above, plus each published image and the chart,
@@ -367,10 +367,10 @@ never name an image that does not exist.
    casually check from a Mac.
 
 4. **Skim the commits since the previous tag** so you know what the release
-   notes ought to say (for the first release, since the start of history):
+   notes ought to say:
 
    ```console
-   $ git log --oneline --no-merges v0.8.0..origin/main   # or: origin/main, for the first tag
+   $ git log --oneline --no-merges <previous-tag>..origin/main
    ```
 
    From 1.0.0, check for the notes [what the version number
@@ -507,15 +507,8 @@ requests** between the previous release tag and this one. It produces a flat
 "What's Changed" list plus a new contributors section and a full changelog
 link.
 
-Two consequences worth knowing:
-
-- **On the first-ever tag there is no previous release**, so GitHub generates
-  notes covering the entire history of the repository. For this repository
-  that is 300-plus commits, the majority of them Renovate and Dependabot
-  dependency bumps. The generated notes for `v0.9.0` will be a very long,
-  very noisy list.
-- **The notes are generated once, at release-creation time.** They are not
-  regenerated later, so editing them afterwards is safe and permanent.
+**The notes are generated once, at release-creation time.** They are not
+regenerated later, so editing them afterwards is safe and permanent.
 
 ### Curating the notes after the fact
 
@@ -527,10 +520,9 @@ $ gh release view v0.9.0                       # read what was generated
 $ gh release edit v0.9.0 --notes-file NOTES.md # replace wholesale
 ```
 
-For a first release in particular, write a short human summary at the top —
-what OpenVox CA is, what state it is in, what the notable capabilities are —
-and either trim the dependency churn or fold the auto-generated list into a
-collapsed `<details>` block beneath it.
+Write a short human summary at the top — what the release changes and what
+state it is in — and either trim the dependency churn or fold the
+auto-generated list into a collapsed `<details>` block beneath it.
 
 To see what GitHub *would* generate before you tag, ask for it directly:
 
@@ -556,7 +548,8 @@ hand-editing.
 A **semver pre-release tag** — any tag with a hyphen, e.g. `v0.9.0-rc1` — is
 handled specially by the Release and Container images workflows: the GitHub
 release is created with `--prerelease` (it will not appear as the latest stable
-release), and `docker/metadata-action` withholds the `latest` container tags.
+release), and `docker/metadata-action` withholds the `X.Y`, `X` and `latest`
+container tags, so only the full version and its suffixed forms are published.
 The Helm chart workflow treats it like any other tag — the chart publishes at
 that exact version — and because only `-dev` versions publish from `main`,
 merging the `-rc1` release-prep PR deliberately publishes nothing. Use a
@@ -585,7 +578,7 @@ your fork. Both are throwaway.
 1. Confirm the fork is **public** — the free `ubuntu-24.04-arm` runners used
    for the arm64 image builds are only free on public repositories. On a
    private fork the arm64 jobs queue indefinitely.
-2. Confirm Actions are enabled and the five workflows are active:
+2. Confirm Actions are enabled and the workflows are active:
 
    ```console
    $ gh api repos/<you>/<fork>/actions/workflows --jq '.workflows[] | {name, state}'

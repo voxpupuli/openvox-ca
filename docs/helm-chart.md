@@ -90,9 +90,12 @@ openvox-ca has a large configuration surface, and the chart deliberately does
 - **`config` always wins**, with three exceptions. The two are deep-merged with
   your `config` on top — except `port`, `cadir` and `metrics_listen`, which also
   shape a Kubernetes object (the container port and Service, the volume mount,
-  the exporter's port and any ServiceMonitor). Overriding one of those in `config`
-  alone would move the server and leave the object behind, so the chart refuses
-  the install and names the value to set instead.
+  the exporter's port and any ServiceMonitor). An override of one of those that
+  would move the server and leave the object behind is refused at install, with
+  the value to set named instead: a `port` other than `listen.port`, a `cadir`
+  outside `persistence.mountPath` (a directory under it is fine), or a
+  `metrics_listen` without `metrics.enabled` or on a port other than
+  `metrics.port`.
   This is why `verbosity` is written into the config file rather than passed as
   `--verbosity`: a flag would outrank the file unconditionally, leaving
   `config.verbosity` silently ineffective. The only argument the chart passes is
@@ -304,7 +307,7 @@ The alternatives, in the same message:
 | `config.serving_cert` | The CA issues and renews its own, into a Secret or a file pair. The way out of the bootstrap deadlock when the CA key is held at a provider, and the only route that also renews it unattended. Mutually exclusive with every route that sets `tls_cert`/`tls_key` — the two rows around this one, and `tls.existingSecret` — and the chart refuses the combination at install time. A file store must live under `persistence.mountPath` and outside `config.cadir` (both refused at install), in a directory that already exists (discovered at startup, and fatal) — see [Managed certificates](#managed-certificates) |
 | `env` / `extraEnv` — `OPENVOX_CA_TLS_CERT` and `OPENVOX_CA_TLS_KEY` | The paths come from a Secret at runtime. Environment variables outrank the config file, and the chart counts them |
 | `config.no_tls_required: true` | Only behind a trusted proxy that terminates TLS. The pod then serves plain HTTP, and without TLS the server installs no client authentication at all: every endpoint, the admin API included, answers anything that reaches the pod's port. The proxy and a [network policy](#network-policy) are the only gate |
-| `listen.host: 127.0.0.1` or `localhost` | A sidecar-only deployment. Those two spellings and nothing else: the server tests `net.ParseIP(host).IsLoopback()`, which rejects the bracketed `[::1]`, and it builds its listen address as `host + ":" + port`, which turns a bare `::1` into the unparseable `::1:8140` |
+| `listen.host: 127.0.0.1` or `localhost` | A sidecar-only deployment. Any address in `127.0.0.0/8`, or `localhost`, and no IPv6 spelling: the server tests `net.ParseIP(host).IsLoopback()`, which rejects the bracketed `[::1]`, and it builds its listen address as `host + ":" + port`, which turns a bare `::1` into the unparseable `::1:8140` |
 
 With `no_tls_required` the chart also switches the health probes to HTTP, since
 the kubelet has to speak whatever the server speaks. Set `httpGet.scheme` on a
@@ -479,8 +482,8 @@ processes — a launcher supervising an isolated signer and the frontend, see
 [CA key security](ca-key-security.md#process-isolation) — and the launcher reads
 the pod's **cgroup v2** memory ceiling and divides it between them, so the Go
 runtimes collect harder instead of hitting the cgroup wall with no configuration
-at all. On a cgroup v1 node nothing is derived and the pre-change behaviour
-stands; set `GOMEMLIMIT` explicitly there.
+at all. On a cgroup v1 node nothing is derived and each process runs with no
+Go memory limit; set `GOMEMLIMIT` explicitly there.
 
 It does not claim the whole ceiling. `GOMEMLIMIT` bounds Go runtime memory only,
 while the binary's resident text, kernel memory charged to the cgroup and a
@@ -1055,7 +1058,11 @@ on a fresh volume. A subdirectory works too if something creates it first.
 
 **On an existing release this is a migration, not a settings change.** Narrowing
 `config.cadir` points the CA at a directory that does not hold the CA tree, and
-it refuses to start rather than issuing from an empty one. Either stop the CA
+nothing notices: finding no CA there, it bootstraps a new one, and every agent
+that trusts the old CA stops trusting it. With `ca.existingSecret` it keeps its
+key but starts from an empty inventory and an empty CRL, so every certificate
+revoked under the old `cadir`, administrator credentials included,
+authenticates again. Either stop the CA
 and move the tree into the new `cadir` on the volume before changing the
 setting, or leave `cadir` alone and put the pair in another directory under
 `persistence.mountPath` that something creates — rule 3 still applies to it. The
