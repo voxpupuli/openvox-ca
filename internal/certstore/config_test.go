@@ -1496,7 +1496,7 @@ managed_certs:
 		// prefix test every sibling starting with the same characters would be
 		// refused, and the spec above would pass for that reason instead.
 		// An unset reserved setting is skipped rather than refused. The caller
-		// passes optional settings such as autosign_config and crl_chain_file,
+		// passes optional settings such as autosign_config and crl_chain.file,
 		// which are usually empty; without the skip an empty path reaches the
 		// "not an absolute path" refusal and every deployment leaving one unset
 		// fails to start.

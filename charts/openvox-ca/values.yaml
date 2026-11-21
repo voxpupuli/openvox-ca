@@ -120,6 +120,18 @@ commonAnnotations: {}
 #       interval_sec: 0   # 0 = built-in default (60s); at most 300
 #       targets:
 #         - {path: /srv/trust/crl.pem, material: crl}
+#     # Upstream CRLs published alongside this CA's own, fetched by the CA
+#     # itself, one CRL per entry. Off unless listed; exclusive with
+#     # crl_chain.file. The NetworkPolicy binds the pod, so with
+#     # networkPolicy.egress enabled, list the fetch targets in egress.rules.
+#     crl_chain:
+#       urls: []                  # http://, https:// or file:///<path>; no credentials in the URL
+#       refresh_interval_sec: 0   # 0 = built-in default (1h), at most 30 days; bounds how long an upstream revocation takes to publish
+#       fetch_timeout_sec: 0      # 0 = built-in default (30s), per entry; at most 600
+#       http_config:              # Prometheus-style, but proxy_from_environment defaults to TRUE here
+#         proxy_from_environment: true
+#         tls_config:
+#           ca_file: ""           # replaces the system roots when set
 config: {}
 
 # Use a ConfigMap you manage yourself instead of one rendered from `config`.
@@ -842,7 +854,8 @@ networkPolicy:
   # is enabled; everything else is yours to list. The policy binds the whole
   # POD, so any initContainers or extraContainers you add are bound by it too
   # and need their own destinations listed. Typically: your storage backend,
-  # OpenBao if the key lives there, anything your sidecars fetch, and the
+  # OpenBao if the key lives there, each http(s) host in
+  # config.crl_chain.urls, anything your sidecars fetch, and the
   # Kubernetes API when kubernetesExport is in use or a managed certificate uses
   # a Secret store (a file store needs none) -- OpenBao's kubernetes auth needs
   # no API egress, since the pod presents a mounted token and OpenBao does the

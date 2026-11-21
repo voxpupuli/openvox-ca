@@ -23,11 +23,11 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
-	"os"
 	"time"
+
+	"github.com/voxpupuli/openvox-ca/internal/boundedfile"
 )
 
 // upstreamCRLs loads and verifies the CRLs in CRLChainFile.
@@ -69,7 +69,7 @@ import (
 // anchor's issuer can supply. certificate_revocation = leaf permits a narrow
 // bundle, at the cost of no revocation checking above the leaf's issuer.
 //
-// So bundle contents and crl_chain_file contents are one decision. An issuer in
+// So bundle contents and crl_chain.file contents are one decision. An issuer in
 // the bundle whose CRL is not published fails verification fleet-wide under
 // chain; a CRL published for an issuer not in the bundle is discarded here and
 // alerts. Changing either without the other is a fault an operator meets as an
@@ -79,7 +79,7 @@ import (
 // opposed to the storage or locking beneath it. upstreamCRLs has already counted
 // those on crlChainFailures, so RefreshCRLChainFile uses this to avoid counting
 // the same failure again under a second, different meaning.
-var errChainFileFault = errors.New("crl_chain_file fault")
+var errChainFileFault = errors.New("crl_chain.file fault")
 
 // upstreamPass says whether the caller will publish what this pass returns.
 //
@@ -121,7 +121,7 @@ func (c *CA) upstreamCRLs(ctx context.Context, storedBlob []byte, pass upstreamP
 		return nil, false, nil
 	}
 
-	// The path is the operator's own crl_chain_file setting. The content is
+	// The path is the operator's own crl_chain.file setting. The content is
 	// verified below regardless of where it came from.
 	data, err := readCRLChainFile(ctx, c.CRLChainFile)
 	if err != nil {
@@ -139,12 +139,12 @@ func (c *CA) upstreamCRLs(ctx context.Context, storedBlob []byte, pass upstreamP
 			//
 			// A zero-byte file is a different thing entirely and is honoured:
 			// that is how an operator says "publish nothing extra".
-			slog.Warn("crl_chain_file does not exist; keeping the upstream CRLs already published",
+			slog.Warn("crl_chain.file does not exist; keeping the upstream CRLs already published",
 				"path", c.CRLChainFile)
 			return nil, false, nil
 		}
 		c.crlChainFailures.Add(1)
-		return nil, false, fmt.Errorf("reading crl_chain_file %s: %w: %w",
+		return nil, false, fmt.Errorf("reading crl_chain.file %s: %w: %w",
 			c.CRLChainFile, errChainFileFault, err)
 	}
 
@@ -156,7 +156,7 @@ func (c *CA) upstreamCRLs(ctx context.Context, storedBlob []byte, pass upstreamP
 	parsed, err := decodeCRLChainStrict(data)
 	if err != nil {
 		c.crlChainFailures.Add(1)
-		return nil, false, fmt.Errorf("crl_chain_file %s: %w: %w",
+		return nil, false, fmt.Errorf("crl_chain.file %s: %w: %w",
 			c.CRLChainFile, errChainFileFault, err)
 	}
 	// One storage read of the CA bundle per pass, and this runs on every CRL
@@ -176,7 +176,7 @@ func (c *CA) upstreamCRLs(ctx context.Context, storedBlob []byte, pass upstreamP
 		if c.ownsCRL(crl) {
 			// Ours is assembled from the inventory on every re-sign; taking it
 			// from a file would let a stale copy supersede live revocations.
-			slog.Warn("Ignoring a CRL in crl_chain_file that this CA issued; "+
+			slog.Warn("Ignoring a CRL in crl_chain.file that this CA issued; "+
 				"its own CRL is always rebuilt from the inventory", "path", c.CRLChainFile)
 			continue
 		}
@@ -186,13 +186,50 @@ func (c *CA) upstreamCRLs(ctx context.Context, storedBlob []byte, pass upstreamP
 			// as well as logged, because one warning per cycle is not something
 			// an operator monitors.
 			c.crlChainDiscarded.Add(1)
-			slog.Warn("Discarding a CRL in crl_chain_file that no certificate in the CA bundle signed",
+			slog.Warn("Discarding a CRL in crl_chain.file that no certificate in the CA bundle signed",
 				"path", c.CRLChainFile, "issuer", crl.Issuer.String())
+			continue
+		}
+		if scope, partial := PartialScope(crl); partial {
+			// A delta CRL lists only the changes since a base it does not carry,
+			// and an issuing-distribution-point CRL may cover only part of what
+			// its issuer revoked. Either is genuinely signed, and either, taken
+			// as the ancestor's whole list, would un-revoke everything it leaves
+			// out -- and then, being newer, block the real full CRL as a
+			// regression until the ancestor next numbers one above it.
+			c.crlChainDiscarded.Add(1)
+			slog.Warn("Discarding a CRL in crl_chain.file that is not its issuer's full list",
+				"path", c.CRLChainFile, "issuer", crl.Issuer.String(), "scope", scope)
 			continue
 		}
 		verified = append(verified, crl)
 	}
 	return c.monotonicUpstream(storedBlob, issuers, dedupeCRLs(issuers, verified, c.CRLChainFile), pass)
+}
+
+// msgUnattributableDropped is said, by both writers, of a published upstream
+// CRL whose signer has left the stored CA bundle.
+const msgUnattributableDropped = "A published upstream CRL is signed by no certificate in the stored " +
+	"CA bundle and is being dropped; re-import the bundle with that ancestor's " +
+	"certificate to keep publishing its CRL"
+
+// newestPerAncestor maps each ancestor in published, keyed on its signing
+// certificate (see signerOf), to the newest CRL it has there. Newest rather
+// than whichever comes last: see monotonicUpstream. Both writers take the
+// never-move-backwards comparison from here, so the two cannot drift apart.
+// A CRL nothing in issuers signed is left out.
+func newestPerAncestor(issuers []*x509.Certificate, published []*x509.RevocationList) map[string]*x509.RevocationList {
+	current := make(map[string]*x509.RevocationList, len(published))
+	for _, crl := range published {
+		signer := signerOf(issuers, crl)
+		if signer == nil {
+			continue
+		}
+		if prev, ok := current[string(signer.Raw)]; !ok || newerCRL(crl, prev) {
+			current[string(signer.Raw)] = crl
+		}
+	}
+	return current
 }
 
 // monotonicUpstream holds the one rule the file is not entitled to break: an
@@ -236,7 +273,7 @@ func (c *CA) monotonicUpstream(storedBlob []byte, issuers []*x509.Certificate,
 		// about to lose every ancestor, permanently, because this CA cannot
 		// re-sign another CA's list.
 		if pass == publishingUpstream {
-			slog.Error("crl_chain_file declares no upstream CRLs while some are published; "+
+			slog.Error("crl_chain.file declares no upstream CRLs while some are published; "+
 				"dropping every ancestor CRL. If this was not deliberate, check that "+
 				"whatever writes the file did not produce an empty one",
 				"path", c.CRLChainFile, "dropping", len(published))
@@ -252,23 +289,15 @@ func (c *CA) monotonicUpstream(storedBlob []byte, issuers []*x509.Certificate,
 	// Keyed on the signing certificate, not the issuer DN. See signerOf.
 	//
 	// Keeping the *newest* per ancestor rather than the last one encountered,
-	// via the same helper dedupeCRLs uses. The published side can legitimately
+	// via newestPerAncestor, which planUpstreamMerge shares; its comparison is
+	// newerCRL, as in dedupeCRLs. The published side can legitimately
 	// carry two CRLs from one ancestor: orderCRLChain collapses duplicates of
 	// this CA's own CRL only, and warnAboutAncestors warns about ancestor
 	// duplicates while publishing "all of them as supplied". Taking whichever
 	// came last in stored order made the comparison depend on how the operator
 	// happened to concatenate their import -- so a stored [A#9, A#5] compared an
 	// incoming A#7 against A#5, called it newer, and published the rollback.
-	current := make(map[string]*x509.RevocationList, len(published))
-	for _, crl := range published {
-		signer := signerOf(issuers, crl)
-		if signer == nil {
-			continue
-		}
-		if prev, ok := current[string(signer.Raw)]; !ok || newerCRL(crl, prev) {
-			current[string(signer.Raw)] = crl
-		}
-	}
+	current := newestPerAncestor(issuers, published)
 
 	// mentioned records which published ancestors the file still lists, so the
 	// ones it has stopped listing can be reported below.
@@ -291,7 +320,7 @@ func (c *CA) monotonicUpstream(storedBlob []byte, issuers []*x509.Certificate,
 			continue
 		}
 		c.crlChainRegressed.Add(1)
-		slog.Error("crl_chain_file carries an upstream CRL older than the one already "+
+		slog.Error("crl_chain.file carries an upstream CRL older than the one already "+
 			"published; keeping the published one",
 			"path", c.CRLChainFile, "issuer", crl.Issuer.String())
 		out = append(out, prev)
@@ -325,9 +354,7 @@ func (c *CA) monotonicUpstream(storedBlob []byte, issuers []*x509.Certificate,
 			}
 			unattributable[crl.Issuer.String()] = true
 			c.crlChainRemoved.Add(1)
-			slog.Error("A published upstream CRL is signed by no certificate in the stored "+
-				"CA bundle and is being dropped; re-import the bundle with that ancestor's "+
-				"certificate to keep publishing its CRL",
+			slog.Error(msgUnattributableDropped,
 				"path", c.CRLChainFile, "issuer", crl.Issuer.String())
 			continue
 		}
@@ -336,7 +363,7 @@ func (c *CA) monotonicUpstream(storedBlob []byte, issuers []*x509.Certificate,
 		}
 		mentioned[string(signer.Raw)] = true
 		c.crlChainRemoved.Add(1)
-		slog.Error("crl_chain_file no longer lists an ancestor whose CRL is published; "+
+		slog.Error("crl_chain.file no longer lists an ancestor whose CRL is published; "+
 			"dropping it. The file is authoritative, so this is honoured -- but it "+
 			"cannot be undone here, because this CA cannot re-sign another CA's list",
 			"path", c.CRLChainFile, "issuer", crl.Issuer.String())
@@ -378,15 +405,6 @@ func (c *CA) publishedUpstream(blob []byte) ([]*x509.RevocationList, error) {
 	return upstream, nil
 }
 
-// maxCRLChainFileBytes bounds the read. Every CRL that survives verification is
-// appended to what agents fetch and to what the Kubernetes exporter writes into
-// a Secret, and it is all held in memory while both the CRL lock and c.mu are
-// held — so an oversized file is not merely a large allocation, it is a large
-// allocation blocking every issuance and revocation in the fleet. A real chain
-// is a handful of CRLs; 4 MiB is generous for that and still small enough that
-// a truncated or wrongly-mounted file fails loudly instead of stalling.
-const maxCRLChainFileBytes = 4 << 20
-
 // maxCRLChainFileEntries bounds how many CRLs the file may hold. The byte bound
 // alone does not: one ancestor with a long revocation list is legitimately large
 // and few, while a file of many small CRLs is what costs. Each entry has its
@@ -402,16 +420,16 @@ const maxCRLChainFileBytes = 4 << 20
 // as it was, which is the same fail-closed outcome as any other unusable file.
 const maxCRLChainFileEntries = 64
 
-// crlChainReadTimeout bounds how long the read of crl_chain_file may take,
+// crlChainReadTimeout bounds how long the read of crl_chain.file may take,
 // independently of the caller's lock budget.
 //
-// The size caps bound how much the file may contain; nothing bounded how long
+// The size cap bounds how much the file may contain; nothing bounded how long
 // reading it could take, and both call sites run under the cluster-wide CRL
-// lock and c.mu. os.Open and io.ReadAll are ordinary blocking syscalls: a
-// wedged CSI driver, an NFS-backed volume whose server has gone, or a sidecar
-// that stopped writing leaves the read never returning and the fleet-wide lock
-// never released -- so every replica's revocations queue behind one replica's
-// stuck mount and time out against LockTimeout while it holds the lock forever.
+// lock and c.mu. A wedged CSI driver, an NFS-backed volume whose server has
+// gone, or a sidecar that stopped writing leaves the read never returning and
+// the fleet-wide lock never released -- so every replica's revocations queue
+// behind one replica's stuck mount and time out against LockTimeout while it
+// holds the lock forever.
 //
 // Ten seconds is generous for a file bounded at 4 MiB on any mount that is
 // working, and short against LockTimeout. Failing is the safe direction here:
@@ -420,99 +438,15 @@ const maxCRLChainFileEntries = 64
 // every other unreadable-file case already does.
 const crlChainReadTimeout = 10 * time.Second
 
-// crlChainReadSlots bounds how many blocking reads of crl_chain_file may be
-// stranded at once.
-//
-// The goroutine below can outlive its caller, because the syscall it is inside
-// cannot be interrupted. That is a bounded cost only if something bounds how
-// many of them can accumulate, and nothing did. upstreamCRLs runs on every CRL
-// amendment while crl_chain_file is set -- every revocation, every cleanup,
-// every re-sign, not only the hourly refresh -- so under precisely the
-// sustained fault the timeout above exists for, each attempt stranded one more
-// goroutine holding one more open descriptor, without limit, until the process
-// ran out of descriptors for unrelated work including storage I/O. The feature
-// degrading is expected; taking the rest of the CA down with it is not.
-//
-// Four rather than one: the healthy path is already serialised by the cluster
-// CRL lock and c.mu, so a second read in flight means the first has stopped
-// responding rather than that load is high. The slots are a ceiling on the
-// leak, not a concurrency budget, and a small one is what makes the ceiling
-// meaningful.
-const crlChainReadSlots = 4
-
-// crlChainReadSem is package-level rather than per-CA on purpose: file
-// descriptors are a process resource, and the bound has to hold across every CA
-// value in the process, which the specs construct freely.
-var crlChainReadSem = make(chan struct{}, crlChainReadSlots)
-
-// readCRLChainFile reads the operator's file, bounded in time as well as in
-// size. See readCRLChainFileBlocking for the size bound and why it refuses
-// rather than truncates.
+// readCRLChainFile reads the operator's file through boundedfile.Read, bounded
+// in size (boundedfile.MaxCRLBytes), in time (crlChainReadTimeout, or the
+// caller's deadline if sooner) and in how many reads a wedged mount may
+// strand. An absent file comes back as fs.ErrNotExist, which upstreamCRLs
+// treats as no statement.
 func readCRLChainFile(ctx context.Context, path string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, crlChainReadTimeout)
 	defer cancel()
-
-	type read struct {
-		data []byte
-		err  error
-	}
-	// Buffered, so the goroutine can always send and exit even when nobody is
-	// left to receive: on the timeout path this function has already returned.
-	// The syscall itself cannot be interrupted, so that goroutine may outlive
-	// the call -- but the lock does not, which is the whole point.
-	done := make(chan read, 1)
-	// Refuse rather than queue when every slot is stranded. Waiting would spend
-	// the caller's remaining lock budget to reach the same refusal, and by this
-	// point the mount has already failed to answer crlChainReadSlots times over:
-	// the evidence says the next read will not return either. Refusing takes the
-	// same path every other unreadable-file case takes -- the published chain is
-	// left exactly as it was, crl_chain_refresh_failures_total counts it, and the
-	// next pass retries -- and it releases the fleet-wide CRL lock sooner.
-	select {
-	case crlChainReadSem <- struct{}{}:
-	default:
-		return nil, fmt.Errorf("reading crl_chain_file %s: %d reads are already "+
-			"stranded on this path and have not returned; refusing to strand another",
-			path, crlChainReadSlots)
-	}
-	go func() {
-		// Released only when the read actually returns, which under a wedged
-		// mount may be never. That is the point: the slot stays held for as long
-		// as the descriptor does, so the ceiling counts real stranded reads
-		// rather than attempts.
-		defer func() { <-crlChainReadSem }()
-		data, err := readCRLChainFileBlocking(path)
-		done <- read{data, err}
-	}()
-
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("reading crl_chain_file %s: %w", path, ctx.Err())
-	case r := <-done:
-		return r.data, r.err
-	}
-}
-
-// readCRLChainFileBlocking is the read itself, without the deadline. It reads at
-// most maxCRLChainFileBytes and refuses a file that exceeds it rather than
-// silently truncating: a half-read PEM blob would drop upstream CRLs with no
-// error, which is precisely the failure mode the absent-file case exists to
-// prevent.
-func readCRLChainFileBlocking(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	data, err := io.ReadAll(io.LimitReader(f, maxCRLChainFileBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxCRLChainFileBytes {
-		return nil, fmt.Errorf("crl_chain_file is larger than %d bytes", maxCRLChainFileBytes)
-	}
-	return data, nil
+	return boundedfile.Read(ctx, path, boundedfile.MaxCRLBytes)
 }
 
 // dedupeCRLs keeps one CRL per ancestor: the newest, by newerCRL.
@@ -561,7 +495,7 @@ func dedupeCRLs(issuers []*x509.Certificate, crls []*x509.RevocationList,
 		if newerCRL(crl, kept) {
 			kept, out[i] = crl, crl
 		}
-		slog.Warn("Ignoring a duplicate CRL in crl_chain_file; keeping the newest",
+		slog.Warn("Ignoring a duplicate CRL in crl_chain.file; keeping the newest",
 			"path", path, "issuer", crl.Issuer.String(), "kept", kept.Number)
 	}
 	return out
@@ -612,17 +546,18 @@ func signerOf(candidates []*x509.Certificate, crl *x509.RevocationList) *x509.Ce
 // this function enforced, and the next change to bundle handling had two call
 // sites to find and an obvious one to miss.
 //
-// Only the storage read keeps a crl_chain_file-specific message, because that
-// is the only part specific to this caller.
+// The storage read's message names upstream CRLs rather than either source,
+// because both callers reach it: upstreamCRLs for crl_chain.file and
+// MergeFetchedUpstreamCRLs for crl_chain.urls.
 func (c *CA) bundleCertificates(ctx context.Context) ([]*x509.Certificate, error) {
 	bundlePEM, err := c.Storage.GetCACert(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("reading the CA bundle to verify crl_chain_file: %w", err)
+		return nil, fmt.Errorf("reading the CA bundle to verify upstream CRLs: %w", err)
 	}
 	return ParseCABundle(bundlePEM)
 }
 
-// RefreshCRLChainFile re-reads crl_chain_file and, when its contents differ
+// RefreshCRLChainFile re-reads crl_chain.file and, when its contents differ
 // from what is stored, rewrites the CRL so the change reaches agents.
 //
 // Reading the file into memory would change nothing an agent can see:
@@ -730,7 +665,7 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 		// not take, a bundle it could not parse, a published chain it could not
 		// read -- stopped the CRL being amended, which is what crlUpdateFailures
 		// means and what its own field comment already claims to cover ("any of
-		// the five paths that write one").
+		// the eight paths that write one", this among them).
 		//
 		// Without this they were counted by nothing at all: moving
 		// crlChainFailures to the chokepoint correctly stopped it absorbing them,

@@ -536,8 +536,11 @@ var _ = Describe("Collector", func() {
 		Expect(g["openvoxca_crl_chain_next_update_timestamp_seconds"]).To(BeNil())
 	})
 
-	// All four chain counters must be exported on a CA that has never configured
-	// crl_chain_file, and must read 0 there.
+	// The four unlabelled chain counters must be exported on a CA that has
+	// configured neither crl_chain.file nor crl_chain.urls, and must read 0
+	// there. (The per-URL fetch series are absent there by design: they are
+	// exported for every configured entry instead, which is what
+	// OpenVoxCAUpstreamCRLNeverFetched keys on, and a spec below pins it.)
 	//
 	// Two of them were only ever gathered after the feature was switched on, so
 	// a MustNewConstMetric line moved inside a `if c.CRLChainFile != ""` guard
@@ -548,8 +551,9 @@ var _ = Describe("Collector", func() {
 	// fleet that does not use the feature, and nothing distinguishes the two.
 	// The mixin has the matching guard from the alert side ("a CA not publishing
 	// an upstream chain is silent"); this is the exporter side of it.
-	It("exports every chain counter at zero on a CA with no crl_chain_file", func() {
+	It("exports the four unlabelled chain counters at zero on a CA with no upstream chain configured", func() {
 		Expect(myCA.CRLChainFile).To(BeEmpty(), "this spec must run unconfigured")
+		Expect(myCA.UpstreamFetchStatuses()).To(BeEmpty(), "this spec must run unconfigured")
 
 		g := gather(metrics.NewCollector(myCA))
 		for _, name := range []string{
@@ -616,7 +620,7 @@ var _ = Describe("Collector", func() {
 		// instance in the fleet that never configured a chain file.
 		g := gather(metrics.NewCollector(myCA))
 		Expect(g["openvoxca_crl_chain_last_read_timestamp_seconds"]).To(BeNil(),
-			"no crl_chain_file: the series must not exist")
+			"no crl_chain.file: the series must not exist")
 
 		// Configured, pointing at a path that never mounted. This is the state
 		// the series exists for, and the one that had no coverage: the previous
@@ -640,6 +644,55 @@ var _ = Describe("Collector", func() {
 		Expect(gaugeValue(g.findUnlabelled("openvoxca_crl_chain_last_read_timestamp_seconds"))).
 			To(BeNumerically("~", float64(time.Now().Unix()), 5),
 				"an empty file is still a file we read")
+	})
+
+	It("reports each crl_chain.urls entry, at zero from startup, and only those configured", func() {
+		g := gather(metrics.NewCollector(myCA))
+		Expect(g["openvoxca_crl_chain_fetch_last_success_timestamp_seconds"]).To(BeNil(),
+			"no crl_chain.urls: the series must not exist")
+		Expect(g["openvoxca_crl_chain_fetch_failures_total"]).To(BeNil())
+
+		const good, bad = "https://pki.test/root.crl", "https://pki.test/sub.crl"
+		myCA.SetCRLChainURLs([]string{good, bad})
+		g = gather(metrics.NewCollector(myCA))
+		// Present, not merely zero: the value getters read 0 from a missing
+		// series too, and an absent series is what would silence
+		// OpenVoxCAUpstreamCRLNeverFetched for good.
+		series := func(name, u string) *dto.Metric {
+			GinkgoHelper()
+			m := g.findByLabels(name, map[string]string{"url": u})
+			Expect(m).NotTo(BeNil(), "%s{url=%q} must be exported", name, u)
+			return m
+		}
+		for _, u := range []string{good, bad} {
+			Expect(gaugeValue(series("openvoxca_crl_chain_fetch_last_success_timestamp_seconds", u))).
+				To(Equal(0.0), "never fetched must be reported, and as zero")
+			Expect(counterValue(series("openvoxca_crl_chain_fetch_failures_total", u))).To(Equal(0.0))
+		}
+
+		// One usable CRL and one failure.
+		upstream, upsKey := upstreamCAWithKeyFixture("Fetched Root CA")
+		ours, err := store.GetCACert(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Raw})...))).To(Succeed())
+		block, _ := pem.Decode(numberedCRLFixture(upstream, upsKey, 3))
+		crl, err := x509.ParseRevocationList(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = myCA.MergeFetchedUpstreamCRLs(ctx, []ca.UpstreamFetch{
+			{URL: good, CRL: crl},
+			{URL: bad, Err: errors.New("connection refused")},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		// At its value: seconds since the epoch, as documented.
+		g = gather(metrics.NewCollector(myCA))
+		Expect(gaugeValue(series("openvoxca_crl_chain_fetch_last_success_timestamp_seconds", good))).
+			To(BeNumerically("~", float64(time.Now().Unix()), 5))
+		Expect(gaugeValue(series("openvoxca_crl_chain_fetch_last_success_timestamp_seconds", bad))).
+			To(Equal(0.0))
+		Expect(counterValue(series("openvoxca_crl_chain_fetch_failures_total", bad))).To(Equal(1.0))
+		Expect(counterValue(series("openvoxca_crl_chain_fetch_failures_total", good))).To(Equal(0.0))
 	})
 
 	It("still exports every other series when the chain cannot be decoded", func() {
@@ -908,6 +961,35 @@ var _ = Describe("Collector", func() {
 				"the configured series must survive a failed gather, or its absence means two things")
 			Expect(gaugeValue(configured)).To(Equal(1.0))
 		})
+	})
+
+	// Each crl_chain.urls entry's series are in-process state too, like the
+	// managed-certificate series above, and must survive a failed gather for
+	// the same kind of reason. A storage fault is what makes every merge fail
+	// and stops last_success advancing, and OpenVoxCAUpstreamCRLFetchStale
+	// is the alert for it: the series must not drop out during exactly that
+	// outage. A fresh collector, so there is no earlier snapshot to
+	// republish in their place.
+	It("keeps publishing each crl_chain.urls entry's series when the storage gather fails", func() {
+		const u = "https://pki.test/root.crl"
+		myCA.SetCRLChainURLs([]string{u})
+		_, err := myCA.MergeFetchedUpstreamCRLs(ctx, []ca.UpstreamFetch{{URL: u, Err: errors.New("connection refused")}})
+		Expect(err).NotTo(HaveOccurred())
+
+		signedDir := filepath.Join(store.CADir(), "signed")
+		Expect(os.RemoveAll(signedDir)).To(Succeed())
+		Expect(os.WriteFile(signedDir, []byte("not a directory"), 0o600)).To(Succeed())
+
+		g := gather(metrics.NewCollector(myCA))
+		Expect(gaugeValue(g.findByLabels("openvoxca_collector_scrape_success", nil))).To(Equal(0.0),
+			"precondition: the gather must actually have failed")
+
+		last := g.findByLabels("openvoxca_crl_chain_fetch_last_success_timestamp_seconds", map[string]string{"url": u})
+		Expect(last).NotTo(BeNil(), "the entry's last-success series must survive a failed gather")
+		Expect(gaugeValue(last)).To(Equal(0.0))
+		failures := g.findByLabels("openvoxca_crl_chain_fetch_failures_total", map[string]string{"url": u})
+		Expect(failures).NotTo(BeNil(), "the entry's failure count must survive a failed gather")
+		Expect(counterValue(failures)).To(Equal(1.0))
 	})
 
 	// The series a failed gather republishes. Every one of them is read from

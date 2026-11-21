@@ -21,6 +21,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -220,7 +221,7 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 		// The DSN, password included: an entry written over it leaves the CA
 		// unable to open its store at the next start.
 		{Setting: "sql_dsn_file", Path: cfg.SQLDSNFile},
-		{Setting: "crl_chain_file", Path: cfg.CRLChainFile},
+		{Setting: "crl_chain.file", Path: cfg.CRLChain.File},
 		{Setting: "logfile", Path: cfg.LogFile},
 		{Setting: "puppet_server_file", Path: cfg.PuppetServerFile},
 		{Setting: "autosign_config", Path: cfg.AutosignConfig},
@@ -246,6 +247,20 @@ func caOwnedPaths(cfg *serverConfig, absCADir, configPath string) ([]certstore.R
 		{Setting: "redis_tls_ca_file", Path: cfg.RedisTLSCAFile},
 		{Setting: "sql_tls_ca_file", Path: cfg.SQLTLSCAFile},
 		{Setting: "openbao.tls_ca_file", Path: cfg.OpenBao.TLSCAFile},
+		// The anchor for crl_chain.urls fetches, for the reason above. Its
+		// credentials files are not reserved, like openbao's token and secret
+		// files: they are re-read on every request, so one written over fails
+		// the next fetch loudly, per URL, and recovers once replaced.
+		{Setting: "crl_chain.http_config.tls_config.ca_file", Path: cfg.CRLChain.HTTPConfig.TLSConfig.CAFile},
+	}
+	// crl_chain.urls file entries, as crl_chain.file is: a certificate written
+	// over an upstream CRL stops that ancestor's CRL being refreshed. Validate
+	// has already refused an entry that does not parse.
+	for i, raw := range cfg.CRLChain.URLs {
+		if u, err := url.Parse(raw); err == nil && u.Scheme == "file" {
+			named = append(named, certstore.ReservedPath{
+				Setting: fmt.Sprintf("crl_chain.urls[%d]", i), Path: u.Path})
+		}
 	}
 	// The CA's own serving certificate, when it is self-provisioned into a file
 	// pair. Named with the servingCertPathSetting prefix so that the serving

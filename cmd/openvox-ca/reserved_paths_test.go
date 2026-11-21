@@ -73,18 +73,22 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		// caOwnedPaths, consistently with client_ca[].file, which was always
 		// reserved for exactly that reason -- the two lists had been applying
 		// opposite rules to the same kind of file.
-		"etcd_tls_cert_file":             "backend client credential, replaceable",
-		"etcd_tls_key_file":              "backend client credential, replaceable",
-		"redis_tls_cert_file":            "backend client credential, replaceable",
-		"redis_tls_key_file":             "backend client credential, replaceable",
-		"sql_tls_cert_file":              "backend client credential, replaceable",
-		"sql_tls_key_file":               "backend client credential, replaceable",
-		"openbao.tls_cert_file":          "key-provider client credential, replaceable",
-		"openbao.tls_key_file":           "key-provider client credential, replaceable",
-		"openbao.approle_role_id_file":   "key-provider credential, replaceable",
-		"openbao.approle_secret_id_file": "key-provider credential, replaceable",
-		"openbao.token_file":             "key-provider credential, replaceable",
-		"openbao.kubernetes_jwt_file":    "projected by the kubelet, not ours to protect",
+		"etcd_tls_cert_file":                                   "backend client credential, replaceable",
+		"etcd_tls_key_file":                                    "backend client credential, replaceable",
+		"redis_tls_cert_file":                                  "backend client credential, replaceable",
+		"redis_tls_key_file":                                   "backend client credential, replaceable",
+		"sql_tls_cert_file":                                    "backend client credential, replaceable",
+		"sql_tls_key_file":                                     "backend client credential, replaceable",
+		"openbao.tls_cert_file":                                "key-provider client credential, replaceable",
+		"crl_chain.http_config.tls_config.cert_file":           "upstream-fetch client credential, replaceable",
+		"crl_chain.http_config.tls_config.key_file":            "upstream-fetch client credential, replaceable",
+		"crl_chain.http_config.basic_auth.password_file":       "upstream-fetch credential, re-read per request, replaceable",
+		"crl_chain.http_config.authorization.credentials_file": "upstream-fetch credential, re-read per request, replaceable",
+		"openbao.tls_key_file":                                 "key-provider client credential, replaceable",
+		"openbao.approle_role_id_file":                         "key-provider credential, replaceable",
+		"openbao.approle_secret_id_file":                       "key-provider credential, replaceable",
+		"openbao.token_file":                                   "key-provider credential, replaceable",
+		"openbao.kubernetes_jwt_file":                          "projected by the kubelet, not ours to protect",
 
 		// Data keys inside an exported Secret or ConfigMap -- `ca.crt`,
 		// `crl.pem` -- rather than paths on any filesystem. They are swept
@@ -281,8 +285,15 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		cfg.ServingCert = &certstore.Entry{
 			Store: certstore.StoreConfig{Files: &certstore.FilesConfig{}},
 		}
+		// The crl_chain fetch credentials' blocks, so the sweep reaches their
+		// keys and the notReserved entries for them are checked. Both at once is
+		// a configuration Validate refuses, but caOwnedPaths is judged here.
+		cfg.CRLChain.HTTPConfig.BasicAuth = &config.BasicAuth{}
+		cfg.CRLChain.HTTPConfig.Authorization = &config.Authorization{}
 		for key, fv := range pathKeys(cfg) {
-			if strings.HasPrefix(key, "serving_cert.") {
+			if strings.HasPrefix(key, "serving_cert.") ||
+				strings.HasPrefix(key, "crl_chain.http_config.basic_auth.") ||
+				strings.HasPrefix(key, "crl_chain.http_config.authorization.") {
 				fv.SetString("/spec/" + strings.ReplaceAll(key, ".", "/"))
 			}
 		}
@@ -334,6 +345,29 @@ var _ = Describe("the CA's own paths, as the managed_certs check sees them", fun
 		Expect(missing).To(BeEmpty(),
 			"path-shaped settings that are neither reserved by caOwnedPaths nor "+
 				"listed in notReserved with a reason")
+	})
+
+	// crl_chain.urls is a list of strings, not a path-shaped key, so the sweep
+	// above cannot see its file:/// entries: this pins them directly. Only file
+	// entries, and the path the fetcher opens, not the URL text.
+	It("reserves each file:/// crl_chain.urls entry by its path, and nothing for http(s) entries", func() {
+		cfg := &serverConfig{}
+		cfg.CRLChain.URLs = []string{"https://pki.test/a.crl", "file:///srv/crl/b.crl"}
+		reserved, err := caOwnedPaths(cfg, "/spec/cadir", "")
+		Expect(err).NotTo(HaveOccurred())
+		var urls []certstore.ReservedPath
+		for _, r := range reserved {
+			if strings.HasPrefix(r.Setting, "crl_chain.urls") {
+				urls = append(urls, r)
+			}
+		}
+		Expect(urls).To(HaveLen(1))
+		Expect(urls[0].Setting).To(Equal("crl_chain.urls[1]"))
+		// Exact, not a suffix: reserving the URL text would resolve to
+		// <cwd>/file:/srv/crl/b.crl, which ends the same way and protects nothing.
+		want, err := filepath.Abs(filepath.FromSlash("/srv/crl/b.crl"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(urls[0].Path).To(Equal(want))
 	})
 
 	// The other direction. An exemption for a setting that no longer exists is a

@@ -170,7 +170,7 @@ var _ = Describe("backgroundJobs", func() {
 		Entry("a name that does not parse", "no-such-backend"),
 	)
 
-	// crl_chain_file gates the chain refresh on its own, and nothing else gates
+	// crl_chain.file gates the chain refresh on its own, and nothing else gates
 	// it. The failure this pins is not "the job is missing" but "the job is
 	// there and never runs": the ancestor CRLs would be read once at startup
 	// and never again, and under Puppet's default certificate_revocation =
@@ -178,9 +178,9 @@ var _ = Describe("backgroundJobs", func() {
 	// failure that clears only on restart. Gating it on any other feature --
 	// re-signing, cleanup, a serving certificate -- puts that outcome behind a
 	// switch that has nothing to do with it.
-	It("runs the chain refresh when crl_chain_file is set, and only then", func() {
+	It("runs the chain refresh when crl_chain.file is set, and only then", func() {
 		Expect(jobNames(&serverConfig{})).NotTo(ContainElement(jobCRLChainRefresh))
-		Expect(jobNames(&serverConfig{CRLChainFile: "/etc/openvox-ca/upstream-crls.pem"})).
+		Expect(jobNames(&serverConfig{CRLChain: config.CRLChainConfig{File: "/etc/openvox-ca/upstream-crls.pem"}})).
 			To(ContainElement(jobCRLChainRefresh))
 
 		// Every other switch off, chain file set: it still runs. ConsistOf
@@ -193,7 +193,21 @@ var _ = Describe("backgroundJobs", func() {
 		Expect(jobNames(&serverConfig{
 			DisableCRLRefresh:        true,
 			EnableExpiredCertCleanup: false,
-			CRLChainFile:             "/etc/openvox-ca/upstream-crls.pem",
+			CRLChain:                 config.CRLChainConfig{File: "/etc/openvox-ca/upstream-crls.pem"},
 		})).To(ConsistOf(jobCRLSync, jobInventoryVerify, jobSupersededSweep, jobCRLChainRefresh))
+	})
+
+	It("runs the chain fetch when crl_chain.urls is set, and only then", func() {
+		Expect(jobNames(&serverConfig{})).NotTo(ContainElement(jobCRLChainFetch))
+		urls := config.CRLChainConfig{URLs: []string{"https://pki.test/root.crl"}}
+		Expect(jobNames(&serverConfig{CRLChain: urls})).
+			To(And(ContainElement(jobCRLChainFetch), Not(ContainElement(jobCRLChainRefresh))))
+
+		// Every other switch off: it still runs, for the reason the file's job
+		// does.
+		Expect(jobNames(&serverConfig{
+			DisableCRLRefresh: true,
+			CRLChain:          urls,
+		})).To(ConsistOf(jobCRLSync, jobInventoryVerify, jobSupersededSweep, jobCRLChainFetch))
 	})
 })

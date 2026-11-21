@@ -130,6 +130,8 @@ type Collector struct {
 	crlChainDiscarded       *prometheus.Desc
 	crlChainRegressed       *prometheus.Desc
 	crlChainRemoved         *prometheus.Desc
+	crlChainFetchSuccess    *prometheus.Desc
+	crlChainFetchFailures   *prometheus.Desc
 	crlRevoked              *prometheus.Desc
 
 	leafInfo              *prometheus.Desc
@@ -184,15 +186,18 @@ func NewCollector(c *ca.CA, opts ...Option) *Collector {
 		crlUpdateFailures: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl", "update_failures_total"),
 			"Total failures to amend the CRL — a CRL that could not be re-signed, written or read, "+
-				"on any of the revoke, reissue, refresh and expired-cert cleanup paths, plus, on the "+
-				"revoke path only, a malformed serial or a failed inventory read while resolving the "+
-				"subject's serial. Not every revocation that missed the CRL lands here: one refused "+
-				"at a cross-node lock acquisition, or at a same-host one on filesystem and SQLite, "+
-				"fails ahead of any CRL work and is logged only, so this is a lower bound, while on "+
-				"filesystem and SQLite a revocation that queued past lockTimeout behind another "+
-				"goroutine in this process fails at that inventory read and is counted. A rising value means the "+
-				"CRL is not being maintained; for revocations it means a superseded certificate may "+
-				"still be a valid credential.",
+				"on any path that writes it: revocation, reissue, the background refresh, expired-cert "+
+				"cleanup, the superseded sweep, the crl_chain.file refresh and the crl_chain.urls "+
+				"merge. The last two also count a CA bundle they cannot read and a published chain "+
+				"they cannot decode, and the revoke path alone a malformed serial or a failed "+
+				"inventory read while resolving the subject's serial. Not every revocation that "+
+				"missed the CRL lands here: one refused at a cross-node lock acquisition, or at a "+
+				"same-host one on filesystem and SQLite, fails ahead of any CRL work and is logged "+
+				"only, so this is a lower bound, while on filesystem and SQLite a revocation that "+
+				"queued past lockTimeout behind another goroutine in this process fails at that "+
+				"inventory read and is counted. A rising value means the CRL is not being "+
+				"maintained; for revocations it means a superseded certificate may still be a "+
+				"valid credential.",
 			nil, nil),
 		crlSyncFailures: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl", "sync_failures_total"),
@@ -313,8 +318,8 @@ func NewCollector(c *ca.CA, opts ...Option) *Collector {
 			[]string{"issuer"}, nil),
 		crlChainLastRead: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "last_read_timestamp_seconds"),
-			"When crl_chain_file was last read successfully, or 0 if it never has been. "+
-				"Exported only where crl_chain_file is configured, so absent means the "+
+			"When crl_chain.file was last read successfully, or 0 if it never has been. "+
+				"Exported only where crl_chain.file is configured, so absent means the "+
 				"feature is off and 0 means it is on but the file has never been opened -- "+
 				"a wrong path, or a mount that never landed. It does NOT detect a subPath "+
 				"mount: that reads successfully forever, so this advances exactly as it "+
@@ -323,7 +328,7 @@ func NewCollector(c *ca.CA, opts ...Option) *Collector {
 		),
 		crlChainRefreshFailures: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "refresh_failures_total"),
-			"Total failed reads of crl_chain_file -- unreadable, unparseable, not ending on a PEM "+
+			"Total failed reads of crl_chain.file -- unreadable, unparseable, not ending on a PEM "+
 				"block boundary, or too large. Counted where the file is read, so it moves on every "+
 				"CRL amendment as well as on each refresh pass, and revocation is blocked until "+
 				"the file is fixed. The published chain is left alone and the next attempt retries. "+
@@ -333,33 +338,67 @@ func NewCollector(c *ca.CA, opts ...Option) *Collector {
 			nil, nil),
 		crlChainDiscarded: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "discarded_total"),
-			"Total CRLs dropped from crl_chain_file because no certificate in the CA bundle signed "+
-				"them. The file is authoritative, so a discard means the published chain is smaller "+
-				"than the operator's file says it should be — the one case where it shrinks silently. "+
-				"The remedy is to complete the CA bundle. A CRL passed over for being stale is "+
-				"counted separately, by openvoxca_crl_chain_regressed_total, because that one is "+
-				"fixed at whatever writes the file instead.",
+			"Total upstream CRLs dropped because no certificate in the CA bundle signed them, "+
+				"or because they are a delta CRL or carry an issuing distribution point and so are "+
+				"not their issuer's full list, from crl_chain.file on each evaluation or from a "+
+				"crl_chain.urls entry once per fetch round. With the file, which is authoritative, "+
+				"a discard means the published chain is smaller than the file says it should be; "+
+				"with URLs it makes the round partial, so nothing is removed, and the entry also "+
+				"counts as a fetch failure. The remedy is to complete the CA bundle, or to point "+
+				"the source at the right CA or at its full CRL; the log line says which. A CRL "+
+				"passed over for being stale is counted separately, by "+
+				"openvoxca_crl_chain_regressed_total.",
 			nil, nil),
 		crlChainRemoved: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "removed_total"),
-			"Total ancestors whose published CRL has been dropped from the chain, either "+
-				"because crl_chain_file stopped listing them or because their certificate has "+
-				"left the stored CA bundle, so nothing signs that CRL any more. The removal is "+
-				"honoured -- the file is authoritative -- but it cannot be undone here, because "+
-				"this CA cannot re-sign another CA's list. A deliberate removal increments this "+
-				"on the pass that applies it; a `cat` glob that matched one file fewer "+
-				"increments it the same way, which is why it is worth an alert. The log line "+
-				"names which cause fired, and the remedies differ: fix whatever writes the file, "+
-				"or re-import the CA bundle. An incomplete bundle moves this counter and "+
-				"openvoxca_crl_chain_discarded_total together -- the latter counts CRLs the file does carry "+
-				"but nothing in the bundle signed.",
+			"Total ancestors whose published CRL has been dropped from the chain: because "+
+				"crl_chain.file stopped listing them, because an authoritative crl_chain.urls "+
+				"round (every entry yielding its issuer's full CRL from the CA bundle, every "+
+				"entry over https:// or file:///, none serving this CA's own CRL, no two naming "+
+				"the same ancestor) no longer served them, or because their certificate has left "+
+				"the stored CA bundle, so nothing signs that CRL any more. The removal is honoured "+
+				"but cannot be undone here, because this CA cannot re-sign another CA's list. A "+
+				"deliberate removal increments this on the pass that applies it; a `cat` glob "+
+				"that matched one file fewer, or a URL list missing an entry, increments it the "+
+				"same way, which is why it is worth an alert. The log line names which cause "+
+				"fired, and the remedies differ: fix the file or the URL list, or re-import the "+
+				"CA bundle. An incomplete bundle moves this counter and "+
+				"openvoxca_crl_chain_discarded_total together.",
 			nil, nil),
+		crlChainFetchSuccess: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "crl_chain", "fetch_last_success_timestamp_seconds"),
+			"When each crl_chain.urls entry last yielded a usable, current CRL -- verified against "+
+				"the CA bundle, unexpired, and newer than or equal to the one published -- or 0 if it "+
+				"never has. Exported for every configured entry from startup, so 0 means the "+
+				"entry has never yielded one and absence means it is not configured. A transfer "+
+				"that succeeded but delivered nothing usable does not advance it, nor does a round "+
+				"refused for making the published upstream chain larger than 4 MiB, nor one whose "+
+				"merge failed on the lock or storage.",
+			[]string{"url"}, nil),
+		crlChainFetchFailures: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "crl_chain", "fetch_failures_total"),
+			"Total fetch rounds in which a crl_chain.urls entry did not yield a usable, current "+
+				"CRL: a transport or HTTP failure, a response that is not exactly one CRL, one over "+
+				"4 MiB as received, a CRL over 4 MiB as PEM, a CRL no certificate in the CA bundle "+
+				"signed, a delta or IDP-scoped CRL, one older than the CRL already published, an "+
+				"expired one, or this CA's own CRL; or, in a round whose CRLs together would push "+
+				"the published upstream chain past 4 MiB, every entry that would otherwise have "+
+				"succeeded. The log line names the reason. A merge that fails on the lock or "+
+				"storage counts in openvoxca_crl_update_failures_total instead, not here. A "+
+				"failing entry never blocks revocation or shrinks the published chain; only an "+
+				"authoritative round can remove an ancestor, counted by "+
+				"openvoxca_crl_chain_removed_total.",
+			[]string{"url"}, nil),
 		crlChainRegressed: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "regressed_total"),
-			"Total CRLs in crl_chain_file passed over because the published chain already carried "+
-				"a newer one from the same ancestor. The published CRL is kept, so revocation is "+
-				"unaffected; a rising value means the file is stale, rolled back or replayed. Check "+
-				"whatever refreshes it, not the CA bundle.",
+			"Total upstream CRLs passed over because the published chain already carried a "+
+				"newer one from the same ancestor: from crl_chain.file on each evaluation, or "+
+				"from a crl_chain.urls entry once per fetch round, which also counts as a fetch "+
+				"failure. The published CRL is kept, so revocation is unaffected; a rising value "+
+				"means the source is stale, rolled back or replayed. Check whatever refreshes "+
+				"the file, or the upstream behind the URL, not the CA bundle. On a CA with several "+
+				"replicas and mirror entries, a short burst just after an upstream republishes is a "+
+				"lagging mirror and harmless; a rise that persists is not.",
 			nil, nil),
 		crlRevoked: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl", "revoked_certificates"),
@@ -429,6 +468,8 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.crlChainLastRead
 	ch <- c.crlChainRefreshFailures
 	ch <- c.crlChainDiscarded
+	ch <- c.crlChainFetchSuccess
+	ch <- c.crlChainFetchFailures
 	ch <- c.crlChainRegressed
 	ch <- c.crlChainRemoved
 	ch <- c.crlRevoked
@@ -496,7 +537,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	//
 	// Keying on first-read instead was the obvious choice and the wrong one: it
 	// made the series absent both on a CA that had never opened its file and on
-	// every CA in the fleet with no crl_chain_file at all. Nothing else
+	// every CA in the fleet with no crl_chain.file at all. Nothing else
 	// distinguishes those two -- the counters are unconditional and read 0 in
 	// both -- so absent() could not be written into an alert without firing on
 	// every instance that never configured the feature, and the case the series
@@ -516,6 +557,17 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		float64(c.ca.CRLChainRegressed()))
 	ch <- prometheus.MustNewConstMetric(c.crlChainRemoved, prometheus.CounterValue,
 		float64(c.ca.CRLChainRemoved()))
+	// Per crl_chain.urls entry, and for every configured one from startup, for
+	// the reason crlChainLastRead above is exported before the file is read.
+	for _, st := range c.ca.UpstreamFetchStatuses() {
+		var stamp float64
+		if !st.LastSuccess.IsZero() {
+			stamp = float64(st.LastSuccess.Unix())
+		}
+		ch <- prometheus.MustNewConstMetric(c.crlChainFetchSuccess, prometheus.GaugeValue, stamp, st.URL)
+		ch <- prometheus.MustNewConstMetric(c.crlChainFetchFailures, prometheus.CounterValue,
+			float64(st.Failures), st.URL)
+	}
 
 	// Above the gather's error return, with the other series that read no
 	// storage. This one reads configuration only, and its whole purpose is to

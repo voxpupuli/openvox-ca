@@ -27,6 +27,7 @@ import (
 	"crypto/sha1"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"math/big"
 	"os"
@@ -125,7 +126,7 @@ func emptyCRLExpiring(cert *x509.Certificate, key crypto.Signer, number int64, i
 	return pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: der})
 }
 
-var _ = Describe("crl_chain_file", func() {
+var _ = Describe("crl_chain.file", func() {
 	var (
 		ctx      context.Context
 		store    *storage.StorageService
@@ -377,7 +378,7 @@ var _ = Describe("crl_chain_file", func() {
 		myCA.CRLChainFile = path
 
 		_, err := myCA.RefreshCRLChainFile(ctx)
-		Expect(err).To(MatchError(ContainSubstring("crl_chain_file")),
+		Expect(err).To(MatchError(ContainSubstring("crl_chain.file")),
 			"the error must name the file, not just fail")
 		Expect(err).To(MatchError(ContainSubstring("parsing CRL 1")))
 		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(1), "the published chain is untouched")
@@ -622,7 +623,7 @@ var _ = Describe("crl_chain_file", func() {
 	})
 })
 
-var _ = Describe("crl_chain_file: absent versus empty", func() {
+var _ = Describe("crl_chain.file: absent versus empty", func() {
 	// The file is authoritative, so what it means when it cannot be read
 	// decides whether ancestor CRLs survive. Absent is "no statement" and must
 	// preserve; empty is a declaration and must be honoured. Getting these the
@@ -737,7 +738,7 @@ var _ = Describe("crl_chain_file: absent versus empty", func() {
 	})
 })
 
-var _ = Describe("crl_chain_file: what makes a CRL acceptable", func() {
+var _ = Describe("crl_chain.file: what makes a CRL acceptable", func() {
 	var (
 		ctx      context.Context
 		store    *storage.StorageService
@@ -781,6 +782,27 @@ var _ = Describe("crl_chain_file: what makes a CRL acceptable", func() {
 		Expect(crlBlocks(mustGetCRL(ctx, store))).To(HaveLen(1))
 		Expect(myCA.CRLChainDiscarded()).To(BeNumerically(">", 0))
 	})
+
+	DescribeTable("discards a partial-scope CRL, which cannot stand in for its issuer's full list",
+		func(oid asn1.ObjectIdentifier) {
+			trustUpstream()
+			scoped := scopedCRLNumbered(upstream, upsKey, 99, oid)
+			myCA.CRLChainFile = writeChainFile(upsCRL,
+				pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: scoped.Raw}))
+			discarded := myCA.CRLChainDiscarded()
+
+			_, err := myCA.RefreshCRLChainFile(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			chain := crlBlocks(mustGetCRL(ctx, store))
+			Expect(chain).To(HaveLen(2), "ours plus the full upstream CRL")
+			_, partial := ca.PartialScope(chain[1])
+			Expect(partial).To(BeFalse(), "the published upstream CRL is the full one, though the scoped one is newer")
+			// Counted per evaluation, and a rewriting pass reads the file twice.
+			Expect(myCA.CRLChainDiscarded()).To(BeNumerically(">", discarded))
+		},
+		Entry("a delta CRL", asn1.ObjectIdentifier{2, 5, 29, 27}),
+		Entry("an issuing distribution point", asn1.ObjectIdentifier{2, 5, 29, 28}),
+	)
 
 	It("republishes a newer CRL from the same issuer", func() {
 		// The transition the feature exists to serve: the parent reissues its
@@ -1043,7 +1065,7 @@ var _ = Describe("crl_chain_file: what makes a CRL acceptable", func() {
 	})
 })
 
-var _ = Describe("crl_chain_file: size and duplicates", func() {
+var _ = Describe("crl_chain.file: size and duplicates", func() {
 	var (
 		ctx      context.Context
 		store    *storage.StorageService
@@ -1222,7 +1244,7 @@ var _ = Describe("crl_chain_file: size and duplicates", func() {
 		// configured, which the stock openssl.cnf leaves commented out -- so a
 		// number-less ancestor CRL is ordinary in this feature's audience. Both
 		// comparison sites fall back to ThisUpdate via newerCRL, and nothing
-		// exercised that: every fixture reaching crl_chain_file set Number, so
+		// exercised that: every fixture reaching crl_chain.file set Number, so
 		// reverting either site to an inline `a.Number != nil && b.Number != nil`
 		// check left the suite green while silently keeping whichever copy came
 		// first.

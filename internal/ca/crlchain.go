@@ -82,14 +82,19 @@ func DecodeCRLChain(blob []byte) ([]*x509.RevocationList, error) {
 // commentary, and none of it reaches storage, because callers re-encode from
 // the parsed list rather than passing the original bytes through.
 func decodeCRLChain(blob []byte) ([]*x509.RevocationList, error) {
-	// Unbounded: this reads the chain this CA published, which the file path
-	// below has already bounded on the way in.
+	// Unbounded. Mostly this reads the chain this CA published, whose upstream
+	// part the two running sources bound on the way in at
+	// boundedfile.MaxCRLBytes -- crl_chain.file by its read, the crl_chain.urls
+	// merge by the merged total. The third, `openvox-ca-ctl import
+	// --crl-chain`, is not bounded at that size, and this also decodes its
+	// input directly (caImport.go): it is the operator's own file, read once by
+	// an offline command they ran, not a mount the server polls.
 	out, _, err := decodeCRLChainRest(blob, 0)
 	return out, err
 }
 
 // decodeCRLChainStrict is decodeCRLChain for content whose *absence of CRLs is
-// meaningful* -- currently crl_chain_file, which is authoritative, so "no CRLs"
+// meaningful* -- currently crl_chain.file, which is authoritative, so "no CRLs"
 // deletes every ancestor.
 //
 // pem.Decode cannot tell a truncated block from trailing rubbish: it returns nil
@@ -193,14 +198,17 @@ func encodeCRLChain(crls []*x509.RevocationList) []byte {
 // because it mirrors the certificate bundle's nearest-first convention.
 //
 // Where the upstream blocks come from depends on configuration. With
-// crl_chain_file set, that file is authoritative: it is the operator's
+// crl_chain.file set, that file is authoritative: it is the operator's
 // declarative statement of which ancestor CRLs to publish, refreshed by
 // whatever mechanism they already have, so a CRL dropped from the file is meant
 // to disappear. Without it, every stored block that is not ours is carried
 // across — an ancestor's CRL cannot be regenerated here, so dropping one is
 // unrecoverable while keeping one costs a wasted block at worst.
 //
-// storedBlob is the blob readStoredCRL already read, not a fresh fetch. It used
+// storedBlob is the stored chain -- the blob readStoredCRL already read, or,
+// from the crl_chain.urls merge, that chain with the round's ancestors already
+// merged in -- and never a fresh fetch. The no-file path publishes whatever
+// ancestors it carries, which is what lets the merge write through here. It used
 // to fetch its own copy, which cost a second backend round trip inside the
 // cluster CRL lock and, worse, could disagree with the first: the number and
 // entries being carried forward came from one read and the ancestors from
@@ -211,7 +219,7 @@ func encodeCRLChain(crls []*x509.RevocationList) []byte {
 func (c *CA) crlChainLocked(ctx context.Context, ourCRL *x509.RevocationList, storedBlob []byte) ([]byte, error) {
 	chain := []*x509.RevocationList{ourCRL}
 
-	// With crl_chain_file set, the file is authoritative: it is the operator's
+	// With crl_chain.file set, the file is authoritative: it is the operator's
 	// declarative statement of which ancestor CRLs to publish, so a CRL dropped
 	// from it is meant to disappear and the stored blob's own upstream blocks
 	// are not carried across.

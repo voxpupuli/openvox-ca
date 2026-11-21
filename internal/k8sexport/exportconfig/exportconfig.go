@@ -125,7 +125,7 @@ type Target struct {
 	// would have narrowed every already-deployed target on upgrade with no
 	// configuration change -- a consumer's trust bundle losing its
 	// intermediates, and a CRL blob losing every ancestor block, which is the
-	// material crl_chain_file exists to distribute. Narrowing is therefore
+	// material crl_chain exists to distribute. Narrowing is therefore
 	// something an operator opts into per target, and it matches what the HTTP
 	// endpoints serve: GET /certificate/ca and the CRL endpoint always return
 	// the full chain.

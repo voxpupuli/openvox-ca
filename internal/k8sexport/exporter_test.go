@@ -654,7 +654,7 @@ var _ = Describe("Export scopes", func() {
 		// these settings existed every target got the stored blob verbatim. A
 		// narrow default would have silently dropped every intermediate from a
 		// consumer's trust bundle and every ancestor block from a CRL blob --
-		// the material crl_chain_file exists to distribute -- with no
+		// the material crl_chain exists to distribute -- with no
 		// configuration change to notice and no error to catch, since a
 		// scoped-down value is not empty.
 		data := exportWith("", "")

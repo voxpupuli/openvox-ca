@@ -31,8 +31,18 @@ config:
     auth_method: kubernetes
     kubernetes_role: openvox-ca
   ca_cert_file: /run/secrets/openvox-ca-chain/ca_crt.pem
-  crl_chain_file: /run/secrets/openvox-ca-chain/crl_chain.pem
-  crl_chain_refresh_interval_sec: 3600
+  # Fetched by the CA itself from OpenBao's own API, as that deployment does,
+  # rather than written into a file by a sidecar. crl_chain.file is kept in
+  # full-values.yaml, so between them the fixtures decode both sources.
+  crl_chain:
+    urls:
+      - https://openbao.pki.svc:8200/v1/pki-root/issuer/root/crl/pem
+      - https://openbao.pki.svc:8200/v1/pki-sub/issuer/sub/crl/pem
+    refresh_interval_sec: 3600
+    fetch_timeout_sec: 30
+    http_config:
+      tls_config:
+        ca_file: /run/secrets/openbao-ca/ca.crt
   no_pp_cli_auth: true
   enable_expired_cert_cleanup: true
   crl_url: https://ca.example.com/puppet-ca/v1/certificate_revocation_list/ca

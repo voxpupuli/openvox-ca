@@ -164,7 +164,8 @@ var _ = Describe("Health Endpoints", func() {
 
 			var resp map[string]string
 			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
-			Expect(resp["status"]).To(Equal("not_ready"))
+			Expect(resp).To(Equal(map[string]string{"status": "not_ready"}),
+				"no reason: the upstream hold's reason must not be given for a CA still initialising")
 		})
 
 		It("sets Content-Type: application/json even on 503", func() {
@@ -196,6 +197,63 @@ var _ = Describe("Health Endpoints", func() {
 		)
 	})
 
+	// --- The upstream CRL chain hold ---
+
+	Describe("with crl_chain.urls set and no upstream CRL stored", func() {
+		// The stored chain here is this CA's own CRL alone, so the hold is
+		// taken -- as on a fresh store with crl_chain.urls configured.
+		var (
+			heldMux http.Handler
+			heldCA  *ca.CA
+		)
+
+		BeforeEach(func() {
+			store := storage.New(tmpDir)
+			heldCA = ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			Expect(heldCA.Init(context.Background())).To(Succeed())
+			Expect(heldCA.HoldReadinessForUpstreamChain(context.Background())).To(BeTrue(),
+				"precondition: the hold must be taken")
+			heldMux = api.New(heldCA).Routes()
+		})
+
+		It("is not ready", func() {
+			rr := httptest.NewRecorder()
+			heldMux.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz/ready", nil))
+			Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+			Expect(rr.Header().Get("Content-Type")).To(ContainSubstring("application/json"))
+			var resp map[string]string
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+			Expect(resp).To(Equal(map[string]string{"status": "not_ready", "reason": "waiting_for_upstream_crl_chain"}),
+				"the body names the upstream fetch, so a failed probe does not read as a CA that never initialised")
+		})
+
+		It("is ready again once the hold is released, on the same server", func() {
+			heldCA.ReleaseUpstreamChainHold()
+			rr := httptest.NewRecorder()
+			heldMux.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz/ready", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+			var resp map[string]string
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+			Expect(resp["status"]).To(Equal("ok"))
+		})
+
+		It("has still started, so the kubelet does not restart it in a loop", func() {
+			rr := httptest.NewRecorder()
+			heldMux.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz/startup", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+			var resp map[string]string
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+			Expect(resp).To(Equal(map[string]string{"status": "ok"}),
+				"startup does not report the readiness hold's reason")
+		})
+
+		It("is live", func() {
+			rr := httptest.NewRecorder()
+			heldMux.ServeHTTP(rr, httptest.NewRequest("GET", "/healthz/live", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+		})
+	})
+
 	// --- Startup ---
 
 	Describe("GET /healthz/startup", func() {
@@ -223,6 +281,10 @@ var _ = Describe("Health Endpoints", func() {
 			rr := httptest.NewRecorder()
 			uninitMux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+			Expect(rr.Header().Get("Content-Type")).To(ContainSubstring("application/json"))
+			var resp map[string]string
+			Expect(json.Unmarshal(rr.Body.Bytes(), &resp)).To(Succeed())
+			Expect(resp).To(Equal(map[string]string{"status": "not_ready"}))
 		})
 
 		It("is accessible without a client cert (public tier)", func() {

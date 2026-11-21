@@ -52,19 +52,8 @@ type ServerConfig struct {
 	OCSPUrl           string `yaml:"ocsp_url"`
 	CRLUrl            string `yaml:"crl_url"`
 
-	// CRLChainFile is a PEM bundle of upstream CRLs published alongside this
-	// CA's own, for agents doing full-chain revocation checking (Puppet's
-	// default). Re-read by the crl-chain-refresh job, so refreshing the file is
-	// how an operator keeps ancestor CRLs current — every CRL in it is
-	// signature-verified against the stored CA bundle before it is served.
-	// Empty disables the feature.
-	CRLChainFile string `yaml:"crl_chain_file"`
-
-	// CRLChainRefreshIntervalSec is how often that file is re-read and the
-	// published CRL rewritten if its upstream blocks changed. 0 = built-in
-	// default (1h). Gated on crl_chain_file alone: an operator publishing an
-	// upstream chain is not necessarily running any other periodic job.
-	CRLChainRefreshIntervalSec int `yaml:"crl_chain_refresh_interval_sec"`
+	// CRLChain configures the upstream CRLs published alongside this CA's own.
+	CRLChain CRLChainConfig `yaml:"crl_chain"`
 
 	// MetricsListen, when non-empty, enables the Prometheus exporter on the
 	// given address (e.g. "127.0.0.1:9140" or ":9140"). The exporter serves

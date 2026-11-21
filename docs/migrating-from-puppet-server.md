@@ -211,10 +211,12 @@ without exporting and concatenating your own first.
 Ancestor CRLs cannot be re-signed by this CA, so they have to be replaced before
 they lapse. There are two ways. Re-importing is one, and its limits are worth
 reading before you rely on it: see [Refreshing ancestor
-CRLs](#refreshing-ancestor-crls) below. The other is
-[`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain), which has
-openvox-ca re-read a PEM bundle on a timer and republish it, so the ancestors
-stay current without an operator remembering to act before each `nextUpdate`.
+CRLs](#refreshing-ancestor-crls) below. The other is the
+[`crl_chain`](configuration.md#publishing-an-upstream-crl-chain) block, which
+keeps the ancestors current without an operator remembering to act before each
+`nextUpdate`: `crl_chain.urls` has openvox-ca fetch each ancestor's CRL itself,
+and `crl_chain.file` has it re-read a PEM bundle that something else keeps
+current.
 Either way, watch `openvoxca_crl_chain_next_update_timestamp_seconds{issuer}` —
 the shipped mixin alerts on it.
 
@@ -359,9 +361,10 @@ Some limits worth knowing before you rely on re-import as a refresh mechanism.
 > before its own `nextUpdate` lapses.
 > `openvoxca_crl_chain_next_update_timestamp_seconds{issuer}` reports each
 > ancestor's deadline and the shipped mixin alerts on it — see
-> [the metrics reference](metrics.md#upstream-crl-chain). Configuring
-> [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is what
-> keeps them current without an operator acting before each lapse.
+> [the metrics reference](metrics.md#upstream-crl-chain). Configuring the
+> [`crl_chain`](configuration.md#publishing-an-upstream-crl-chain) block
+> (`crl_chain.urls` or `crl_chain.file`) is what keeps them current without an
+> operator acting before each lapse.
 >
 > `openvox-ca-ctl import` is the one place it is detectable, so read its output. It warns when a
 > supplied ancestor is already past its `nextUpdate`, and when the chain carries
@@ -459,11 +462,12 @@ reconciles what two processes would each hold in memory (see
 > encrypted. A plaintext key over the encrypted one is refused unless you pass
 > `--encrypt-ca-key`, which encrypts it, or `--allow-plaintext-ca-key`, which
 > stores it in plaintext. Under `ca_key_provider: openbao` there is no
-> exportable key at all, so re-import is unavailable outright, and
-> [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is not an
-> alternative to re-import but the only ancestor-refresh mechanism there is: it
-> reads a PEM bundle and republishes it, touching neither the CA key nor the
-> import path.
+> exportable key at all, so re-import is unavailable outright, and the
+> [`crl_chain`](configuration.md#publishing-an-upstream-crl-chain) block is not
+> an alternative to re-import but the only ancestor-refresh mechanism there is:
+> `crl_chain.urls` fetches each ancestor's CRL and `crl_chain.file` reads a PEM
+> bundle, and either republishes it touching neither the CA key nor the import
+> path.
 
 Re-import is also not signalled to consumers: the Kubernetes exporter republishes
 on CRL notifications, which the import path deliberately does not send. After a

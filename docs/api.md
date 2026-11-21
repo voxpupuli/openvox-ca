@@ -429,8 +429,8 @@ was actually revoked — see [Authorization tiers](#authorization-tiers).
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/certificate_revocation_list/ca` | Download the stored CRL PEM verbatim. When a CRL **chain** was imported (see `--crl-chain`) the response is that whole chain, this CA's own CRL first, so agents can perform full-chain revocation checking (Puppet's default `certificate_revocation = chain`). Ancestor CRLs are preserved across re-signing. This CA never *issues* them — it cannot re-sign another CA's list — but it will republish newer copies if [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain) is configured; without it they stay as current as what was imported |
-| `PUT` | `/certificate_revocation_list/ca` | Re-sign **this CA's own** CRL with a fresh validity window (preserves all revocations, and every ancestor block unless `crl_chain_file` is set — with it, that file decides which ancestors are published); admin-only. Returns the whole stored chain, this CA's own CRL first. Returns `409 Conflict` when the stored CRL was not signed by the CA certificate this process loaded — the usual cause is a replaced CA certificate on an unrestarted replica, and the response body names the remedy |
+| `GET` | `/certificate_revocation_list/ca` | Download the stored CRL PEM verbatim. When the store holds a CRL **chain** — imported with `--crl-chain`, or published from [`crl_chain.urls` or `crl_chain.file`](configuration.md#publishing-an-upstream-crl-chain) — the response is that whole chain, this CA's own CRL first, so agents can perform full-chain revocation checking (Puppet's default `certificate_revocation = chain`). Ancestor CRLs are preserved across re-signing. This CA never *issues* them — it cannot re-sign another CA's list. With `crl_chain` configured, the published ancestors follow that source: it adds them, replaces them with newer copies and, when the file stops listing one or an authoritative `crl_chain.urls` round stops serving it, removes them. Without it they stay as current as what was imported |
+| `PUT` | `/certificate_revocation_list/ca` | Re-sign **this CA's own** CRL with a fresh validity window (preserves all revocations, and every ancestor block unless `crl_chain.file` is set — with it, that file decides which ancestors are published); admin-only. Returns the whole stored chain, this CA's own CRL first. Returns `409 Conflict` when the stored CRL was not signed by the CA certificate this process loaded — the usual cause is a replaced CA certificate on an unrestarted replica, and the response body names the remedy |
 
 ## Expirations
 
@@ -533,10 +533,12 @@ These endpoints are served at bare paths only (no `/puppet-ca/v1` prefix) and re
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/healthz/live` | Liveness probe: always `200` while the process is running |
-| `GET` | `/healthz/ready` | Readiness probe: `200` once the CA is initialised, `503` before |
-| `GET` | `/healthz/startup` | Startup probe: delegates to the readiness check |
+| `GET` | `/healthz/ready` | Readiness probe: `200` once the CA is initialised, `503` before. With [`crl_chain.urls`](configuration.md#fetching-upstream-crls) set and no upstream CRL stored when the server started (or a stored chain it could not read), also `503` until a fetch round stores one |
+| `GET` | `/healthz/startup` | Startup probe: `200` once the CA is initialised, `503` before. Unlike readiness, it does not wait for upstream CRLs, so a pod held for them keeps running rather than being restarted |
 
-Response body: `{"status":"ok"}` (200) or `{"status":"not_ready"}` (503).
+Response body: `{"status":"ok"}` (200) or `{"status":"not_ready"}` (503). A
+readiness `503` held for `crl_chain.urls` adds
+`"reason":"waiting_for_upstream_crl_chain"`.
 
 ## Authorization tiers
 
@@ -605,7 +607,7 @@ issuance is the only thing that does. With it off, the two differ as follows:
   because the CRL lock could not be taken at all, which never reaches the CRL
   work and which `clean` leaves uncounted on every backend, since it takes that
   lock directly rather than through the counted helper; not a re-sign that
-  failed on a faulty `crl_chain_file`, which deliberately moves
+  failed on a faulty `crl_chain.file`, which deliberately moves
   [`openvoxca_crl_chain_refresh_failures_total`](metrics.md#upstream-crl-chain) instead so that
   counter's runbook stays "check the file"; not a revocation that found no
   inventory entry for the subject; and not a failed delete at all. The no-inventory-entry exclusion is the one `clean` swallows
