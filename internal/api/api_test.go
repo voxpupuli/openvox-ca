@@ -2615,13 +2615,13 @@ var _ = Describe("API Workflow", func() {
 		})
 
 		// The two handler branches that map ErrForeignCertificate to 403 are
-		// unreachable while the middleware's trust anchor and this CA's own
-		// certificate are the same object: the middleware rejects a foreign
-		// certificate before any handler runs. They become reachable exactly
-		// when those two diverge, which is the topology the intermediate-CA
-		// work introduces — so the fixture makes them diverge deliberately,
-		// trusting a second issuer for authentication while the CA still
-		// refuses to renew its certificates.
+		// unreachable in every shipped topology, client_ca included: domain
+		// zero is built from this CA's own certificate, so the middleware
+		// rejects a foreign certificate on a renewal before any handler runs.
+		// They are a defence in depth, so the fixture makes the middleware's
+		// anchor diverge from the CA deliberately, trusting a second issuer
+		// for authentication while the CA still refuses to renew its
+		// certificates, to keep them exercised.
 		Context("when the middleware trusts an issuer the CA did not", func() {
 			var (
 				splitMux      http.Handler

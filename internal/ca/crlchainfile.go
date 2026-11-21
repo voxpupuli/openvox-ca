@@ -46,9 +46,10 @@ import (
 // Whether the check can succeed for a given CRL depends on the stored bundle
 // holding that issuer's certificate, so publishing the root's CRL — the one an
 // agent most needs for chain checking — requires the imported bundle to run all
-// the way up to the root. Nothing enforces that yet, so a partial import shows
-// up as CRLs discarded on every refresh, which crlChainDiscarded counts and the
-// mixin alerts on.
+// the way up to the root. Both import paths refuse a bundle that stops short
+// of one (ValidateCABundleOrder), but a bundle placed another way is not
+// checked, and shows up as CRLs discarded on every refresh, which
+// crlChainDiscarded counts and the mixin alerts on.
 //
 // Two consequences of that requirement, neither obvious from here, and both
 // decisions an operator makes once and lives with:
