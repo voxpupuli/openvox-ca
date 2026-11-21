@@ -442,7 +442,7 @@ was actually revoked — see [Authorization tiers](#authorization-tiers).
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/generate/{subject}` | Generate key + cert server-side; optional `?dns=alt.name`. Key algorithm follows `--leaf-key-algo` / `--leaf-key-size` (default: RSA 2048) |
+| `POST` | `/generate/{subject}` | Generate key + cert server-side; optional `?dns=alt.name`. Key algorithm follows `leaf_key_algo` / `leaf_key_size` in the [config file](configuration.md#config-file), or `OPENVOX_CA_LEAF_KEY_ALGO` / `OPENVOX_CA_LEAF_KEY_SIZE` (default: RSA 2048) |
 
 Response:
 
