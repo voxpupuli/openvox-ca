@@ -518,9 +518,13 @@
             // renewal), so a revoked/superseded certificate may remain valid.
             // Not every revocation that missed the CRL lands here, and which
             // ones do depends on the backend: one refused at a lock
-            // acquisition fails ahead of any CRL work and is logged only —
-            // every backend's cross-node acquisition, and on filesystem/SQLite
-            // a wait for another process on the host — while on
+            // acquisition fails ahead of any CRL work and is not counted here
+            // — every backend's cross-node acquisition, and on filesystem/SQLite
+            // a wait for another process on the host. Where the CA swallows
+            // such a failure it is counted elsewhere: the renewal and reissue
+            // retire steps on openvoxca_supersede_failures_total
+            // (OpenVoxCASupersedeFailing), a clean's revoke step on
+            // openvoxca_clean_failures_total (OpenVoxCACleanIncomplete). Meanwhile on
             // filesystem/SQLite a revocation that merely queued behind an
             // issuance in this same process past lockTimeout fails at its first
             // storage read and is counted: a benign cause worth ruling out
@@ -546,20 +550,23 @@
           },
           {
             alert: 'OpenVoxCASupersedeFailing',
-            // A certificate a renewal replaced is still a valid credential,
-            // because the CA could not schedule or carry out its delayed
-            // revocation: a supersession the renewal path could not record, a
+            // A certificate a renewal or a managed certificate's reissue
+            // replaced is still a valid credential, because the CA could not
+            // retire it: an immediate revocation that failed (where
+            // superseded_cert_revoke_after_sec, or the entry's revoke_after, is
+            // 0), a supersession the renewal path could not record, a
             // pending-revocation list it could not read or parse, or a sweep
             // pass that left an entry unrevoked or discarded one whose serial it
-            // could never revoke. Live on any CA that renews certificates,
-            // since superseded_cert_revoke_after_sec defaults to 24h; only
-            // where it is 0 does the revocation happen inside the renewal, and
-            // a failure there is a CRL failure that counts towards the alert
-            // above, which needs crlUpdateThreshold of them in its window, so a
-            // single one is left to its log warning.
-            // Even then the sweep, every renewal and every subject revocation
-            // read the pending list whatever the setting says, so a store that
-            // cannot serve that key fires this with the window closed too.
+            // could never revoke. Live on any CA that renews certificates. The
+            // immediate arm is here, and not left to the CRL alert above,
+            // because that one needs crlUpdateThreshold failures in its window
+            // and never sees the CRL lock arm; nothing retries an immediate
+            // revocation, so one failure is a certificate left valid (#679).
+            // The same holds for a managed reissue's revocation of a
+            // certificate it signed and could not store, which counts here too.
+            // The sweep, every renewal and every subject revocation read the
+            // pending list whatever the setting says, so a store that cannot
+            // serve that key fires this with the window closed too.
             // Counter resets on restart, so alert on increase() over a window.
             expr: 'increase(openvoxca_supersede_failures_total{%(selector)s}[%(window)s]) > 0' % {
               selector: $._config.openvoxCASelector,
@@ -569,7 +576,7 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'OpenVox CA is failing to revoke superseded certificates.',
-              description: 'The OpenVox CA on {{ $labels.instance }} could not schedule or carry out the revocation of a certificate a renewal replaced (openvoxca_supersede_failures_total is rising), so that certificate is still a valid credential. Check the CA logs to tell the causes apart: "Superseded-certificate revocation sweep failed" means the sweep could not read the list, take the CRL lock or write the list back, which is the likeliest cause and blocks every pending revocation at once; if that warning also contains "behind a priority caller", the sweep stood aside for foreground CRL work (revocations, cleans and reissues) for its whole 15s budget, which is not a storage fault unless that foreground work is itself failing (look for "Revoke failed" warnings at the same time), and the next pass retries the entries; with several replicas sweeping a large backlog at once, a step can also run out of its wait behind other replicas\' steps; that warning names the lock it was acquiring rather than a priority caller, and is contention, not a fault, while other replicas log cleanup or sweep progress; "failed to retire replaced certificate" means the supersession was never recorded and the serial is in the warning; "Could not revoke superseded certificates" means they were recorded but the sweep could not amend the CRL; it re-signs once per step of up to 100 due entries and stops at the first step it cannot write, so every entry still due stays listed and is retried on the next pass; "Discarding" means the entry is gone and will never be retried. A store that cannot serve the superseded key raises this even where the overlap window is closed (superseded_cert_revoke_after_sec: 0) — look for "cannot determine supersession status" or "Revoke: could not read pending supersessions", which also mean renewals are being refused. Retire anything the sweep will not with openvox-ca-ctl revoke --serial <hex>. openvoxca_supersede_pending shows how many are still waiting.',
+              description: 'The OpenVox CA on {{ $labels.instance }} could not retire a certificate that a renewal or a managed certificate\'s reissue replaced (openvoxca_supersede_failures_total is rising), so that certificate is still a valid credential. Check the CA logs to tell the causes apart: "Superseded-certificate revocation sweep failed" means the sweep could not read the list, take the CRL lock or write the list back, which is the likeliest cause and blocks every pending revocation at once; if that warning also contains "behind a priority caller", the sweep stood aside for foreground CRL work (revocations, cleans and reissues) for its whole 15s budget, which is not a storage fault unless that foreground work is itself failing (look for "Revoke failed" warnings at the same time), and the next pass retries the entries; with several replicas sweeping a large backlog at once, a step can also run out of its wait behind other replicas\' steps; that warning names the lock it was acquiring rather than a priority caller, and is contention, not a fault, while other replicas log cleanup or sweep progress; "failed to retire replaced certificate" means the supersession was never recorded or, with the window closed, the immediate revocation failed, and the serial is in the warning; "could not be stored and could not then be revoked" means a managed reissue could not revoke the certificate it had just signed, and names its serial; "Could not revoke superseded certificates" means they were recorded but the sweep could not amend the CRL; it re-signs once per step of up to 100 due entries and stops at the first step it cannot write, so every entry still due stays listed and is retried on the next pass; "Discarding" means the entry is gone and will never be retried. A store that cannot serve the superseded key raises this even where the overlap window is closed (superseded_cert_revoke_after_sec: 0) — look for "cannot determine supersession status" or "Revoke: could not read pending supersessions", which also mean renewals are being refused. Retire anything the sweep will not with openvox-ca-ctl revoke --serial <hex>. openvoxca_supersede_pending shows how many are still waiting.',
             },
           },
           {

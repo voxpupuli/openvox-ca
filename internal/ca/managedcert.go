@@ -1208,20 +1208,24 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 			revokeCtx, cancelRevoke := context.WithTimeout(
 				context.WithoutCancel(ctx), LockTimeout/2)
 			defer cancelRevoke()
-			// Deliberately not withCRLLockCounted, matching Clean: the failures
-			// inside this closure are already counted by revokeSerialLocked and
-			// signCRLLocked, so wrapping would add only the arm where the lock
-			// could not be taken at all. docs/metrics.md names this path as
-			// uncounted on the lock arm.
+			// Deliberately not withCRLLockCounted, matching Clean: the CRL
+			// counter takes the failures inside this closure, through
+			// revokeSerialLocked and signCRLLocked, and docs/metrics.md names
+			// this path as uncounted there on the lock arm. The whole of it is
+			// counted below instead.
 			if rerr := c.Storage.WithLock(revokeCtx, lockNameCRL, func() error {
 				c.mu.Lock()
 				defer c.mu.Unlock()
 				return c.revokeSerialLocked(revokeCtx, newSerial)
 			}); rerr != nil {
-				// Counted by revokeSerialLocked and signCRLLocked where it
-				// reached them. Say plainly what is left behind: a live
-				// certificate whose key is gone, which nothing else will
-				// retire before it expires.
+				// Counted into supersedeFailures whatever stopped it, the lock
+				// included, as supersedeReplacedAfter counts its immediate arm:
+				// a certificate this CA signed is left valid and nothing will
+				// retry it, so OpenVoxCASupersedeFailing has to fire on one
+				// (#679). Say plainly what is left behind: a live certificate
+				// whose key is gone, which nothing else will retire before it
+				// expires.
+				c.supersedeFailures.Add(1)
 				slog.Error("A managed certificate could not be stored and could not then be revoked; "+
 					"it is live until it expires",
 					"subject", subject, "serial", newSerial, "error", rerr)
@@ -1308,8 +1312,7 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 		defer cancelSupersede()
 		if err := c.supersedeReplacedAfter(supersedeCtx, subject, oldSerial,
 			c.supersedeAfterFor(m.Spec)); err != nil {
-			// Counted already -- crlUpdateFailures on the immediate path,
-			// supersedeFailures on the delayed one.
+			// Counted already, into supersedeFailures on either path.
 			//
 			// The wording is the documented one, deliberately: docs/metrics.md
 			// tells an operator responding to OpenVoxCASupersedeFailing to grep

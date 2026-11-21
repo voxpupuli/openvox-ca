@@ -700,7 +700,7 @@ var _ = Describe("CRL chain read failures", func() {
 			"a best-effort revoke that could not take the lock is logged, not counted")
 	})
 
-	It("does not count a lock Renew could not take for its best-effort revoke", func() {
+	It("counts a lock Renew could not take for its best-effort revoke as a supersede failure, not a CRL one", func() {
 		// The comment at Renew's lock site says its exemption is the same as
 		// Clean's, and only Clean's was pinned. The two are separate call sites
 		// with separate arms, so wrapping this one in withCRLLockCounted would
@@ -724,6 +724,7 @@ var _ = Describe("CRL chain read failures", func() {
 		myCA.Storage = storage.NewWithBackend(refusing, filepath.Join(dir, "private"))
 
 		before := myCA.CRLUpdateFailures()
+		superseded := myCA.SupersedeFailures()
 		Expect(myCA.Renew(ctx, "renewme.test", csrPEM, cert)).Error().NotTo(HaveOccurred(),
 			"the renewal stands; revoking the replaced certificate is best-effort")
 		Expect(refusing.refused).To(BeNumerically(">", 0),
@@ -731,9 +732,14 @@ var _ = Describe("CRL chain read failures", func() {
 				"renamed it grants everything and the assertion below means nothing")
 		Expect(myCA.CRLUpdateFailures()).To(Equal(before),
 			"a lock the best-effort revoke could not take is logged, not counted")
+		// Not a CRL-update failure, but a replaced certificate left valid all
+		// the same, and nothing will retry it: the supersede counter takes
+		// every arm, this one included (#679).
+		Expect(myCA.SupersedeFailures()).To(Equal(superseded+1),
+			"openvoxca_supersede_failures_total must count a revocation the CRL lock refused")
 	})
 
-	It("does not count a lock AutoRenew could not take for its best-effort revoke", func() {
+	It("counts a lock AutoRenew could not take for its best-effort revoke as a supersede failure, not a CRL one", func() {
 		// The third of the three sites whose comments all say "deliberately not
 		// withCRLLockCounted" and justify it identically. Clean and Renew were
 		// pinned; this one was not, so the enumeration the other two establish
@@ -755,6 +761,7 @@ var _ = Describe("CRL chain read failures", func() {
 		myCA.Storage = storage.NewWithBackend(refusing, filepath.Join(dir, "private"))
 
 		before := myCA.CRLUpdateFailures()
+		superseded := myCA.SupersedeFailures()
 		Expect(myCA.AutoRenew(ctx, cert)).Error().NotTo(HaveOccurred(),
 			"the renewal stands; revoking the replaced certificate is best-effort")
 		Expect(refusing.refused).To(BeNumerically(">", 0),
@@ -762,6 +769,11 @@ var _ = Describe("CRL chain read failures", func() {
 				"renamed it grants everything and the assertion below means nothing")
 		Expect(myCA.CRLUpdateFailures()).To(Equal(before),
 			"a lock the best-effort revoke could not take is logged, not counted")
+		// Not a CRL-update failure, but a replaced certificate left valid all
+		// the same, and nothing will retry it: the supersede counter takes
+		// every arm, this one included (#679).
+		Expect(myCA.SupersedeFailures()).To(Equal(superseded+1),
+			"openvoxca_supersede_failures_total must count a revocation the CRL lock refused")
 	})
 
 	It("blames the file, not storage, when the refresh pass fails on the file itself", func() {

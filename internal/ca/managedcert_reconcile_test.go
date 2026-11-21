@@ -1146,6 +1146,26 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			entries, _, rerr := myCA.readSuperseded(ctx)
 			Expect(rerr).NotTo(HaveOccurred())
 			Expect(entries).To(BeEmpty())
+			Expect(myCA.SupersedeFailures()).To(BeZero(),
+				"a rollback revocation that succeeded must not count as a supersede failure")
+		})
+
+		It("counts a rollback revocation the CRL lock refused", func() {
+			// The rollback is a best-effort revocation like the renewal
+			// paths' retire step, and as there nothing retries it: a refused
+			// lock leaves a signed certificate valid until it expires. The CRL
+			// counter does not see the lock arm, so the supersede counter has
+			// to (#679).
+			refusing := &namedLockRefusingBackend{Backend: store.Backend(), refuse: lockNameCRL}
+			myCA.Storage = storage.NewWithBackend(refusing, filepath.Join(storeDir, "private"))
+			before := myCA.SupersedeFailures()
+
+			_, err := reconcileAt(dueWindow)
+			Expect(err).To(MatchError(ContainSubstring("secret rejected")))
+			Expect(refusing.refused).To(BeNumerically(">", 0),
+				"the fixture must actually have refused the CRL lock")
+			Expect(myCA.SupersedeFailures()).To(Equal(before+1),
+				"openvoxca_supersede_failures_total must count a rollback revocation that failed")
 		})
 
 		It("still revokes it when the store write exhausted the pass's deadline", func() {
@@ -1298,6 +1318,25 @@ var _ = Describe("Reconciling a managed certificate", func() {
 			revoked, err := myCA.IsRevokedSerial(ctx, predecessor.SerialNumber)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(revoked).To(BeTrue())
+			Expect(myCA.SupersedeFailures()).To(BeZero(),
+				"a revocation that succeeded must not count as a supersede failure; "+
+					"OpenVoxCASupersedeFailing fires on one")
+		})
+
+		It("counts an inline revocation that fails, and keeps the replacement", func() {
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			predecessor := fake.stored()
+			Expect(store.UpdateCRL(ctx, []byte("not a valid CRL"))).To(Succeed())
+			before := myCA.SupersedeFailures()
+
+			issued, err := reconcileAt(dueWindow)
+			Expect(err).NotTo(HaveOccurred(),
+				"retiring the predecessor is best-effort; the stored replacement stands")
+			Expect(issued).To(BeTrue())
+			Expect(fake.stored().SerialNumber).NotTo(Equal(predecessor.SerialNumber))
+			Expect(myCA.SupersedeFailures()).To(Equal(before+1),
+				"openvoxca_supersede_failures_total must count an immediate revocation that failed")
 		})
 
 		It("does not put a foreign certificate's serial on our CRL", func() {
@@ -2028,3 +2067,24 @@ func inventorySerialsFor(ctx context.Context, svc *storage.StorageService, subje
 	}
 	return out, nil
 }
+
+// namedLockRefusingBackend refuses one named lock and grants every other, so a
+// spec can fail a pass at that lock alone. Granted rather than delegated for
+// the rest: the embedded backend need not be a Locker.
+type namedLockRefusingBackend struct {
+	storage.Backend
+	refuse  string
+	refused int
+}
+
+func (b *namedLockRefusingBackend) AcquireLock(_ context.Context, name string) (storage.Unlocker, error) {
+	if name == b.refuse {
+		b.refused++
+		return nil, fmt.Errorf("lock %q unavailable", name)
+	}
+	return grantedUnlocker{}, nil
+}
+
+type grantedUnlocker struct{}
+
+func (grantedUnlocker) Unlock() error { return nil }

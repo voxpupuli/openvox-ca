@@ -108,10 +108,12 @@
     // it cannot re-sign or write). Some of these are best-effort and swallowed
     // — e.g. the revoke step of a clean, or of a renewal on a deployment that
     // has set superseded_cert_revoke_after_sec to 0 — leaving the old
-    // certificate valid for its key. Note the default case is NOT here: with a
-    // window configured, a renewal records the supersession instead and its
-    // failures are counted by OpenVoxCASupersedeFailing. The counter resets on
-    // restart, so the alert looks at increase() over crlUpdateWindow.
+    // certificate valid for its key. Each of those is also counted on a
+    // counter of its own that alerts on one failure: OpenVoxCACleanIncomplete
+    // and OpenVoxCASupersedeFailing. With a window configured, the default, a
+    // renewal records the supersession instead and only the latter counts it.
+    // The counter resets on restart, so the alert looks at increase() over
+    // crlUpdateWindow.
     //
     // It fires on crlUpdateThreshold failures in the window, not on the first.
     // A backend restart costs one failed amendment, and the next pass succeeds;
@@ -149,11 +151,12 @@
     // the best-effort revocation in a clean, or of a certificate a renewal or
     // a managed certificate's reissue replaced where its revocation is
     // immediate (superseded_cert_revoke_after_sec, or the entry's revoke_after,
-    // is 0). Failing once, any of these is now reported only by its log
-    // warning, and leaves the certificate valid — under a sign- or write-only
-    // fault as well as a transient one, since the refresh pass does not count
-    // that fault. A revocation an operator asked for is not in this list: it
-    // fails with an error to the caller.
+    // is 0). Failing once, either leaves the certificate valid — under a sign-
+    // or write-only fault as well as a transient one, since the refresh pass
+    // does not count that fault — so neither is left to this rule:
+    // OpenVoxCACleanIncomplete and OpenVoxCASupersedeFailing each fire on one.
+    // A revocation an operator asked for is not in this list: it fails with an
+    // error to the caller.
     crlUpdateWindow: '3h',
     crlUpdateThreshold: 2,
     crlUpdateFor: '15m',
@@ -250,7 +253,9 @@
     // certificate it replaced on a durable list and a sweep revokes it once the
     // window elapses. A failure here is a certificate that a renewal replaced
     // and that is still a valid credential — either because the supersession
-    // was never recorded, or because the sweep could not carry it out. Like the
+    // was never recorded, or because the sweep could not carry it out. With the
+    // window at 0 it is an immediate revocation that failed, which nothing
+    // retries. Like the
     // CRL-update alert, a counter that resets on restart, so increase() over a
     // window, but with no count threshold: it fires on one failure. Debounced
     // for longer, because the sweep retries

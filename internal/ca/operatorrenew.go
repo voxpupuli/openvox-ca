@@ -186,8 +186,8 @@ func (c *CA) RenewStored(ctx context.Context, subject string, csrPEM []byte) ([]
 		if csr == nil && !c.RevokeOnAutoRenew {
 			return nil
 		}
-		// Best effort, as on both agent paths: the failure is counted by
-		// supersedeReplaced's callees, and the renewal stands.
+		// Best effort, as on both agent paths: supersedeReplaced counts the
+		// failure, and the renewal stands.
 		oldSerial := serialHexStr(stored.SerialNumber)
 		if err := c.supersedeReplaced(ctx, subject, oldSerial); err != nil {
 			slog.Warn("RenewStored: failed to retire replaced certificate", "subject", subject, "serial", oldSerial, "error", err)
