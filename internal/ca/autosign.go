@@ -37,6 +37,13 @@ import (
 // executable to run.  A hung script would otherwise block the CA indefinitely.
 const defaultExecutableTimeout = 30 * time.Second
 
+// autosignWaitDelay bounds how long a run goes on waiting for the executable's
+// stdin once the executable has exited or been killed. Something it started can
+// inherit the pipe and hold it without reading, and the CSR is copied into it
+// from a goroutine that Wait would otherwise wait on for as long as that
+// descendant lives. A run therefore takes at most the timeout plus this.
+const autosignWaitDelay = 2 * time.Second
+
 type AutosignConfig struct {
 	Mode              string        // "true", "file", "executable" (or "off" implicitly)
 	FileOrPath        string        // Path to autosign.conf or executable
@@ -166,8 +173,21 @@ func runAutosignExecutable(cfg AutosignConfig, resolved string, timeout time.Dur
 		cmd.Env = append(cmd.Env, "LANG="+lang)
 	}
 	cmd.Stdin = bytes.NewReader(csrPEM)
+	killProcessGroupOnCancel(cmd)
+	cmd.WaitDelay = autosignWaitDelay
 
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		// The executable exited zero, and something it started was still
+		// holding its stdin when the delay ran out. The exit status is the
+		// decision; a descendant's grip on the pipe does not change it.
+		// exec reports this only for a successful exit that was not
+		// cancelled, so it is never a timeout.
+		slog.Warn("Autosign executable approved the request but left a process holding its stdin; signing as its exit status says",
+			"path", cfg.FileOrPath, "realpath", resolved, "common_name", commonName, "wait_delay", autosignWaitDelay)
+		return true, nil
+	}
+	if err != nil {
 		if ctx.Err() != nil {
 			return false, fmt.Errorf("autosign executable timed out after %s", timeout)
 		}
