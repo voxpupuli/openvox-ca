@@ -318,6 +318,7 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ├── ca_pub.pem              CA public key
 ├── ca_crl.pem              Certificate Revocation List (see note)
 ├── inventory.txt           Issued certificate log, in OpenVox Server's format
+├── serial                  Next serial number
 ├── superseded.json         Certificates awaiting delayed
 │                           revocation (see note)              0600
 ├── private/
@@ -1008,7 +1009,8 @@ The `sql_tls_*_file` options stand in for the DSN's `sslrootcert`, `sslcert`
 and `sslkey`, and `sslmode` means the same with either:
 `sql_tls_ca_file` with `sslmode=require` checks the certificate chain but not
 the host name, exactly as `sslrootcert` with `sslmode=require` does. Without
-`sql_tls_ca_file`, the server is checked against the system's trusted CAs.
+`sql_tls_ca_file`, `verify-ca` and `verify-full` check the server against the
+system's trusted CAs, and `require` checks nothing.
 `openvox-ca` refuses to open the database when the two ways conflict or the
 files would go unused:
 
@@ -1422,9 +1424,9 @@ Notes:
   destination does not set `encrypt_ca_key`, and with `--force` that includes
   over an encrypted key already in the destination: `migrate` does not refuse
   it, as `import` does, and says nothing. Set `encrypt_ca_key` in
-  `--dest-config` to keep that destination's key encrypted. See [backward
-  compatibility](ca-key-security.md#backward-compatibility) for encrypting an
-  existing key this way.
+  `--dest-config` to keep that destination's key encrypted. See [encrypting a
+  key that already exists](ca-key-security.md#encrypting-a-key-that-already-exists)
+  for doing it this way.
 - **Re-runnable.** The copy is idempotent per item; an interrupted run can be
   repeated (with `--force` if a partial CA already landed).
 - Use `--verbose` to log each item as it is copied.

@@ -339,13 +339,13 @@ openvox-ca-ctl import \
 # plaintext key with --encrypt-ca-key. A plaintext key is refused over an
 # encrypted one already stored, unless --encrypt-ca-key encrypts it or
 # --allow-plaintext-ca-key says the CA is meant to keep its key in plaintext
-# from now on. See "Backward compatibility" in
+# from now on. See "Encrypting a key that already exists" in
 # ca-key-security.md for encrypting an existing key this way.
 #
-# --crl-chain must contain only X509 CRL blocks. Every one is parsed, and only
-# the parsed CRLs are stored -- so a file with a certificate or a key
-# concatenated into it is refused, for the same reason the certificate bundle
-# rejects keys: the result is world-readable and served to every agent.
+# Only X509 CRL blocks are read from --crl-chain, and only the parsed CRLs are
+# stored -- so a certificate or a key concatenated into the file is dropped
+# rather than published. That matters for the same reason the certificate
+# bundle rejects keys: the result is world-readable and served to every agent.
 #
 # import writes no inventory integrity value, so the server's next start logs
 # "No inventory HMAC found on an established CA" at WARN, once, as it
@@ -404,9 +404,10 @@ must reach the storage backend named in the *server's* configuration — and for
 `csr`, `import-ca-cert` and `generate`, its CA key provider too.
 `rebuild-inventory-hmac` is the exception: the inventory and its HMAC key both
 live in storage, so it never opens a session to the key backend.
-`openvox-ca-ctl` reads a different configuration file and can only address a
-local filesystem directory, so it cannot serve a CA whose state is in
-PostgreSQL or whose key is in OpenBao Transit.
+`openvox-ca-ctl` reads a different configuration file, its offline `setup` and
+`import` address only a local filesystem directory, and nothing in it reaches a
+key provider, so it cannot serve a CA whose state is in PostgreSQL or whose key
+is in OpenBao Transit.
 
 None of them needs a running server, and on a backend that supports one running
 instance none of them will *write* beside one: each is refused before it acts,
@@ -918,10 +919,11 @@ The command prints a warning naming all of that before it issues, and requires
 get wrong:
 
 1. `openvox-ca-ctl revoke --certname <name>` — revokes the newest serial.
-2. **Restart every replica.** Each holds its own CRL cache, so a revocation made
-   elsewhere is not honoured until the process reloads it; waiting for that can
-   take roughly two-thirds of `crl_validity_days`, and even afterwards a pre-signed
-   OCSP response can vouch for the revoked serial for up to another four hours.
+2. **Wait for every replica to reload the CRL.** Each holds its own CRL cache,
+   so a revocation made elsewhere is not honoured until the process reloads it,
+   which it does within `crl_sync_interval_sec` (60 seconds by default); even
+   afterwards a pre-signed OCSP response already handed out can vouch for the
+   revoked serial for up to another four hours.
 3. **Check the inventory for other live serials for that name.** With
    `revoke_on_auto_renew: false`, or after a renewal whose best-effort revoke
    failed, more than one can be valid. Step 1 retires only the newest; retire
@@ -988,8 +990,9 @@ deliberate widening, and the reason the feature is possible at all, but it is
 worth knowing when deciding who gets a shell on the CA host.
 
 Where the caller has a stable CN, `--puppet-server` remains the lower-privilege
-alternative: an allow-list entry is withdrawn by editing a file and restarting,
-with none of the above.
+alternative: an allow-list entry is withdrawn by editing `--puppet-server-file`
+and reloading (or restarting, for a CN given with `--puppet-server`), with none
+of the above.
 
 #### The first credential on a new CA
 

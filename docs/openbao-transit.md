@@ -630,11 +630,9 @@ failure and throughput profile; plan for it:
   below says why you should set it explicitly here rather than take its
   default.
 - **A stalled backend cannot pin the CA indefinitely.** Each signing round
-  trip is bounded by `openbao` login/renew timeout (`LoginTimeout`, default
-  10s), so a hung Transit backend fails that request and releases the lock
-  rather than wedging all issuance forever. Raising that timeout for a slow or
-  distant OpenBao correspondingly raises the worst-case time the lock can be
-  held.
+  trip is bounded by the OpenBao client's fixed 10-second request timeout, so a
+  hung Transit backend fails that request and releases the lock rather than
+  wedging all issuance forever.
 - **Set `ca_signing_concurrency` explicitly.** The bound on concurrent CA-key
   signatures defaults to `max(4, GOMAXPROCS)`, derived from *this host's* CPU
   count — a number with no relationship to what your Transit key can sustain,
