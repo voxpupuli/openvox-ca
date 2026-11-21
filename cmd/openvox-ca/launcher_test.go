@@ -67,6 +67,10 @@ const memLimitOutEnv = "OPENVOX_CA_TEST_MEMLIMIT_OUT"
 // reason as memLimitOutEnv: the children's stdout is the launcher's own.
 const envDumpDirEnv = "OPENVOX_CA_TEST_ENV_DUMP_DIR"
 
+// handshakeTimeoutEnv carries the bound the frontend-bounded child gives
+// signer.DialConn, so the wedged-signer spec can make it short.
+const handshakeTimeoutEnv = "OPENVOX_CA_TEST_HANDSHAKE_TIMEOUT"
+
 // launcherStartedEnv is set by the launcher-env child before it calls
 // runLauncher, and refused by it if already set. The children inherit it, so a
 // child that somehow lost OPENVOX_CA_ROLE refuses instead of starting a launcher
@@ -98,7 +102,7 @@ func runPSKChild(role string) int {
 		}
 		return 0
 	case "frontend":
-		rs, err := signer.Dial(nil)
+		rs, err := signer.Dial(context.Background(), nil, 30*time.Second)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -115,6 +119,23 @@ func runPSKChild(role string) int {
 			return 1
 		}
 		fmt.Println("SIGN-OK")
+		return 0
+	case "frontend-bounded":
+		// The frontend's wait for the signer with the bound the server gives it,
+		// but short. Only the handshake: the spec behind it plays a signer that
+		// never answers, so there is nothing to sign with afterwards.
+		timeout, err := time.ParseDuration(os.Getenv(handshakeTimeoutEnv))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "frontend-bounded child:", err)
+			return 2
+		}
+		conn, err := signer.DialConn(context.Background(), timeout)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		_ = conn.Close()
+		fmt.Println("HANDSHAKE-OK")
 		return 0
 	case "report-memlimit":
 		// debug.SetMemoryLimit(-1) reports the limit without changing it, so
@@ -315,6 +336,46 @@ var _ = Describe("launcher fd contract", func() {
 		// branches and the read timeout -- so on its own it cannot say which guard
 		// fired, which is the whole claim of the comment above.
 		Expect(out.String()).To(ContainSubstring("fd 4 is not a pipe"))
+	})
+
+	// verifies that the frontend's wait for the signer is bounded across the
+	// exec boundary, on the descriptor the launcher really passes. The signer
+	// here is the spec itself: it holds the other end of the socketpair, alive,
+	// and never writes -- a signer wedged in Init. Unbounded, the child blocks
+	// on its first read until the context below kills it.
+	//
+	// Across exec rather than only over net.Pipe because that is where the
+	// PSK read's first bound failed: a deadline that worked in-process and
+	// could not arm on the inherited descriptor. This conn is a socket rather
+	// than a pipe, which is why a deadline is right for it, and this spec is
+	// what says so.
+	It("bounds the frontend's wait on a signer that never answers", func() {
+		signerSock, frontendSock, err := signer.Socketpair()
+		Expect(err).NotTo(HaveOccurred(), "creating socketpair")
+		DeferCleanup(func() { _ = signerSock.Close(); _ = frontendSock.Close() })
+
+		frontendPipe, err := pskPipe(hex.EncodeToString(make([]byte, 32)))
+		Expect(err).NotTo(HaveOccurred(), "creating frontend PSK pipe")
+		DeferCleanup(func() { _ = frontendPipe.Close() })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		DeferCleanup(cancel)
+
+		var out bytes.Buffer
+		cmd := pskChildCmd(ctx, "frontend-bounded", []*os.File{frontendSock, frontendPipe}, &out)
+		cmd.Env = append(cmd.Env, handshakeTimeoutEnv+"=500ms")
+		Expect(cmd.Start()).To(Succeed(), "starting frontend child")
+		DeferCleanup(func() { killAndReap(cmd) })
+		frontendSock.Close()
+		frontendPipe.Close()
+
+		started := time.Now()
+		err = cmd.Wait()
+		Expect(err).To(HaveOccurred(), "the child should give up rather than connect; output: %s", out.String())
+		Expect(out.String()).To(ContainSubstring("did not answer the handshake in time"),
+			"the child should report the bound, not be killed by the spec's context")
+		Expect(time.Since(started)).To(BeNumerically("<", 20*time.Second),
+			"the child should give up at its own bound, well before the spec's")
 	})
 })
 

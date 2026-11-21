@@ -1466,7 +1466,7 @@ func newRootCmd() *cobra.Command {
 				// key pair to be generated — worth saying out loud, since it
 				// is the longest a cold start ever takes.
 				notifier.Status("Waiting for the signer process to initialise the CA")
-				conn, err := signer.DialConn()
+				conn, err := dialSigner(ctx, cfg)
 				if err != nil {
 					return fmt.Errorf("connecting to signer process: %w", err)
 				}
@@ -2087,6 +2087,67 @@ func openSignerLog(cfg *serverConfig) func() {
 		return func() {}
 	}
 	return closeRoleLog(logFile)
+}
+
+// signerHandshakeTimeout is how long the frontend waits for the signer to
+// finish initialising the CA and answer the handshake.
+//
+// Derived rather than fixed, because it sits between two sets of budgets and
+// has to be ordered against both. Below it: the ceilings inside the signer's
+// Init, each of which must fire first, since the signer's own error names the
+// step that stuck and this one can only say that the signer has not answered.
+// The largest of them is the migration run's, sql_migration_timeout_sec, which
+// an operator may raise -- so a fixed figure would put the inversion #345 was
+// about straight back, one level down. LockTimeout on top leaves room for one
+// of the steps that follow the migration in Init, none of which has a larger
+// ceiling. On a backend with no migration the bound is longer than it needs to
+// be, which costs nothing: it only binds on a signer that has stopped.
+// Above it: whatever supervises the start, which must outlast it, or the
+// supervisor's kill arrives first and says nothing about the signer at all.
+//
+// A ceiling on a wedged signer, not an expected wait. A healthy signer answers
+// in milliseconds on a warm start, and as soon as the CA key is generated on a
+// first one.
+//
+// The migration budget comes from storage.SQLMigrationTimeout, the function the
+// backend itself applies, so the two cannot disagree about what a setting means.
+//
+// It has a floor of two LockTimeouts, so the bound never drops below three
+// minutes. A healthy signer on a contended cold start waits out a peer's
+// hmac-key lock and then its bootstrap lock, one LockTimeout each, before it
+// generates the CA key; an operator who lowers sql_migration_timeout_sec to fail
+// fast on a stuck migration must not also cut that start off.
+func signerHandshakeTimeout(cfg *serverConfig) time.Duration {
+	return max(storage.SQLMigrationTimeout(cfg.SQLMigrationTimeoutSec), 2*ca.LockTimeout) + ca.LockTimeout
+}
+
+// dialSignerConn is signer.DialConn, as a variable so a spec can stand in for
+// the signer: the real one needs the launcher's descriptors on fds 3 and 4.
+var dialSignerConn = signer.DialConn
+
+// dialSigner is the frontend's wait for the signer, under the bound
+// signerHandshakeTimeout derives and the caller's context, logging why it
+// failed when it does.
+//
+// Logged as well as returned, because the returned error reaches stderr only:
+// under --daemon that is /dev/null, and with a log_file the frontend's log would
+// otherwise end on the line announcing the wait. A refused signer proof is in
+// that set too, and it is the one an operator most needs a record of. A
+// cancelled context is not logged, since the shutdown already says why.
+func dialSigner(ctx context.Context, cfg *serverConfig) (net.Conn, error) {
+	timeout := signerHandshakeTimeout(cfg)
+	slog.Info("Waiting for the signer process to finish initialising the CA", "timeout", timeout)
+	conn, err := dialSignerConn(ctx, timeout)
+	switch {
+	case err == nil:
+		return conn, nil
+	case errors.Is(err, signer.ErrHandshakeTimeout):
+		slog.Error("Gave up waiting for the signer process", "error", err)
+	case ctx.Err() != nil:
+	default:
+		slog.Error("Could not connect to the signer process", "error", err)
+	}
+	return nil, err
 }
 
 // runSignerMode runs the isolated CA key signer process. It initializes the CA

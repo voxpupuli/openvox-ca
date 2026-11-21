@@ -25,6 +25,7 @@ package signer
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/hmac"
 	"crypto/rand"
@@ -365,6 +366,13 @@ func (r *RemoteSigner) signTimeout() time.Duration {
 	return defaultRemoteSignTimeout
 }
 
+// ErrHandshakeTimeout is returned by DialConn when the signer has not answered
+// the handshake within the caller's bound. The signer sends its first message
+// only once its whole Init has returned, so this means a signer that is still
+// running but has not finished initialising the CA: one that had exited would
+// have closed its end of the socketpair, and the read would have failed at once.
+var ErrHandshakeTimeout = errors.New("the signer process did not answer the handshake in time")
+
 // DialConn connects to the signer process and performs the mutual PSK
 // handshake, returning the authenticated connection: the frontend proves
 // knowledge of the PSK to the signer and verifies the signer's counter-proof
@@ -373,7 +381,19 @@ func (r *RemoteSigner) signTimeout() time.Duration {
 //
 // This two-step approach allows the frontend to wait for the signer to be
 // ready (via the PSK handshake) before reading the CA cert from disk.
-func DialConn() (net.Conn, error) {
+//
+// That wait is the whole of the signer's Init, so it can legitimately be long,
+// and timeout bounds it: a signer wedged in Init otherwise hangs the frontend
+// on a read with nothing logged about what it is waiting for -- the failure
+// pskReadTimeout exists to prevent one step earlier. The caller chooses the
+// value, because only the caller knows the budgets Init runs under, and the
+// bound has to outlast the largest of them or it pre-empts the signer's own,
+// better error. Cancelling ctx abandons the wait too, so a SIGTERM during a
+// long start is honoured rather than left to the launcher's hard kill.
+func DialConn(ctx context.Context, timeout time.Duration) (net.Conn, error) {
+	if timeout <= 0 {
+		return nil, fmt.Errorf("signer handshake timeout must be positive, got %s", timeout)
+	}
 	conn, err := connFromFD(InheritedFD)
 	if err != nil {
 		return nil, fmt.Errorf("recovering socketpair fd %d: %w", InheritedFD, err)
@@ -385,9 +405,9 @@ func DialConn() (net.Conn, error) {
 		conn.Close()
 		return nil, fmt.Errorf("loading PSK: %w", err)
 	}
-	if err := clientHandshake(conn, psk); err != nil {
+	if err := clientHandshakeWithin(ctx, conn, psk, timeout); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("PSK handshake failed: %w", err)
+		return nil, err
 	}
 	slog.Info("PSK handshake succeeded")
 
@@ -404,8 +424,8 @@ func NewRemoteSigner(conn net.Conn, pub crypto.PublicKey) *RemoteSigner {
 
 // Dial connects to the signer process using the inherited socketpair fd.
 // Convenience wrapper that combines DialConn + NewRemoteSigner.
-func Dial(pub crypto.PublicKey) (*RemoteSigner, error) {
-	conn, err := DialConn()
+func Dial(ctx context.Context, pub crypto.PublicKey, timeout time.Duration) (*RemoteSigner, error) {
+	conn, err := DialConn(ctx, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -792,6 +812,48 @@ func serverHandshake(conn net.Conn, psk []byte) error {
 	// Prove our own knowledge of the PSK to the frontend.
 	if _, err := conn.Write(handshakeProof(psk, signerProofLabel, serverNonce, clientNonce)); err != nil {
 		return fmt.Errorf("sending signer proof: %w", err)
+	}
+	return nil
+}
+
+// clientHandshakeWithin runs clientHandshake under a deadline on conn, and
+// abandons it early if ctx is cancelled.
+//
+// A deadline rather than readPSK's timer and goroutine, and the difference is
+// the descriptor. readPSK's comment explains why a deadline cannot bind on the
+// inherited PSK pipe; this conn is a socket that net.FileConn has registered
+// with the runtime poller, where SetDeadline works, and it
+// leaves no goroutine blocked behind it. The launcher fd-contract spec drives
+// it across a real exec boundary, which is the case the pipe got wrong.
+//
+// The deadline covers the whole exchange, not just the first read. Everything
+// after the signer's nonce is immediate, so the bound is in practice a bound on
+// that one read, but a signer that sent its nonce and then stopped must not
+// hang the frontend either.
+func clientHandshakeWithin(ctx context.Context, conn net.Conn, psk []byte, timeout time.Duration) error {
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return fmt.Errorf("arming the signer handshake deadline: %w", err)
+	}
+	// A deadline in the past wakes the blocked read at once. Closing conn would
+	// too, but conn is the caller's to close.
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
+	err := clientHandshake(conn, psk)
+	if !stop() {
+		// ctx fired, whatever the handshake made of it: report the cancellation
+		// rather than the deadline error it produced, or a shutdown would read
+		// as a wedged signer.
+		return fmt.Errorf("stopped waiting for the signer process: %w", context.Cause(ctx))
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return fmt.Errorf("%w (waited %s): it is still running but has not finished initialising the CA, "+
+			"and its own log lines, those with the role signer, name the step it is in", ErrHandshakeTimeout, timeout)
+	}
+	if err != nil {
+		return fmt.Errorf("PSK handshake failed: %w", err)
+	}
+	// Cleared, or every RPC from here on would inherit it.
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clearing the signer handshake deadline: %w", err)
 	}
 	return nil
 }

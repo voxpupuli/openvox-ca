@@ -340,8 +340,10 @@ func expectOneRowPerMigration(ctx context.Context, b *SQLBackend) {
 
 // The migration budget is the one operator knob that decides whether a schema
 // change completes, and it reaches the backend through four hops: YAML, SQLSpec,
-// SQLConfig, and the field EnsureReady reads. The two ends are pinned here; the
-// middle two in internal/config and cmd/openvox-ca.
+// SQLConfig, and the field EnsureReady reads. YAML to SQLSpec is pinned in
+// internal/config; the rest here, SQLSpec to the field through NewServiceFromSpec
+// included, since the frontend's wait for the signer reads the same setting
+// through SQLMigrationTimeout and the two must not part.
 var _ = Describe("SQLConfig migration budget", func() {
 	It("defaults to ten minutes", func() {
 		cfg := SQLConfig{Dialect: SQLitePure, DSN: "file::memory:"}
@@ -364,4 +366,26 @@ var _ = Describe("SQLConfig migration budget", func() {
 		// mean contriving a migration slow enough to exceed it.
 		Expect(b.migrationTimeout).To(Equal(45 * time.Second))
 	})
+
+	DescribeTable("reaches the backend from the spec NewServiceFromSpec is given",
+		func(seconds int, want time.Duration) {
+			dir := GinkgoT().TempDir()
+			svc, err := NewServiceFromSpec(BackendSpec{
+				Kind:     BackendSQLite,
+				LocalDir: dir,
+				SQL: SQLSpec{
+					DSN:                 "file:" + filepath.Join(dir, "ca.db"),
+					MigrationTimeoutSec: seconds,
+				},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(svc.Backend().Close)
+			b, ok := svc.Backend().(*SQLBackend)
+			Expect(ok).To(BeTrue(), "a SQLite spec with no overrides must yield the SQL backend itself")
+			Expect(b.migrationTimeout).To(Equal(want))
+		},
+		Entry("unset, the default", 0, 10*time.Minute),
+		Entry("negative, the default", -5, 10*time.Minute),
+		Entry("an operator's value", 45, 45*time.Second),
+	)
 })
