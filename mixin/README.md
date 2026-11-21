@@ -43,7 +43,7 @@ alerting rules for the openvox-ca exporter. It alerts on:
   (re-import the bundle), and the log line says which; and a file that has never
   been opened at all (wrong path, or a mount that never landed). They are five
   rules rather than one because a responder sent to the wrong one of those
-  remedies finds nothing wrong. The per-issuer gauge appears only where the
+  remedies finds nothing wrong. The per-issuer gauges appear only where the
   stored blob holds a CRL this CA did not issue — including a chain brought in
   by `import --crl-chain`, with no `crl_chain.file` in sight. The four
   unlabelled counters are always exported and read zero without one, while the
@@ -230,12 +230,15 @@ promtool check rules openvox_ca_alerts.yaml
 
 `mage test:mixin` renders the mixin and runs both promtool checks over it —
 `check rules` for syntax and `test rules` against [`tests.yaml`](tests.yaml),
-which covers the rules whose firing is not obvious from the PromQL: the ones
-built from set operators or a timing argument, and the plain leaf and CRL expiry
-thresholds, pinned for how they meet the exporter's hold on a failed gather. CI
-runs the same target, so a broken expression fails the build rather than
-waiting to be noticed in an alertmanager that never fires. It skips with a message if
-`jsonnet` or `promtool` is not on your `PATH`.
+then again with a one-day `upstreamCRLExpiryWarningSeconds` and a fraction of a fifth against
+[`tests-floor.yaml`](tests-floor.yaml), since that floor's part of
+`OpenVoxCAUpstreamCRLExpiringSoon` does nothing at its default of 0.
+`tests.yaml` covers the rules whose firing is not obvious from the PromQL: the
+ones built from set operators or a timing argument, and the plain leaf and CRL
+expiry thresholds, pinned for how they meet the exporter's hold on a failed
+gather. CI runs the same target, so a broken expression fails the build rather
+than waiting to be noticed in an alertmanager that never fires. It skips with a
+message if `jsonnet` or `promtool` is not on your `PATH`.
 
 The alert names and `_config` keys are public API
 ([what the version number promises](../docs/development/releasing.md#what-the-version-number-promises)),
@@ -289,7 +292,8 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `caExpiryWarningSeconds` | 30 days | CA certificate expiry warning threshold. |
 | `caExpiryCriticalSeconds` | 7 days | CA certificate expiry critical threshold. |
 | `crlExpiryWarningSeconds` | 3 days | CRL `NextUpdate` warning threshold. |
-| `upstreamCRLExpiryWarningSeconds` | 14 days | Warning threshold for an upstream CRL in a published chain. Longer than `crlExpiryWarningSeconds` because the remedy is at another CA. |
+| `upstreamCRLExpiryWarningFraction` | `0.1` | `OpenVoxCAUpstreamCRLExpiringSoon` fires once less than this fraction of an upstream CRL's own lifetime (`nextUpdate` − `thisUpdate`) remains. **Keep it below what each upstream has left when it re-signs**, or the alert fires before every re-sign: OpenBao and Vault with `auto_rebuild` leave a sixth of a 72-hour CRL, and a parent that re-signs a 30-day CRL weekly leaves three quarters. One that re-signs only inside a short overlap before `nextUpdate` leaves less: Active Directory Certificate Services at its default overlap (a tenth of the publication period, at most 12 hours) leaves at most 1/11, so the alert fires for hours before each re-sign of a weekly CRL and for days before each re-sign of a monthly one. Lengthen that CA's CRL overlap period, or set this below overlap ÷ (publication period + overlap). |
+| `upstreamCRLExpiryWarningSeconds` | `0` (off) | An absolute floor on that warning: it fires once less than the larger of the fraction's window and this remains. Set it where a person has to act on the warning — with `crl_chain.file` or an imported chain, this alert is the only sign that the refresh has stopped, and a tenth of a 30-day CRL is three days — and where an upstream's CRL lives 10 hours or less, since a tenth of that does not outlast `expiryFor`. It applies to every issuer, so a floor above a short-lived upstream's re-sign margin fires permanently for it. It is also the whole threshold where the lifetime cannot be worked out: a CA too old to export `openvoxca_crl_chain_this_update_timestamp_seconds`, or a CRL whose `thisUpdate` is not before its `nextUpdate`. |
 | `crlChainWindow` | `2h` | Window over which chain-refresh failures, discards, regressions and removals are counted (fetch failures have their own, below). Twice the CA's default `crl_chain.refresh_interval_sec`, so that two increments are always in range: at exactly one interval a single unchanging fault fires, resolves and re-fires forever, because the older sample ages out before the next increment lands. Keep it at twice the interval if you change that setting. |
 | `crlChainFor` | `15m` | `for:` debounce for the upstream-chain and upstream-fetch alerts. |
 | `crlChainFetchStaleSeconds` | 3 hours | How long a `crl_chain.urls` entry may go without a usable, current CRL before `OpenVoxCAUpstreamCRLFetchStale` fires. A healthy entry is never older than about one interval, so it fires only once `crl_chain.refresh_interval_sec` exceeds this plus `crlChainFor`; the margin above one interval is what lets a failed round stay quiet. **Keep it at least twice the interval**, and raise it with that setting, which the mixin cannot see: at the default, an interval above about 97 minutes lets one failed round fire it, and one above about 3h15m fires between healthy rounds. Three times the CA's default `crl_chain.refresh_interval_sec`. |

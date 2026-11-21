@@ -116,10 +116,18 @@ func emptyCRLNumbered(cert *x509.Certificate, key crypto.Signer, number int64) [
 // now, so two CRLs from the same issuer can be told apart by deadline.
 func emptyCRLExpiring(cert *x509.Certificate, key crypto.Signer, number int64, in time.Duration) []byte {
 	GinkgoHelper()
+	return emptyCRLWindow(cert, key, number, 0, in)
+}
+
+// emptyCRLWindow issues an empty CRL from cert issued `ago` before now and
+// expiring `in` after it, so two CRLs from one issuer can differ in both ends of
+// their lifetime.
+func emptyCRLWindow(cert *x509.Certificate, key crypto.Signer, number int64, ago, in time.Duration) []byte {
+	GinkgoHelper()
 	now := time.Now().UTC()
 	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
 		Number:     big.NewInt(number),
-		ThisUpdate: now,
+		ThisUpdate: now.Add(-ago),
 		NextUpdate: now.Add(in),
 	}, cert, key)
 	Expect(err).NotTo(HaveOccurred())
@@ -519,7 +527,57 @@ var _ = Describe("crl_chain.file", func() {
 			Expect(statuses).To(HaveLen(1))
 			Expect(statuses[0].Issuer).To(ContainSubstring("Upstream Root CA"))
 			Expect(statuses[0].NextUpdate).NotTo(BeZero())
+			Expect(statuses[0].ThisUpdate).NotTo(BeZero())
+			Expect(statuses[0].ThisUpdate).To(BeTemporally("<", statuses[0].NextUpdate))
 		})
+
+		// The expiry warning is relative to a CRL's own lifetime, so the
+		// ThisUpdate reported for a DN must come from the CRL whose NextUpdate
+		// won the collapse. Each entry publishes a CRL that lapses in 2 days
+		// beside one that lapses in 20, in both orders, because each order
+		// takes a different arm of the collapse. The nearest deadline is the
+		// earlier-issued CRL in two entries and the later-issued one in the
+		// other two, so neither "the latest ThisUpdate" nor "the earliest"
+		// passes: only the one issued beside the reported deadline does.
+		DescribeTable("reports the ThisUpdate of the CRL whose NextUpdate it reports",
+			func(nearAgo, farAgo time.Duration, nearFirst bool) {
+				aCert, aKey, _ := upstreamCAWithKey("Shared Window CA")
+				bCert, bKey, _ := upstreamCAWithKey("Shared Window CA")
+
+				ours, err := store.GetCACert(ctx)
+				Expect(err).NotTo(HaveOccurred())
+				bundle := append([]byte{}, ours...)
+				for _, cert := range []*x509.Certificate{aCert, bCert} {
+					bundle = append(bundle, pem.EncodeToMemory(
+						&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})...)
+				}
+				Expect(store.SaveCACert(ctx, bundle)).To(Succeed())
+
+				near := emptyCRLWindow(bCert, bKey, 1, nearAgo, 2*24*time.Hour)
+				far := emptyCRLWindow(aCert, aKey, 1, farAgo, 20*24*time.Hour)
+				first, second := far, near
+				if nearFirst {
+					first, second = near, far
+				}
+				myCA.CRLChainFile = writeChainFile(append(append([]byte{}, first...), second...))
+				Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
+
+				blob := mustGetCRL(ctx, store)
+				Expect(crlBlocks(blob)).To(HaveLen(3), "both ancestors must still be published")
+
+				statuses, err := myCA.UpstreamCRLStatuses(blob)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(statuses).To(HaveLen(1))
+				Expect(statuses[0].NextUpdate).To(BeTemporally("<", time.Now().Add(3*24*time.Hour)),
+					"precondition: the nearer deadline won")
+				Expect(statuses[0].ThisUpdate).To(BeTemporally("~", time.Now().Add(-nearAgo), time.Hour),
+					"the issue time must be the one issued beside the reported deadline")
+			},
+			Entry("the nearer deadline is the earlier issue, published second", 10*24*time.Hour, 24*time.Hour, false),
+			Entry("the nearer deadline is the earlier issue, published first", 10*24*time.Hour, 24*time.Hour, true),
+			Entry("the nearer deadline is the later issue, published second", 24*time.Hour, 10*24*time.Hour, false),
+			Entry("the nearer deadline is the later issue, published first", 24*time.Hour, 10*24*time.Hour, true),
+		)
 
 		// Two ancestors under one shared root can carry the same DN, and this
 		// file pairs CRLs by signing certificate precisely so that both are
@@ -610,6 +668,11 @@ var _ = Describe("crl_chain.file", func() {
 				Expect(statuses[0].NextUpdate).NotTo(BeZero(),
 					"the real deadline must survive the collapse, not be masked by a missing one")
 				Expect(statuses[0].NextUpdate).To(BeTemporally(">", time.Now().Add(9*24*time.Hour)))
+				// And the issue time beside it, the real CRL's (now), not the
+				// hand-rolled one's (an hour ago): the rescue of a stored zero
+				// must take the pair, not only the deadline.
+				Expect(statuses[0].ThisUpdate).To(BeTemporally("~", time.Now(), 30*time.Minute),
+					"the issue time must come from the CRL whose deadline was taken")
 			},
 			Entry("the CRL without a nextUpdate is published first", true),
 			Entry("the CRL without a nextUpdate is published second", false),

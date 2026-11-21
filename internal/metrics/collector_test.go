@@ -635,6 +635,7 @@ var _ = Describe("Collector", func() {
 		// the shipped expiry alerts see exactly the one series they always saw.
 		g := gather(metrics.NewCollector(myCA))
 		Expect(g["openvoxca_crl_chain_next_update_timestamp_seconds"]).To(BeNil())
+		Expect(g["openvoxca_crl_chain_this_update_timestamp_seconds"]).To(BeNil())
 	})
 
 	// The four unlabelled chain counters must be exported on a CA that has
@@ -798,14 +799,18 @@ var _ = Describe("Collector", func() {
 
 	It("still exports every other series when the chain cannot be decoded", func() {
 		// gather()'s upstream branch is best-effort by design: a blob it cannot
-		// decode must cost the per-issuer chain gauge and nothing else, because
+		// decode must cost the per-issuer chain gauges and nothing else, because
 		// the CA gauges beside it are what an operator pages on. Nothing drove
 		// that arm, so a change that returned early -- or let the error escape
 		// -- would take the whole scrape down with it, and the two shipped CRL
 		// expiry alerts would go quiet rather than fire.
-		// Publish a real ancestor first, so the gauge this failure costs is
-		// present to begin with. Asserting its absence without that proves
-		// nothing: it is absent on any CA with no chain at all.
+		// Publish a real ancestor first, so the gauges this failure costs are
+		// present to begin with. Asserting their absence without that proves
+		// nothing: they are absent on any CA with no chain at all.
+		perIssuer := []string{
+			"openvoxca_crl_chain_next_update_timestamp_seconds",
+			"openvoxca_crl_chain_this_update_timestamp_seconds",
+		}
 		upstream, upsKey := upstreamCAWithKeyFixture("Undecodable Chain CA")
 		ours, err := store.GetCACert(ctx)
 		Expect(err).NotTo(HaveOccurred())
@@ -818,8 +823,10 @@ var _ = Describe("Collector", func() {
 		Expect(myCA.RefreshCRLChainFile(ctx)).Error().NotTo(HaveOccurred())
 
 		healthy := gather(metrics.NewCollector(myCA))
-		Expect(healthy).To(HaveKey("openvoxca_crl_chain_next_update_timestamp_seconds"),
-			"precondition: the gauge this failure costs must exist first")
+		for _, name := range perIssuer {
+			Expect(healthy).To(HaveKey(name),
+				"precondition: each gauge this failure costs must exist first")
+		}
 
 		// Now a block that decodes as PEM and fails to parse as a CRL, appended
 		// after our own so block 0 still parses: the shape a truncated append
@@ -834,8 +841,10 @@ var _ = Describe("Collector", func() {
 		Expect(g.findByLabels("openvoxca_crl_number", nil)).NotTo(BeNil(),
 			"a chain it cannot read must not cost the CA's own CRL series")
 		Expect(g.findByLabels("openvoxca_ca_certificate_not_after_timestamp_seconds", nil)).NotTo(BeNil())
-		Expect(g).NotTo(HaveKey("openvoxca_crl_chain_next_update_timestamp_seconds"),
-			"the per-issuer gauge is the one thing the failure costs")
+		for _, name := range perIssuer {
+			Expect(g).NotTo(HaveKey(name),
+				"the per-issuer gauges are the one thing the failure costs")
+		}
 	})
 
 	It("exports the removal counter by name, and at its value", func() {
@@ -924,7 +933,7 @@ var _ = Describe("Collector", func() {
 			To(Equal(0.0), "a rollback must not move the counter whose runbook blames the bundle")
 	})
 
-	It("reports one labelled upstream CRL series per ancestor in the published chain", func() {
+	It("reports the labelled upstream CRL series for each ancestor in the published chain", func() {
 		// The new series had no coverage at all: not its name, not its label,
 		// not its value. A rename would have stopped the mixin's
 		// OpenVoxCAUpstreamCRLExpired firing with the suite green.
@@ -944,6 +953,15 @@ var _ = Describe("Collector", func() {
 		// transposed -- which would make OpenVoxCAUpstreamCRLExpired a
 		// permanent, unclearable critical page.
 		Expect(gaugeValue(chain)).To(BeNumerically("~", float64(upstreamCRLNextUpdate(upsCRL).Unix()), 1))
+
+		// Its issue time beside it, under the same label, which with NextUpdate
+		// gives the lifetime the relative expiry warning is measured against.
+		// The fixture's ThisUpdate and NextUpdate are 30 days apart, so a
+		// transposition fails here too.
+		issued := g.findByLabels("openvoxca_crl_chain_this_update_timestamp_seconds",
+			map[string]string{"issuer": "CN=Upstream Root CA"})
+		Expect(issued).NotTo(BeNil(), "no issue-time series for the upstream issuer")
+		Expect(gaugeValue(issued)).To(BeNumerically("~", float64(upstreamCRLThisUpdate(upsCRL).Unix()), 1))
 
 		// And our own series stays unlabelled and single, which is the whole
 		// point of not relabelling it.
@@ -1148,6 +1166,7 @@ var _ = Describe("Collector", func() {
 	// chain so that the chain series is among them.
 	storageDerived := []string{
 		"openvoxca_crl_chain_next_update_timestamp_seconds",
+		"openvoxca_crl_chain_this_update_timestamp_seconds",
 		"openvoxca_crl_number",
 		"openvoxca_crl_this_update_timestamp_seconds",
 		"openvoxca_crl_next_update_timestamp_seconds",
@@ -1465,4 +1484,13 @@ func upstreamCRLNextUpdate(crlPEM []byte) time.Time {
 	crl, err := x509.ParseRevocationList(block.Bytes)
 	Expect(err).NotTo(HaveOccurred())
 	return crl.NextUpdate
+}
+
+func upstreamCRLThisUpdate(crlPEM []byte) time.Time {
+	GinkgoHelper()
+	block, _ := pem.Decode(crlPEM)
+	Expect(block).NotTo(BeNil())
+	crl, err := x509.ParseRevocationList(block.Bytes)
+	Expect(err).NotTo(HaveOccurred())
+	return crl.ThisUpdate
 }

@@ -262,13 +262,27 @@
         rules: [
           {
             alert: 'OpenVoxCAUpstreamCRLExpiringSoon',
+            // Fires once less than max(fraction x lifetime, floor) remains.
+            // The "> floor or floor" pair is that max: the first arm keeps the
+            // fraction where it is larger, and the second supplies the floor
+            // for every series the first dropped, including one with no
+            // thisUpdate series beside it (a CA from before it was exported).
             expr: |||
-              openvoxca_crl_chain_next_update_timestamp_seconds{%(selector)s} - time() < %(warn)d
+              openvoxca_crl_chain_next_update_timestamp_seconds{%(selector)s} - time()
+                < (
+                    %(fraction)g * (
+                      openvoxca_crl_chain_next_update_timestamp_seconds{%(selector)s}
+                      - openvoxca_crl_chain_this_update_timestamp_seconds{%(selector)s}
+                    ) > %(floor)d
+                  or
+                    0 * openvoxca_crl_chain_next_update_timestamp_seconds{%(selector)s} + %(floor)d
+                )
               and
               openvoxca_crl_chain_next_update_timestamp_seconds{%(selector)s} - time() > 0
             ||| % {
               selector: $._config.openvoxCASelector,
-              warn: $._config.upstreamCRLExpiryWarningSeconds,
+              fraction: $._config.upstreamCRLExpiryWarningFraction,
+              floor: $._config.upstreamCRLExpiryWarningSeconds,
             },
             'for': $._config.expiryFor,
             labels: { severity: 'warning' } + $._config.alertLabels,
