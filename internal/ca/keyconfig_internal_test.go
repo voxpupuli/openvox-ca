@@ -23,6 +23,8 @@
 package ca
 
 import (
+	"crypto/rsa"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -61,6 +63,27 @@ var _ = Describe("Resolving the CA's own key settings", func() {
 		Entry("ECDSA alone is P-256", KeyConfig{Algo: KeyAlgoECDSA}, KeyConfig{Algo: KeyAlgoECDSA, Size: 256}),
 		Entry("both set are kept", KeyConfig{Algo: KeyAlgoRSA, Size: 3072}, KeyConfig{Algo: KeyAlgoRSA, Size: 3072}),
 	)
+
+	// generateKey passes rsa.GenerateKey a literal per allowed size, so a
+	// mapping slip between them would otherwise go unseen.
+	DescribeTable("generates an RSA key of the size each setting names",
+		func(size, wantBits int) {
+			key, err := generateKey(KeyConfig{Algo: KeyAlgoRSA, Size: size})
+			Expect(err).NotTo(HaveOccurred())
+			rsaKey, ok := key.(*rsa.PrivateKey)
+			Expect(ok).To(BeTrue())
+			Expect(rsaKey.N.BitLen()).To(Equal(wantBits))
+		},
+		Entry("2048", 2048, 2048),
+		Entry("3072", 3072, 3072),
+		Entry("4096", 4096, 4096),
+		Entry("no size, generateKey's own default", 0, 4096),
+	)
+
+	It("refuses an RSA size it does not generate", func() {
+		_, err := generateKey(KeyConfig{Algo: KeyAlgoRSA, Size: 1024})
+		Expect(err).To(MatchError(ContainSubstring("below the minimum of 2048 bits")))
+	})
 
 	It("resolves each key from its own settings, not the other's", func() {
 		c.CAKeyConfig = KeyConfig{Algo: KeyAlgoECDSA, Size: 384}

@@ -215,11 +215,22 @@ func generateKey(cfg KeyConfig) (crypto.Signer, error) {
 	}
 	switch algo {
 	case KeyAlgoRSA:
-		size := cfg.Size
-		if size == 0 {
-			size = 4096
+		// One literal per size rather than passing cfg.Size through, so the
+		// key size reaching rsa.GenerateKey is visibly one of the three this
+		// CA allows. CodeQL's go/weak-crypto-key cannot see ValidateKeyConfig
+		// as the bound, and once the resolver began writing 256 (the P-256
+		// size) into Size it reported that as an RSA key size.
+		switch cfg.Size {
+		case 0, 4096:
+			return rsa.GenerateKey(rand.Reader, 4096)
+		case 3072:
+			return rsa.GenerateKey(rand.Reader, 3072)
+		case 2048:
+			return rsa.GenerateKey(rand.Reader, 2048)
+		default:
+			// Already caught by ValidateKeyConfig; unreachable.
+			return nil, fmt.Errorf("unsupported RSA key size %d", cfg.Size)
 		}
-		return rsa.GenerateKey(rand.Reader, size)
 	case KeyAlgoECDSA:
 		var curve elliptic.Curve
 		switch cfg.Size {
