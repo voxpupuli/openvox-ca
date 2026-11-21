@@ -568,8 +568,12 @@ etcd_tls_key_file:  /etc/openvox-ca/etcd-client-key.pem
   pin the key to a local file with `ca_key_file` (see
   [CA cert/key as local files](#ca-certkey-as-local-files)).
 - **`openvox-ca-ctl setup` / `import` work on the local filesystem only.** To
-  import a CA into an etcd-backed cluster, run them against a scratch directory
-  first, then point `openvox-ca` at a cadir containing the output.
+  import a CA into an etcd-backed cluster, run them against a scratch
+  filesystem cadir first, then copy it into etcd with `openvox-ca-ctl migrate`
+  (see [migrating between backends](#migrating-between-backends)). Pointing an
+  etcd-backed `openvox-ca` at the scratch cadir does not import it: the cadir
+  holds only `private/` on this backend, so the server finds an empty store and
+  bootstraps a new CA.
 - **The certificate inventory is stored as one etcd key per issued
   certificate**, not as a single ever-growing text blob, so signing cost does
   not grow with the size of the inventory and duplicate serial numbers are
@@ -732,8 +736,11 @@ redis_tls_key_file:  /etc/openvox-ca/redis-client-key.pem
   `encrypt_ca_key`, or pin the key to a local file with `ca_key_file` (see
   [CA cert/key as local files](#ca-certkey-as-local-files)).
 - **`openvox-ca-ctl setup` / `import` work on the local filesystem only.**
-  Bootstrap/import against a scratch directory, then point `openvox-ca` at a
-  cadir containing the output.
+  Bootstrap or import against a scratch filesystem cadir, then copy it into
+  Redis with `openvox-ca-ctl migrate` (see [migrating between
+  backends](#migrating-between-backends)). Pointing a Redis-backed `openvox-ca`
+  at the scratch cadir does not import it: the server finds an empty keyspace
+  and bootstraps a new CA.
 - **The certificate inventory is stored as one hash field per issued
   certificate**, not as a single ever-growing text value, so signing cost does
   not grow with the size of the inventory and duplicate serial numbers are
@@ -945,9 +952,11 @@ The directory holding the database is yours, and `openvox-ca` never changes its
 mode. Anything that copies the database — a backup, a volume snapshot, a restored
 tarball — has to preserve the modes, sidecars included.
 
-`openvox-ca-ctl setup` / `import` work on the local filesystem
-only; bootstrap against a scratch directory, then point a SQLite-backed
-`openvox-ca` at a fresh database.
+`openvox-ca-ctl setup` / `import` work on the local filesystem only: bootstrap
+or import against a scratch filesystem cadir, then copy it into the database
+with `openvox-ca-ctl migrate` (see [migrating between
+backends](#migrating-between-backends)). A SQLite-backed `openvox-ca` started on
+a fresh database finds no CA in it and bootstraps a new one.
 
 Alongside the database, `openvox-ca` keeps a hidden `.<database>.locks/`
 directory — `.ca.db.locks/` for the DSN above — holding the lock files that stop
