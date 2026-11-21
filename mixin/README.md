@@ -150,9 +150,15 @@ alerting rules for the openvox-ca exporter. It alerts on:
   in use; the CA's own serving certificate is one such entry).
   It covers an entry whose store has never accepted a write, and an entry whose
   live certificate was revoked and not yet reissued; both leave the component
-  with nothing to present, which is why they page under one name. It does not
-  cover an entry that is failing to renew — once a signed certificate exists,
-  the leaf expiry alerts above cover it with no new series.
+  with nothing to present, which is why they page under one name. An entry that
+  is failing to renew has its own alert, below.
+- **Managed certificates failing to reissue**
+  (`OpenVoxCAManagedCertificateReissueFailing`, a warning) — an entry whose
+  latest reconcile failed and has not succeeded for 30 minutes. A failed store
+  write puts the previous certificate back, so the component keeps working, but
+  it will not be renewed and the leaf expiry alerts would otherwise be the
+  first word of it. It fires for a never-issued entry too, beside the alert
+  above.
 
 All thresholds and the target selector live in [`config.libsonnet`](config.libsonnet)
 and can be overridden without editing the rules.
@@ -287,6 +293,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `fileExportStaleAfterSeconds` | 600 (10 minutes) | How long a file export target may go without a sync that confirms it current before `OpenVoxCAFileExportStale` counts it stale. The CA syncs every `file_export.interval_sec` (60s by default, at most 300s), so keep this at least twice that ceiling; a spec in `internal/fileexport` fails if it drops below. |
 | `fileExportStaleFor` | `5m` | `for:` dwell on top of the threshold. Together they page 15 minutes after the last confirmed sync, and 5 minutes into a CA whose target has never synced. |
 | `managedCertNeverIssuedFor` | `1h` | How long a configured managed certificate may go without ever being issued before alerting. Deliberately longer than one reconcile interval: every remedy is manual, and a certificate nothing has yet is not an emergency in the first hour of an install. Raise it if you have raised `managed_cert_interval_sec`. |
+| `managedCertReissueFailingFor` | `30m` | How long a managed certificate's latest reconcile may stay failed before alerting. Outlasts one reconcile interval (`managed_cert_interval_sec`, 15 minutes by default) so the free retry of a single failure does not fire it; raise it if you raise that interval. |
 | `supersedeWindow` | `1h` | Window over which supersession failures — immediate or delayed — are counted (the metric is a restart-resetting counter). |
 | `supersedeFor` | `30m` | `for:` debounce for the supersession-failure alert. Longer than the CRL ones because the sweep retries on its own interval; raise it if you have raised `superseded_cert_sweep_interval_sec`. An immediate revocation is not retried, but one failure still holds the alert for the whole `supersedeWindow`, so it fires all the same. |
 | `expiryFor` / `scrapeFor` / `readyFor` / `downFor` | `1h` / `15m` / `10m` / `5m` | `for:` debounce durations. Below `1h`, `expiryFor` lets an expiry alert fire on data the exporter is holding after a failed gather — see [When a gather fails](../docs/metrics.md#when-a-gather-fails). |

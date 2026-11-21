@@ -349,6 +349,9 @@ type CA struct {
 	// saveBackoff rate-limits managed-certificate passes whose store keeps
 	// refusing writes -- see skipForSaveBackoff.
 	saveBackoff managedSaveBackoff
+	// reconcileState records whether each managed certificate's latest pass
+	// failed -- see ManagedReconcileFailing.
+	reconcileState managedReconcileState
 
 	mu sync.RWMutex
 

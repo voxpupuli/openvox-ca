@@ -72,6 +72,9 @@
 #     cannot satisfy another's entry, stays quiet for a revoked predecessor
 #     beside a signed certificate, PAGES for a subject whose only certificate is
 #     revoked, and stays quiet during a storage outage.
+#   * OpenVoxCAManagedCertificateReissueFailing, a gauge compared to 1 (#679).
+#     The cases pin that it fires once the dwell has run, names only the failing
+#     entry, and stays quiet for a failure the next pass clears.
 #
 #     This list is how a reader finds the case they want, and it goes stale
 #     silently: it says what the cases assert, so a case whose expectation
@@ -814,6 +817,60 @@ tests:
             exp_annotations:
               summary: "A managed certificate has never been issued, or holds only revoked ones."
               description: "The OpenVox CA on ca-1:9140 has puppetserver.openvox.svc.cluster.local configured in managed_certs or serving_cert but no usable certificate for it after 1h: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else's material, or a directory that does not exist. If the subject is the CA's own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself."
+
+  # OpenVoxCAManagedCertificateReissueFailing (#679). The entry has issued
+  # before -- it has a signed leaf series throughout, which is what keeps
+  # OpenVoxCAManagedCertificateNeverIssued quiet -- and its reconcile starts
+  # failing at 5m. The gauge stays at 1 through the passes the backoff
+  # withholds, so the rule fires once managedCertReissueFailingFor (30m) has
+  # run: quiet at 30m, firing at 40m. A second entry beside it stays healthy
+  # and must not be named.
+  - interval: 1m
+    name: a managed certificate whose reissue keeps failing
+    input_series:
+      - series: 'openvoxca_managed_certificate_reconcile_failing{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+        values: "0x5 1x85"
+      - series: 'openvoxca_managed_certificate_reconcile_failing{job="openvox-ca",instance="ca-1:9140",subject="puppetdb.openvox.svc.cluster.local"}'
+        values: "0x90"
+      - series: 'openvoxca_managed_certificate_configured{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+        values: "1+0x90"
+      - series: 'openvoxca_leaf_certificate_not_after_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local",serial="0A",state="signed"}'
+        values: "2000000000+0x90"
+      - series: 'openvoxca_collector_scrape_success{job="openvox-ca",instance="ca-1:9140"}'
+        values: "1+0x90"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenVoxCAManagedCertificateReissueFailing
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: OpenVoxCAManagedCertificateReissueFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              subject: puppetserver.openvox.svc.cluster.local
+            exp_annotations:
+              summary: "A managed certificate is failing to reissue."
+              description: "The OpenVox CA on ca-1:9140 has failed to reconcile the managed certificate puppetserver.openvox.svc.cluster.local for at least 30m (openvoxca_managed_certificate_reconcile_failing). If it has issued before, the previous certificate is still in service, but it will not be renewed and the expiry alerts take over as it ages. The CA retries on a backoff of up to a day, and a failed store write revokes the certificate it had just signed each time. Check the CA logs for \"Managed certificate not reconciled\", and for \"Not reissuing a managed certificate yet\", whose retry_in says when it will next try, then for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret, or a directory that does not exist or is read-only. If every managed certificate fires at once beside OpenVoxCAScrapeFailing, the cause is the CA's own storage instead: each pass takes a lock there. Fixing the store clears this only at the next attempt; restarting the CA retries at once."
+      - eval_time: 40m
+        alertname: OpenVoxCAManagedCertificateNeverIssued
+        exp_alerts: []
+
+  # The first failure is free: the next pass, one managed_cert_interval_sec
+  # (15m) later, retries it and clears the gauge. The gauge reads 1 from 6m to
+  # 21m, so at 21m it has held for the whole interval and any dwell of 15m or
+  # less would fire there; that is the relation the mixin-windows spec holds
+  # managedCertReissueFailingFor to.
+  - interval: 1m
+    name: a managed reissue failure the next pass clears stays quiet
+    input_series:
+      - series: 'openvoxca_managed_certificate_reconcile_failing{job="openvox-ca",instance="ca-1:9140",subject="puppetserver.openvox.svc.cluster.local"}'
+        values: "0x5 1x15 0x40"
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: OpenVoxCAManagedCertificateReissueFailing
+        exp_alerts: []
 
   # The serving_cert subject, which the description spends two sentences on and
   # no case executed. Every other case here uses a component certname, so the

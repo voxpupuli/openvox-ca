@@ -869,6 +869,54 @@ func (c *CA) recordSaveOutcome(subject string, now time.Time, failed bool) {
 	c.saveBackoff.failures[subject] = f
 }
 
+// managedReconcileState holds, per subject, whether this process's latest
+// attempt to reconcile a managed certificate failed. Exposed as
+// openvoxca_managed_certificate_reconcile_failing.
+//
+// A gauge of the latest outcome rather than a count of failures, because the
+// backoff above spaces a failing entry's attempts up to a day apart: a counter
+// would rise once and then sit flat, and any increase() window short enough to
+// be useful would resolve between attempts while the entry was still broken.
+//
+// In memory and per instance, like the backoff, and for the same reason: each
+// replica runs its own passes, and a replica that loses the race for the
+// subject lock reads what the winner wrote. That is a pass that found the
+// certificate current, so it reports success, which is true of the entry.
+type managedReconcileState struct {
+	mu      sync.Mutex
+	failing map[string]bool
+}
+
+// recordReconcileOutcome notes whether a pass over subject failed.
+func (c *CA) recordReconcileOutcome(subject string, failed bool) {
+	c.reconcileState.mu.Lock()
+	defer c.reconcileState.mu.Unlock()
+	if c.reconcileState.failing == nil {
+		c.reconcileState.failing = make(map[string]bool)
+	}
+	c.reconcileState.failing[subject] = failed
+}
+
+// ManagedReconcileFailing reports, for every entry in ManagedCerts, whether
+// this process's latest attempt to reconcile it failed: the store could not be
+// read or written, the subject lock could not be taken, or the certificate
+// could not be signed. An entry not yet attempted reads false, and so does one
+// whose latest pass found its certificate current or issued and stored a new
+// one. A pass the store-write backoff withholds leaves the value as it was,
+// which after a refused write is true: the entry is still failing, it is only
+// not being retried yet. The metrics exporter surfaces it as
+// openvoxca_managed_certificate_reconcile_failing.
+func (c *CA) ManagedReconcileFailing() map[string]bool {
+	c.reconcileState.mu.Lock()
+	defer c.reconcileState.mu.Unlock()
+	out := make(map[string]bool, len(c.ManagedCerts))
+	for i := range c.ManagedCerts {
+		subject := c.ManagedCerts[i].Spec.Subject
+		out[subject] = c.reconcileState.failing[subject]
+	}
+	return out
+}
+
 // reconcileManagedCert runs one entry: load, decide, and issue if the decision
 // says so, all inside that subject's cluster lock.
 //
@@ -888,8 +936,20 @@ func (c *CA) recordSaveOutcome(subject string, now time.Time, failed bool) {
 // disagree about their own hostname, and neither premise survives a managed
 // certificate having a configured name and a store of its own.
 //
+// Every outcome but a withheld pass is recorded for
+// ManagedReconcileFailing, including the refusals before the lock is taken: an
+// entry that will not validate fails on every pass, and that is what the series
+// exists to say.
+//
 // The caller must NOT hold c.mu.
-func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.Time) (bool, error) {
+func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.Time) (issued bool, err error) {
+	withheld := false
+	defer func() {
+		if !withheld {
+			c.recordReconcileOutcome(m.Spec.Subject, err != nil)
+		}
+	}()
+
 	if err := m.Spec.Validate(); err != nil {
 		return false, err
 	}
@@ -908,8 +968,7 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 	defer cancel()
 
 	subject := m.Spec.Subject
-	issued := false
-	err := c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
+	err = c.Storage.WithLock(ctx, subjectLockName(subject), func() error {
 		certPEM, keyPEM, err := m.Load(ctx)
 		if err != nil {
 			return fmt.Errorf("reading the stored material for %s: %w", subject, err)
@@ -940,6 +999,7 @@ func (c *CA) reconcileManagedCert(ctx context.Context, m ManagedCert, now time.T
 				"life of the certificate it signed. Fix the store; this retries on its own",
 				"subject", subject, "reason", reason.String(),
 				"retry_in", remaining.Round(time.Second).String())
+			withheld = true
 			return nil
 		}
 

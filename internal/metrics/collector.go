@@ -139,6 +139,7 @@ type Collector struct {
 	leafNotBefore         *prometheus.Desc
 	leafNotAfter          *prometheus.Desc
 	managedCertConfigured *prometheus.Desc
+	managedCertFailing    *prometheus.Desc
 	leafStateCount        *prometheus.Desc
 }
 
@@ -415,6 +416,15 @@ func NewCollector(c *ca.CA, opts ...Option) *Collector {
 				"Published whether or not the certificate exists yet, so that an entry which "+
 				"has never issued is a value rather than an absence.",
 			[]string{"subject"}, nil),
+		managedCertFailing: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "managed_certificate", "reconcile_failing"),
+			"1 while this process's latest attempt to reconcile a configured managed certificate "+
+				"failed — its store could not be read or written, its lock could not be taken, or "+
+				"it could not be signed — and 0 otherwise, including before the first attempt. A "+
+				"failed store write leaves the previous certificate in service, and later passes "+
+				"are withheld on a backoff of up to a day, which keeps this at 1 until a write "+
+				"succeeds. One series per configured entry.",
+			[]string{"subject"}, nil),
 	}
 	for _, opt := range opts {
 		opt(col)
@@ -463,6 +473,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.leafNotBefore
 	ch <- c.leafNotAfter
 	ch <- c.managedCertConfigured
+	ch <- c.managedCertFailing
 	ch <- c.leafStateCount
 }
 
@@ -572,6 +583,13 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	for i := range c.ca.ManagedCerts {
 		ch <- prometheus.MustNewConstMetric(c.managedCertConfigured, prometheus.GaugeValue, 1,
 			c.ca.ManagedCerts[i].Spec.Subject)
+	}
+	// In-process state like the counters above, and here for the same reason
+	// as the configured series: a storage outage is a likely cause of the
+	// failures this reports, so the gather failing must not take it away.
+	for subject, failing := range c.ca.ManagedReconcileFailing() {
+		ch <- prometheus.MustNewConstMetric(c.managedCertFailing, prometheus.GaugeValue,
+			boolToFloat(failing), subject)
 	}
 
 	// Readiness and the CA certificate are in-process state as well, so they

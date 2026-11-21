@@ -1415,7 +1415,8 @@ A reconcile pass walks the list every `managed_cert_interval_sec` (15 minutes by
 default) and once at startup, so a fresh deployment does not wait an interval
 for the certificate whatever depends on it needs. Each entry is independent: one
 whose store is unreachable is logged and retried on the next pass while the rest
-carry on.
+carry on, and `openvoxca_managed_certificate_reconcile_failing` reads `1` for it
+until a pass succeeds (see [metrics](metrics.md#managed-certificates)).
 
 > **This block has no environment variable and no flag.** An entry is a nested
 > structure with a list of names and a choice of store, and expressing that
@@ -1720,8 +1721,9 @@ ReadWritePaths=/etc/openvox/ssl
 Name the directory the entries actually write to — the example above uses
 `/etc/openvox/ssl` — and run `systemctl daemon-reload` before restarting, or the
 drop-in is not read. Without it the write fails with a permission error the CA
-cannot distinguish from a genuine one; it is logged each pass, and
-`OpenVoxCAManagedCertificateNeverIssued` fires an hour later. The unit already
+cannot distinguish from a genuine one; it is logged each pass,
+`OpenVoxCAManagedCertificateReissueFailing` fires half an hour later and
+`OpenVoxCAManagedCertificateNeverIssued` an hour later. The unit already
 grants the CA directory with `ReadWritePaths=`; a drop-in adds another
 directory the same way.
 
@@ -1808,7 +1810,7 @@ never issued. The shipped mixin turns it into
 `OpenVoxCAManagedCertificateNeverIssued`, which fires when an entry has had no
 certificate for `managedCertNeverIssuedFor` (1h by default). Once a certificate
 does exist it has an inventory row like any other, so the ordinary expiry alerts
-cover it and nothing new is needed. See [metrics & monitoring](metrics.md).
+cover it.
 
 A [`serving_cert`](#the-cas-own-serving-certificate) entry is one of the
 configured entries this metric and that alert cover, labelled with the CA's own
@@ -1820,6 +1822,14 @@ revocation as such, so revocation is the likeliest cause and not the only one:
 check the CRL first, then whether the inventory row is readable at all. For a
 component certificate the same alert usually means the opposite — a store the
 reconcile pass cannot write — which is where to look instead.
+
+Neither that alert nor the expiry alerts sees a reissue that keeps failing
+while the previous certificate is still in service. Each entry also publishes
+`openvoxca_managed_certificate_reconcile_failing`, `1` while its latest
+reconcile on that process failed, and the mixin's
+`OpenVoxCAManagedCertificateReissueFailing` warns when that has held for
+`managedCertReissueFailingFor` (30m by default). See
+[metrics & monitoring](metrics.md#managed-certificates).
 
 ### The certificate that administers this CA
 
@@ -2989,9 +2999,8 @@ Alert on these records directly, for example with a Loki
 `openvox-ca generate` runs offline with no `/metrics`, and the signer has no
 listener and is the process that judges the frontend, so the frontend cannot
 be trusted to count its refusals. The other conditions the documentation tells
-you to watch for have a [metric](metrics.md), except one that is still
-log-only for now: a managed reissue that keeps failing. A future audit event
-follows the same `<subject>.<action>` form.
+you to watch for have a [metric](metrics.md). A future audit event follows the
+same `<subject>.<action>` form.
 
 ## Graceful shutdown
 

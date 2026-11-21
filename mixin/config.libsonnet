@@ -319,6 +319,13 @@
     // first hour of an install.
     managedCertNeverIssuedFor: '1h',
 
+    // A managed certificate whose latest reconcile failed. The first failure
+    // is free and the next pass retries it, one managed_cert_interval_sec (15
+    // minutes by default) later, so this has to outlast that interval or a
+    // failure the retry clears fires. Two passes at the default. Raise it if
+    // you lengthen managed_cert_interval_sec.
+    managedCertReissueFailingFor: '30m',
+
     // 'for' durations applied to the expiry alerts to debounce flapping at the
     // threshold boundary. After a failed gather the exporter republishes its
     // last successful one for up to an hour, so at 1h or more held data cannot
