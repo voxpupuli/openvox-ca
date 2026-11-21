@@ -1640,8 +1640,8 @@ var _ = Describe("API Workflow", func() {
 		})
 
 		It("should return 400 for the subject \"ca\", writing no key and issuing nothing", func() {
-			// Its key would be written to private/ca_key.pem, the CA key's
-			// legacy location (#495).
+			// Its key would be written to private/ca_key.pem, easily mistaken
+			// for the CA key (#495).
 			req := httptest.NewRequest("POST", "/generate/ca", nil)
 			rr := httptest.NewRecorder()
 			mux.ServeHTTP(rr, req)

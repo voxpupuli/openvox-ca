@@ -20,6 +20,7 @@ package storage
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -30,8 +31,8 @@ import (
 // decomposed records rather than one append-only blob: etcd (issue #138) and
 // Redis/Valkey (issue #139). The two differ entirely in how they commit —
 // etcd uses compare-then-op transactions, Redis a server-side Lua script —
-// but they agree on what a stored record looks like, on how a legacy blob is
-// parsed into records, and on how a serial that cannot be addressed
+// but they agree on what a stored record looks like, on how inventory.txt
+// text is parsed into records, and on how a serial that cannot be addressed
 // one-to-one is marked. Keeping that agreement in one place is not merely
 // tidiness: the wire format and the ambiguity sentinel are both on-disk
 // contracts, and two copies would be free to drift apart silently.
@@ -40,13 +41,29 @@ import (
 // and get the same properties from the database's own indices.
 
 // serialAmbiguous is the by-serial index value recorded for a serial that
-// appears on more than one imported record (possible only in a legacy blob:
-// blob backends never had a cluster-wide uniqueness guarantee, and every
-// other write path rejects duplicates). A one-to-one index cannot name all
-// bearers, so instead of silently aliasing certificate-index writes onto an
-// arbitrary record, the sentinel makes them explicit no-ops while still
-// keeping the serial reserved against reissue.
+// appears on more than one record. Nothing writes it any more: every write
+// path rejects duplicates. It was written when a store's single inventory blob
+// was converted to per-entry records, as v1.0.0-alpha1 still did on first
+// start, and a blob could hold repeats because blob backends never had a
+// cluster-wide uniqueness guarantee. Stores converted then keep it, so it is
+// still read. A one-to-one index cannot name all bearers, so instead of
+// silently aliasing certificate-index writes onto an arbitrary record, the
+// sentinel makes them explicit no-ops while still keeping the serial reserved
+// against reissue.
 const serialAmbiguous = "ambiguous"
+
+// errUndecomposedInventory refuses a key/value store whose inventory marker
+// still holds an inventory blob. Builds of main from before v1.0.0-alpha1 kept
+// the whole inventory there; v1.0.0-alpha1 converted it to per-entry records
+// on first start and left the marker empty, and nothing since writes a payload
+// to it. This version no longer converts, and read as the per-entry format
+// such a store would look empty, or smaller than it is where a conversion was
+// interrupted, so it is refused instead: at startup, on every read of the
+// inventory, and by the integrity report.
+var errUndecomposedInventory = errors.New("the inventory is still a single blob, " +
+	"the format builds of openvox-ca from before v1.0.0-alpha1 wrote, and this version " +
+	"reads only the per-entry format; start the store once on v1.0.0-alpha1, which " +
+	"converts it, then start this version")
 
 // inventoryRecordJSON is the stored JSON form of a CertRecord. The field set
 // is spelled out (rather than marshalling CertRecord directly) so the wire
@@ -54,7 +71,7 @@ const serialAmbiguous = "ambiguous"
 // not_before and not_after hold the formatted inventory.txt strings verbatim,
 // not RFC3339 times — see InventoryEntry in backend.go. Every decomposed
 // backend must store them identically, or rendering the inventory back to text
-// stops being byte-identical to the legacy blob.
+// stops being byte-identical to inventory.txt.
 type inventoryRecordJSON struct {
 	Serial         string            `json:"serial"`
 	NotBefore      string            `json:"not_before"`
@@ -190,41 +207,6 @@ func rejectDuplicateSerials(recs []CertRecord) error {
 		seen[r.Serial] = true
 	}
 	return nil
-}
-
-// duplicateSerials returns each serial that appears on more than one record,
-// once, in first-seen order.
-func duplicateSerials(recs []CertRecord) []string {
-	counts := make(map[string]int, len(recs))
-	for _, r := range recs {
-		counts[r.Serial]++
-	}
-	var dups []string
-	seen := make(map[string]bool)
-	for _, r := range recs {
-		if counts[r.Serial] > 1 && !seen[r.Serial] {
-			dups = append(dups, r.Serial)
-			seen[r.Serial] = true
-		}
-	}
-	return dups
-}
-
-// recordsArePrefixOf reports whether the stored entries are exactly the
-// import-written prefix of recs: sequence numbers 1..len(entries) carrying the
-// same canonical fields. That is the state an interrupted import leaves
-// behind (the wipe ran, then some batches committed), and the only state a
-// re-run may safely overwrite.
-func recordsArePrefixOf(entries []indexedRecord, recs []CertRecord) bool {
-	if len(entries) > len(recs) {
-		return false
-	}
-	for i, e := range entries {
-		if e.seq != uint64(i)+1 || e.rec.InventoryEntry != recs[i].InventoryEntry {
-			return false
-		}
-	}
-	return true
 }
 
 // renderInventoryText renders records to inventory.txt text, byte-identical to

@@ -145,17 +145,6 @@ var _ = Describe("MigrateService source verification", func() {
 				return svc
 			},
 			"the stored inventory HMAC key is the wrong length"),
-		Entry("an undecomposed legacy inventory",
-			func() *StorageService {
-				// Structured, with no rows, over a blob that holds the real
-				// inventory: what an etcd or Redis store looks like before a
-				// server has decomposed it. Order matters, as in the report's
-				// own legacy specs: the wrapper must be the outer type.
-				svc := verifiedFilesystem()
-				svc.backend = emptyEntriesBackend{Backend: svc.backend}
-				return svc
-			},
-			"undecomposed legacy inventory"),
 	)
 
 	It("refuses before it locks the destination", func() {

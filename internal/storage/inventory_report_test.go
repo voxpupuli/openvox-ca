@@ -23,6 +23,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"path/filepath"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -101,6 +102,16 @@ func (emptyEntriesBackend) PruneEntries(context.Context, func(InventoryEntry) bo
 	func([]byte, InventoryEntry) []byte,
 ) ([]InventoryEntry, error) {
 	return nil, nil
+}
+
+// refusingMarkerBackend answers as a structured backend with no rows whose
+// presence marker still holds a pre-alpha inventory blob, which it refuses.
+type refusingMarkerBackend struct {
+	emptyEntriesBackend
+}
+
+func (refusingMarkerBackend) RefuseUndecomposedInventory(context.Context) error {
+	return errUndecomposedInventory
 }
 
 // failGetBackend fails reads of one key with a non-ErrNotExist error, which is
@@ -355,76 +366,48 @@ var _ = Describe("InventoryIntegrityReport", func() {
 		})
 	})
 
-	Describe("an undecomposed legacy inventory", func() {
-		It("is detected from the data rather than the backend type", func() {
-			// The detection added for the destruction-presented-as-repair
-			// finding, and until now exercised only through the CLI. A
-			// regression here would be caught by one integration spec and by
-			// nothing in this package, which owns the method that computes it.
+	Describe("a backend that refuses its inventory marker", func() {
+		// An etcd or Redis store whose inventory is still a pre-alpha blob
+		// has no rows, or only the partial set an interrupted conversion
+		// left, and the report would describe that as the inventory: the
+		// commands reading it would then rebuild a head over it, or migrate
+		// it. Such a backend refuses the store when asked, and the report
+		// must ask, and pass the refusal on, rather than look only at rows.
+		It("fails as the backend does", func() {
 			svc := newFilesystemInventoryService()
-			blob, err := svc.readInventoryForHMAC(ctx)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(blob).NotTo(BeEmpty(), "premise: the blob holds a real inventory")
-
-			// Structured by type, with no decomposed rows, over a store whose
-			// blob still holds everything: an etcd or Redis store still holding
-			// the legacy blob, which no server has started on to decompose.
-			svc.backend = emptyEntriesBackend{Backend: svc.backend}
+			svc.backend = refusingMarkerBackend{emptyEntriesBackend{Backend: svc.backend}}
 
 			rep, err := svc.InventoryIntegrityReport(ctx)
-			Expect(err).NotTo(HaveOccurred())
 
-			Expect(rep.Scheme).To(Equal("hash-chain"), "premise: it answers as a structured backend")
-			Expect(rep.Entries).To(BeZero(), "premise: no decomposed rows exist yet")
-			Expect(rep.LegacyUndecomposed).To(BeTrue(),
-				"the blob holds parseable entries, so this store is not empty -- it is undecomposed")
-			// The value the caller acts on. A report that flagged the legacy
-			// state but said the store verified would send the command down
-			// its nothing-to-do path, which is the outcome the flag exists to
-			// prevent.
-			Expect(rep.Verifies).To(BeFalse(),
-				"an undecomposed store cannot verify: the head covers the blob, the fold covers no rows")
+			Expect(err).To(MatchError(errUndecomposedInventory))
+			Expect(err.Error()).To(ContainSubstring("reading the inventory marker"))
+			Expect(rep.KeyState).To(Equal(HMACKeyUnknown),
+				"this arm fails before the key is read")
 		})
 
-		It("is not claimed for a genuinely empty structured inventory", func() {
-			// The other side, or the detection would refuse every new CA.
+		It("fails as the backend does behind a wrapper", func() {
+			// ca_cert_file or ca_key_file wraps the backend in an overlay,
+			// which does not itself refuse: the probe has to unwrap it, as the
+			// other capability probes do.
+			svc := newFilesystemInventoryService()
+			overlay, err := NewOverlayBackend(refusingMarkerBackend{emptyEntriesBackend{Backend: svc.backend}},
+				map[string]string{KeyCACert: filepath.Join(GinkgoT().TempDir(), "ca_crt.pem")})
+			Expect(err).NotTo(HaveOccurred())
+			svc.backend = overlay
+
+			_, err = svc.InventoryIntegrityReport(ctx)
+			Expect(err).To(MatchError(errUndecomposedInventory))
+		})
+
+		It("reports a genuinely empty store whose backend has no marker to refuse", func() {
+			// The other side, or the probe would refuse every new CA.
 			b := newSQLiteBackend()
 			svc := NewWithBackend(b, "")
 			Expect(svc.TouchInventory(ctx)).To(Succeed())
 
 			rep, err := svc.InventoryIntegrityReport(ctx)
 			Expect(err).NotTo(HaveOccurred())
-
 			Expect(rep.Entries).To(BeZero())
-			Expect(rep.LegacyUndecomposed).To(BeFalse(),
-				"an empty structured inventory has no blob to be undecomposed from")
-		})
-	})
-
-	Describe("when the legacy probe cannot read the blob", func() {
-		It("errors rather than deciding the store is not legacy", func() {
-			// "Could not read" must not resolve to "not legacy": that is the
-			// answer that lets the rebuild write an empty chain head over a
-			// legacy store's only baseline. An absent blob is a real answer and
-			// is covered by the empty-structured-inventory spec above.
-			svc := newFilesystemInventoryService()
-			boom := errors.New("backend unreachable")
-			// Order matters: emptyEntriesBackend must be the OUTER type, or
-			// asInventoryStore does not see it. Embedding an interface does not
-			// promote the concrete type's methods for a type assertion, so
-			// wrapping the other way round leaves this a blob backend and the
-			// failure lands on the ordinary inventory read instead of the
-			// legacy probe -- passing for the wrong reason.
-			svc.backend = emptyEntriesBackend{
-				Backend: failGetBackend{Backend: svc.backend, key: KeyInventory, err: boom},
-			}
-
-			rep, err := svc.InventoryIntegrityReport(ctx)
-
-			Expect(err).To(MatchError(boom))
-			Expect(err.Error()).To(ContainSubstring("detect a legacy store"))
-			Expect(rep.KeyState).To(Equal(HMACKeyUnknown),
-				"this arm also fails before the key is read")
 		})
 	})
 

@@ -102,22 +102,29 @@ func (atomicNoLockBackend) AcquireLock(context.Context, string) (storage.Unlocke
 	return nil, storage.ErrDistributedLockingUnsupported
 }
 
-// legacyStructuredBackend is an InventoryStore whose decomposed rows do not
-// exist yet, over a real filesystem cadir whose inventory blob does. That is an
-// etcd or Redis store still holding the legacy blob, which no server has
-// started on to decompose: asInventoryStore is true by static type, but Entries
-// reads rows that EnsureReady has not created.
-type legacyStructuredBackend struct {
+// errBlobRefused stands in for a backend refusing its inventory marker, as
+// etcd and Redis refuse a store whose inventory is still a pre-alpha blob.
+var errBlobRefused = errors.New("inventory blob refused")
+
+// refusedBlobBackend is an InventoryStore with no rows, over a real filesystem
+// cadir, that refuses its inventory marker (storage.UndecomposedInventoryRefuser).
+// That is an etcd or Redis store whose inventory is still a pre-alpha blob: it
+// has no rows, so read by its rows alone it looks empty.
+type refusedBlobBackend struct {
 	storage.Backend
 }
 
-func (legacyStructuredBackend) Entries(context.Context) ([]storage.InventoryEntry, error) {
+func (refusedBlobBackend) Entries(context.Context) ([]storage.InventoryEntry, error) {
 	return nil, nil
+}
+
+func (refusedBlobBackend) RefuseUndecomposedInventory(context.Context) error {
+	return errBlobRefused
 }
 
 // EntriesWithHead reports no rows, as Entries does, beside whatever head the
 // cadir underneath holds.
-func (b legacyStructuredBackend) EntriesWithHead(ctx context.Context) ([]storage.InventoryEntry, []byte, bool, error) {
+func (b refusedBlobBackend) EntriesWithHead(ctx context.Context) ([]storage.InventoryEntry, []byte, bool, error) {
 	head, err := b.Get(ctx, storage.KeyInventoryHMAC)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil, false, nil
@@ -128,15 +135,15 @@ func (b legacyStructuredBackend) EntriesWithHead(ctx context.Context) ([]storage
 	return nil, head, true, nil
 }
 
-func (legacyStructuredBackend) AppendEntry(context.Context, storage.CertRecord, func([]byte) []byte) error {
+func (refusedBlobBackend) AppendEntry(context.Context, storage.CertRecord, func([]byte) []byte) error {
 	return nil
 }
 
-func (legacyStructuredBackend) LatestSerialForSubject(context.Context, string) (string, error) {
+func (refusedBlobBackend) LatestSerialForSubject(context.Context, string) (string, error) {
 	return "", nil
 }
 
-func (legacyStructuredBackend) PruneEntries(context.Context, func(storage.InventoryEntry) bool,
+func (refusedBlobBackend) PruneEntries(context.Context, func(storage.InventoryEntry) bool,
 	func([]byte, storage.InventoryEntry) []byte,
 ) ([]storage.InventoryEntry, error) {
 	return nil, nil
@@ -1027,33 +1034,25 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 			Expect(stdout).To(ContainSubstring("HMAC key:      absent"))
 		})
 
-		It("refuses on an undecomposed legacy inventory rather than blessing an empty one", func() {
-			// The rows do not exist yet, so the report would describe an empty
-			// inventory for a store holding a full one, and a rebuild would put
-			// an empty chain head over the whole-blob value that is the only
-			// thing able to validate it. Destruction, not repair.
+		It("refuses when a structured store's backend refuses its inventory marker, rather than blessing an empty one", func() {
+			// No rows, so read by its rows alone the store is empty, and a
+			// rebuild would bless that. Its backend refuses the marker, and
+			// the command must stop there as the server does.
 			issueInDir(caDir, "web01.example.com")
 			before, readErr := os.ReadFile(filepath.Join(caDir, ".inventory.hmac"))
 			Expect(readErr).NotTo(HaveOccurred())
 
 			store := storeOver(caDir, func(b storage.Backend) storage.Backend {
-				return legacyStructuredBackend{b}
+				return refusedBlobBackend{b}
 			})
 
 			_, err := runRebuildOver(store, "--yes-re-bless", "--replicas-stopped")
 
-			Expect(err).To(MatchError(ContainSubstring("undecomposed legacy inventory")))
-			Expect(err).To(MatchError(ContainSubstring("cannot repair a pre-decomposition inventory")))
-			// Not "start the server and re-run": decomposition verifies the
-			// legacy blob first and refuses on a mismatch, so that advice is
-			// circular for the operator whose integrity check is already
-			// failing. The refusal must describe both outcomes of starting.
-			Expect(err).To(MatchError(ContainSubstring("If it does not, the server refuses")))
+			Expect(err).To(MatchError(errBlobRefused))
 
 			after, readAfter := os.ReadFile(filepath.Join(caDir, ".inventory.hmac"))
 			Expect(readAfter).NotTo(HaveOccurred())
-			Expect(after).To(Equal(before),
-				"the legacy baseline must survive: overwriting it is the harm this refusal prevents")
+			Expect(after).To(Equal(before), "nothing is rebuilt")
 		})
 
 		It("refuses to call it done when the inventory changed after the report", func() {

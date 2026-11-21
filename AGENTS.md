@@ -254,8 +254,9 @@ the inventory, in-memory caches) must follow
 - Mutations serialise on cluster-wide named locks via `StorageService.WithLock`
   (`bootstrap`, `crl`, `subject:<name>`, `hmac-key`); the check that justifies a mutation
   must run inside the same lock as the mutation. Backend-internal locks taken
-  directly via `Backend.AcquireLock` (e.g. etcd's `inventory-decompose`) are a
-  second recognised pattern — see locking.md for when each applies.
+  directly via `Backend.AcquireLock` (e.g. the SQL backends'
+  `sql-schema-migrate`) are a second recognised pattern — see locking.md for
+  when each applies.
 - **One running instance, unless the backend has distributed locking.** A
   backend without it permits exactly one, because nothing reconciles the serial
   index, OCSP cache and cached CRL each process holds. `StorageService.
@@ -276,8 +277,8 @@ the inventory, in-memory caches) must follow
   and a new singleton name **that can reach a SQL backend** must be registered
   in `reservedLockOrdinals` (`internal/storage/sql.go`) or it lands in the
   hashed half. "Can reach a SQL backend" is the test, not "is a singleton": a
-  backend-internal name like etcd's `inventory-decompose` must *not* be
-  registered, since that would claim a key nothing uses. The ordinals and the
+  name only a non-SQL backend takes must *not* be registered, since that would
+  claim a key nothing uses. The ordinals and the
   derivation are protocol; changing either needs a full cluster restart, not a
   rolling one, and from 1.0.0 a major release
   ([what the version number promises](docs/development/releasing.md#what-the-version-number-promises)).

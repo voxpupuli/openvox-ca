@@ -297,9 +297,8 @@ Where it does bite, you have three options:
    only where the group is the CA's own. It is no help on a backend whose other
    files a later uid cannot reach anyway: the filesystem backend is one, and
    [the SQLite backend](#sqlite-backend) says what that one needs. On the
-   filesystem backend `private/` also holds the inventory's integrity key and,
-   in a cadir that keeps it there, the CA key (`private/ca_key.pem`), which
-   group write would let the group replace or remove.
+   filesystem backend `private/` also holds the inventory's integrity key,
+   which group write would let the group replace or remove.
 3. **For the offline command only, use `--key-out`.** It writes the key to the
    file you name and writes none into `private/`. `/generate` has no
    equivalent: it always keeps a copy.
@@ -331,11 +330,7 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ```
 
 > **`ca_key.pem` is where OpenVox Server keeps its CA key**, so a cadir either
-> implementation has used has the key where the other looks. If the key is in
-> `private/ca_key.pem` instead, openvox-ca reads and writes it there. If both
-> files exist with different contents, openvox-ca refuses to start and names
-> both: either could be the key this CA signs with, and only you can say which.
-> Remove the other one.
+> implementation has used has the key where the other looks.
 >
 > **`superseded.json` is absent until the first supersession.** It appears only
 > where [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession)
@@ -374,8 +369,7 @@ already on disk is left as you have it — but it does check its key material at
 startup. That is `ca_key.pem`, every file under `private/` — the per-subject
 `*_key.pem` keys and the inventory-integrity key alike, because that directory
 holds secrets by construction — and a `ca_key_passphrase_file` you point it at.
-A cadir that keeps its CA key in `private/ca_key.pem` has it checked there. A
-file readable by every local account
+A file readable by every local account
 makes it **refuse to start**, naming the file and the `chmod` that fixes it; one
 readable only by its group is reported at `Info` and does not stop the CA.
 
@@ -453,10 +447,7 @@ four hex digits, and `/CN=<certname>`. It also reads the shorter
 `<serial> ... /<certname>` form, in the same file, and never rewrites a line
 except to drop an expired one during cleanup.
 
-That covers a cadir either OpenVox Server or openvox-ca created. A cadir that
-keeps its key in `private/ca_key.pem` is the exception: openvox-ca goes on
-reading and writing the key there, but OpenVox Server looks for it at the top of
-the cadir, so it cannot take that directory as it stands.
+That covers a cadir either OpenVox Server or openvox-ca created.
 
 - **To start openvox-ca on OpenVox Server's cadir**, stop OpenVox Server's CA
   and point `cadir` at the directory. There is no import step. The first start
@@ -574,10 +565,9 @@ etcd_tls_key_file:  /etc/openvox-ca/etcd-client-key.pem
   certificate**, not as a single ever-growing text blob, so signing cost does
   not grow with the size of the inventory and duplicate serial numbers are
   rejected atomically across all replicas (see
-  [the inventory internals](development/inventory-store.md)). A store that
-  still holds the inventory as a single blob is converted to per-entry form on
-  first start, after the blob is verified against its stored HMAC; the
-  internals describe the conversion and how an interrupted one resumes.
+  [the inventory internals](development/inventory-store.md)). A store whose
+  inventory is still the single blob that builds of main from before
+  v1.0.0-alpha1 wrote is refused at startup.
 - **The etcd backend also maintains the certificate index**: `GET
   /certificate_statuses` (`puppetserver ca list`) is answered from the
   decomposed inventory entries instead of reading and parsing every stored
@@ -585,8 +575,8 @@ etcd_tls_key_file:  /etc/openvox-ca/etcd-client-key.pem
   backends — after migrating from another backend the display fields are
   backfilled automatically on the next server start. Note the first start
   after a migration therefore performs a per-certificate projection backfill
-  before serving, after the conversion where there is one; on a large fleet
-  expect it to take a while (progress is logged).
+  before serving; on a large fleet expect it to take a while (progress is
+  logged).
 - **Bulk inventory rewrites are batched.** Imports and prunes larger than one
   etcd transaction are split into multiple transactions; batch sizes stay
   well under etcd's default `--max-txn-ops` (128), so no cluster tuning is
@@ -599,12 +589,11 @@ etcd_tls_key_file:  /etc/openvox-ca/etcd-client-key.pem
   `expired_cert_cleanup_interval_sec` — the server logs every deferral, and
   escalates to a warning once the deferred backlog exceeds what a whole pass
   can remove, which is the point at which the backlog is growing rather than
-  draining. An in-progress *conversion* is instead covered by its own resume
-  behaviour, in which the blob stays authoritative until it completes.
-- **Legacy inventories with duplicate serial numbers** (possible, because the
-  pre-conversion blob had no cluster-wide uniqueness guarantee) are imported
-  verbatim with a startup warning naming the serials. The certificate index
-  cannot track per-serial state for them, so their status in
+  draining.
+- **Serial numbers marked ambiguous.** A store whose single-blob inventory
+  v1.0.0-alpha1 converted may hold records sharing a serial number (possible,
+  because the blob had no cluster-wide uniqueness guarantee). The certificate
+  index cannot track per-serial state for them, so their status in
   `certificate_statuses` output is derived from the signed CRL on each
   request (always correct, slightly slower) and their display fields come
   from the stored certificate. This resolves itself once the affected
@@ -738,10 +727,9 @@ redis_tls_key_file:  /etc/openvox-ca/redis-client-key.pem
   certificate**, not as a single ever-growing text value, so signing cost does
   not grow with the size of the inventory and duplicate serial numbers are
   rejected atomically across all replicas (see
-  [the inventory internals](development/inventory-store.md)). A store that
-  still holds the inventory as a single blob is converted to per-entry form on
-  first start, after the blob is verified against its stored HMAC; the
-  internals describe the conversion and how an interrupted one resumes.
+  [the inventory internals](development/inventory-store.md)). A store whose
+  inventory is still the single blob that builds of main from before
+  v1.0.0-alpha1 wrote is refused at startup.
 - **The Redis backend also maintains the certificate index**: `GET
   /certificate_statuses` (`puppetserver ca list`) is answered from the
   decomposed inventory entries instead of reading and parsing every stored
@@ -749,14 +737,14 @@ redis_tls_key_file:  /etc/openvox-ca/redis-client-key.pem
   backends — after migrating from another backend the display fields are
   backfilled automatically on the next server start. Note the first start
   after a migration therefore performs a per-certificate projection backfill
-  before serving, after the conversion where there is one; on a large fleet
-  expect it to take a while (progress is logged).
+  before serving; on a large fleet expect it to take a while (progress is
+  logged).
 - **Bulk inventory rewrites are bounded.** Redis executes a Lua script
   atomically, blocking every other client for its duration, so an inventory
-  conversion is split into scripts of 512 records and a single
-  expired-certificate cleanup pass removes at most 5000 entries. Each pass is
-  atomic — the inventory and its integrity head are never observably out of
-  step — and a large backlog simply drains over several runs rather than
+  import (a migration into Redis) is split into scripts of 512 records and a
+  single expired-certificate cleanup pass removes at most 5000 entries. Each
+  pass is atomic — the inventory and its integrity head are never observably
+  out of step — and a large backlog simply drains over several runs rather than
   stalling signing. At the default daily cleanup interval that is 5000
   entries/day: enabling cleanup for the first time on a large backlog, or
   running a fleet whose expiry churn exceeds it, calls for a shorter
@@ -764,10 +752,10 @@ redis_tls_key_file:  /etc/openvox-ca/redis-client-key.pem
   escalates to a warning once the deferred backlog exceeds what a whole pass
   can remove, which is the point at which the backlog is growing rather than
   draining.
-- **Legacy inventories with duplicate serial numbers** (possible, because the
-  pre-conversion blob had no cluster-wide uniqueness guarantee) are imported
-  verbatim with a startup warning naming the serials. The certificate index
-  cannot track per-serial state for them, so their status in
+- **Serial numbers marked ambiguous.** A store whose single-blob inventory
+  v1.0.0-alpha1 converted may hold records sharing a serial number (possible,
+  because the blob had no cluster-wide uniqueness guarantee). The certificate
+  index cannot track per-serial state for them, so their status in
   `certificate_statuses` output is derived from the signed CRL on each
   request (always correct, slightly slower) and their display fields come
   from the stored certificate. This resolves itself once the affected
@@ -1275,7 +1263,7 @@ the logical key `ca_key`:
 
 | Backend | Where the key is | How to remove it |
 | --- | --- | --- |
-| `filesystem` (default) | `ca_key.pem` under the cadir (or `private/ca_key.pem`, if that is where it is) | `rm` the file |
+| `filesystem` (default) | `ca_key.pem` under the cadir | `rm` the file |
 | `ca_key_file` overlay | the configured path | `rm` the file |
 | `sqlite`, `postgres`, `mysql` | table `puppet_ca_blobs`, column `blob_key`, value `ca_key` | `DELETE FROM puppet_ca_blobs WHERE blob_key = 'ca_key';` |
 | `etcd` | `<prefix>/ca/key` | `etcdctl del <prefix>/ca/key` |
@@ -1390,9 +1378,8 @@ Notes:
   before the copy would not survive it, so `migrate` checks the source against
   its own stored value before touching the destination. It refuses a source
   that does not verify: one whose inventory does not match the value, one with
-  an HMAC key but no value or a value but no key, one whose key is the wrong
-  length, and an etcd or Redis store whose legacy inventory has not yet been
-  decomposed. Run [`openvox-ca
+  an HMAC key but no value or a value but no key, and one whose key is the
+  wrong length. Run [`openvox-ca
   rebuild-inventory-hmac`](operator-cli.md#rebuild-inventory-hmac-re-asserting-inventory-integrity)
   with the source's configuration to see its state, or pass
   `--allow-unverified-source` to migrate it as it stands, which makes the

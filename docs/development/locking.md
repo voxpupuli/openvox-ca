@@ -76,13 +76,9 @@ independently (the `internal/storage` package cannot import `internal/ca`), so
 the two are coupled only by the string literal and must be renamed together.
 Storage-layer and backend-internal locks live beside the code that takes them,
 for the same import-direction reason: `lockNameHMACKey` (`"hmac-key"`) in
-[storage.go](../../internal/storage/storage.go) and `etcdDecomposeLockName`
-(`"inventory-decompose"`) in
-[etcd_inventory.go](../../internal/storage/etcd_inventory.go), which
-`redisDecomposeLockName` in
-[redis_inventory.go](../../internal/storage/redis_inventory.go) deliberately
-aliases — a deployment only ever has one backend, so the two can never
-contend. They are no less protocol for it.
+[storage.go](../../internal/storage/storage.go) and `lockNameSQLMigrate`
+(`"sql-schema-migrate"`) in [sql.go](../../internal/storage/sql.go). They are
+no less protocol for it.
 
 One name in `internal/storage` is not a lock in that sense at all:
 `lockProbeName` in [storage.go](../../internal/storage/storage.go) defines
@@ -98,7 +94,6 @@ flight — see its row below.
 | `subject:<name>` | The whole lifecycle of one subject: duplicate check or evict/save CSR/sign/delete CSR/renew/import/clean/revoke/generate/reconcile | `SaveRequest`, `Sign`, `SignWithTTL`, `DeleteRequest`, `Renew`, `AutoRenew`, `RenewStored`, `Clean`, `ImportCertificate`, `Revoke`, `Generate`/`GenerateWithOptions`, `ReconcileManaged` |
 | `hmac-key` | Generating and persisting the inventory HMAC key when none is usable — a cold start, or a stored blob of the wrong length | `StorageService.EnsureHMACKey`, reached from `CA.Init` → `InitHMAC`, from `MigrateService` → `RebuildInventoryHMAC`, and from the offline `openvox-ca rebuild-inventory-hmac` → `RebuildInventoryHMAC` (only where it has to mint a key, i.e. a stored blob of the wrong length). Deliberately **not** `bootstrap`: the migration already holds that name across the rebuild, and `WithLock` is not reentrant |
 | `sql-schema-migrate` | One schema-migration run, so two replicas starting at once do not migrate concurrently (SQL backends only) | `SQLBackend.EnsureReady` |
-| `inventory-decompose` | One-time legacy inventory blob conversion (etcd and redis backends) on the first start after upgrading | `EtcdBackend.decomposeLegacyInventory` and `RedisBackend.decomposeLegacyInventory`, from `EnsureReady` |
 | `capability-probe` | Nothing. Acquired and released immediately by `StorageService.SupportsDistributedLocking` to find out whether this backend coordinates locks across processes at all | The offline `openvox-ca generate` and `rebuild-inventory-hmac` pre-flights. The name sits deliberately outside every namespace above so a probe can never contend with an operation in flight |
 | `store-instance` | The store as a whole, for as long as a process is running against it. Taken **outside `WithLock`**, through `StorageService.AcquireInstanceLock` → `InstanceLocker`, so it never reaches a cross-node lock and needs no ordinal: it applies only where `SupportsDistributedLocking` is false, and those backends have no SQL advisory lock to reach. Acquired without waiting, and refused with the holder's identity rather than a timeout | The server (the launcher, or a single-process server — never the signer or frontend children, which are inside an instance that already holds it), `openvox-ca-ctl setup`/`import`/`migrate`, and the offline `csr`/`generate`/`import-ca-cert`/`rebuild-inventory-hmac` (which takes it only on its `--yes-re-bless` path, never to report). Like `capability-probe` the name sits outside every namespace above, so the lock proving an instance is alone can never contend with that instance's own work |
 
@@ -655,19 +650,19 @@ path — still provides no cross-replica guarantee anyway.
    `StorageService.WithLock` by `StorageService` itself, as constants beside
    the code that takes them (e.g. `lockNameHMACKey` in
    [storage.go](../../internal/storage/storage.go)); and backend-internal
-   names, taken directly via `Backend.AcquireLock`, as constants in the owning
-   backend package (e.g. `etcdDecomposeLockName` in
-   [etcd_inventory.go](../../internal/storage/etcd_inventory.go)); keep them
-   all stable across releases, and document them in the table above. All
+   names, taken directly via `Backend.AcquireLock`, as constants beside the
+   backend that takes them (e.g. `lockNameSQLMigrate` in
+   [sql.go](../../internal/storage/sql.go)); keep them all stable across
+   releases, and document them in the table above. All
    callers using a name contend on one lock, so
    never derive a name from unvalidated input (subject names pass
    `ValidateSubject` first). **A new singleton name that can reach a SQL
    backend must also be reserved** in `reservedLockOrdinals` in
    [sql.go](../../internal/storage/sql.go), which is how those backends keep
    singleton locks out of the hashed key space — see rule 11. "Can reach a SQL
-   backend" is the test, not "is a singleton": `inventory-decompose` is a
-   singleton that only the etcd backend takes, so reserving it would claim a
-   key nothing uses.
+   backend" is the test, not "is a singleton": a singleton that only another
+   backend takes must not be reserved, since that would claim a key nothing
+   uses.
 
    For a name declared in `internal/storage` this is **enforced**, not just
    asked for: `SQLLockNameConstantsAreRegistered` walks the package source for
@@ -1325,10 +1320,9 @@ would:
   the hand-maintained list of *pairs*, not the list of callers: driving one more
   operation checks every pair that operation takes.
 - **Names taken outside `WithLock`.** `sql-schema-migrate`
-  ([sql.go](../../internal/storage/sql.go)) and `inventory-decompose`
-  ([etcd_inventory.go](../../internal/storage/etcd_inventory.go)) are acquired
-  through `Backend.AcquireLock` directly, so a `WithLock`-level observer cannot
-  see them at all.
+  ([sql.go](../../internal/storage/sql.go)) is acquired through
+  `Backend.AcquireLock` directly, so a `WithLock`-level observer cannot see it
+  at all.
 - **`MigrateService`.** It nests the *same* name over two different stores
   (`bootstrap` source, then destination), and pairs are keyed by lock name
   rather than by store, so driving it would record a self-nesting that is not

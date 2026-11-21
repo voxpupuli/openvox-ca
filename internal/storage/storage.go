@@ -1173,11 +1173,10 @@ func (s *StorageService) SavePrivateKey(ctx context.Context, subject string, pem
 // line -- KeyPermWarning.WorldAccessible is refused, group access is logged, and
 // a mode that could not be read is refused on its own terms. Four sources:
 // every file in the local private-key directory; the filesystem backend's CA
-// key, which sits at the top of the cadir unless the cadir predates that and
-// keeps it in private/ (see caKeyFiler); any files the backend itself declares
-// through KeyFileLister — the SQLite database and its sidecars, which hold the
-// CA key as a blob; and any extra paths the caller names, for secrets it
-// configures that the store knows nothing about.
+// key, which sits at the top of the cadir (see caKeyFiler); any files the
+// backend itself declares through KeyFileLister — the SQLite database and its
+// sidecars, which hold the CA key as a blob; and any extra paths the caller
+// names, for secrets it configures that the store knows nothing about.
 //
 // The private-key directory is judged whole rather than by filename. It is the
 // directory the CA keeps its secrets in, so its contents are secret by
@@ -1207,12 +1206,11 @@ func (s *StorageService) CheckKeyPermissions(extra ...string) []KeyPermWarning {
 		warnings = append(warnings, KeyPermWarning{Path: path, Unreadable: true, Err: err})
 	}
 
-	// One finding per path. The sources overlap by construction: a CA key the
-	// cadir keeps in private/ is both a directory entry and the backend's CA key
-	// file, a ca_key_file pinned inside <cadir>/private is both a directory entry
-	// and an overlay override, and a ca_key_passphrase_file can be named there
-	// too. A path reported twice doubles it in the refusal's chmod remedy and
-	// inflates the group-access count, which is a number an operator reads.
+	// One finding per path. The sources overlap by construction: a ca_key_file
+	// pinned inside <cadir>/private is both a directory entry and an overlay
+	// override, and a ca_key_passphrase_file can be named there too. A path
+	// reported twice doubles it in the refusal's chmod remedy and inflates the
+	// group-access count, which is a number an operator reads.
 	seen := make(map[string]bool)
 
 	check := func(path string) {
@@ -1278,8 +1276,8 @@ func (s *StorageService) CheckKeyPermissions(extra ...string) []KeyPermWarning {
 		}
 	}
 
-	// The filesystem backend's CA key. In a cadir that keeps it in private/,
-	// the scan above has already judged it, and check skips a path it has seen.
+	// The filesystem backend's CA key, at the top of the cadir and so outside
+	// the scan above.
 	if f, ok := s.backend.(caKeyFiler); ok {
 		if p := f.CAKeyFile(); p != "" {
 			check(filepath.Clean(p))
@@ -1828,17 +1826,6 @@ type InventoryIntegrityReport struct {
 	// ComputedHead is the value recomputed from the inventory as it now
 	// stands, nil when KeyState is not HMACKeyUsable.
 	ComputedHead []byte
-	// LegacyUndecomposed reports a structured backend still holding an
-	// undecomposed legacy inventory blob. Entries() reads only the decomposed
-	// rows, so such a store answers "no entries" while its real inventory sits
-	// in the blob and its stored head is a whole-blob MAC. Rebuilding there
-	// would write an empty hash-chain head over the only baseline that can
-	// validate the blob, which is destruction rather than repair.
-	//
-	// It can be true only because this report is reached without EnsureReady:
-	// the server decomposes on start (CA.Init -> EnsureDirs -> EnsureReady),
-	// and an offline command that reports rather than starts does not.
-	LegacyUndecomposed bool
 	// UnparseableLines counts lines the inventory blob holds that are not
 	// entry-shaped. Always zero on a structured backend, whose entries are
 	// rows. It is not a curiosity: the blob scheme MACs the whole blob, so
@@ -1909,29 +1896,16 @@ func (s *StorageService) InventoryIntegrityReport(ctx context.Context) (Inventor
 	}
 	rep.Entries = len(entries)
 
-	if chained && len(entries) == 0 {
-		// Distinguish "structured and empty" from "structured but not yet
-		// decomposed". Backend-agnostic: after decomposition the blob key
-		// renders the rows, so entries and blob agree; before it, the rows are
-		// absent and the blob holds everything. A SQL backend's blob key is an
-		// empty presence marker, so it cannot false-positive here.
-		// Fail closed. This detection is the only thing standing between a
-		// legacy store and a rebuild that would write an empty chain head over
-		// the whole-blob value that is its sole baseline, so a store that could
-		// not be read must not resolve to "not legacy" -- that is the answer
-		// which lets the destructive path proceed.
-		//
-		// An absent blob is a real answer rather than a failure: there is
-		// nothing to be undecomposed from. readInventoryForHMAC turns it into
-		// empty bytes rather than fs.ErrNotExist, so "no blob at all" arrives
-		// here as a nil error and no parseable entries -- a genuinely empty
-		// structured inventory, which is not legacy. Any error it does return
-		// is the unreadable case above.
-		legacy, err := s.readInventoryForHMAC(ctx)
-		if err != nil {
-			return rep, fmt.Errorf("reading the inventory blob to detect a legacy store: %w", err)
+	// An etcd or Redis store whose inventory is still a pre-alpha blob reads
+	// its rows without complaint: none, or the partial set an interrupted
+	// v1.0.0-alpha1 conversion left beside the blob. Its backend refuses it,
+	// reading the marker alone, so ask: the commands that report without
+	// starting the server (rebuild-inventory-hmac, migrate) then fail as the
+	// server does, rather than act on an inventory that is not the whole one.
+	if r, ok := asUndecomposedInventoryRefuser(s.backend); ok {
+		if err := r.RefuseUndecomposedInventory(ctx); err != nil {
+			return rep, fmt.Errorf("reading the inventory marker: %w", err)
 		}
-		rep.LegacyUndecomposed = len(parseInventoryBlob(legacy)) > 0
 	}
 
 	key, stored, err := s.loadHMACKey(ctx)
@@ -2014,11 +1988,8 @@ func (s *StorageService) verifyInventoryHMACLocked(ctx context.Context, hmacKey 
 	if !hmac.Equal(storedMAC, computedMAC) {
 		// Name the integrity scheme we computed under. A mismatch usually means
 		// genuine tampering, but it also fires when a backend is served under a
-		// different scheme than the stored value was written with. The one known
-		// way to get there is a ca_key_file/ca_cert_file server on a build of
-		// main from before v1.0.0-alpha1, which stored a whole-blob HMAC over
-		// what is now read as a hash chain. Surfacing the scheme lets an operator
-		// tell the two apart.
+		// different scheme than the stored value was written with. Surfacing the
+		// scheme lets an operator tell the two apart.
 		scheme := s.inventoryScheme()
 		slog.Warn("inventory HMAC mismatch; integrity check failed", "scheme", scheme,
 			"repair", inventoryRepairHint)
@@ -2077,10 +2048,9 @@ func (s *StorageService) storedAndComputedInventoryHMAC(ctx context.Context, hma
 // whose inventory stays empty because the CA's own certificate is never
 // recorded in it. Any other missing value logs at Warn: either it was removed,
 // or this store was produced by something that never wrote one (a cadir
-// adopted from OpenVox Server, one written by openvox-ca-ctl import, a
-// migration from such a store, or the one start after an etcd or Redis legacy
-// inventory is decomposed), and the new value vouches for an inventory nothing
-// verified.
+// adopted from OpenVox Server, one written by openvox-ca-ctl import, or a
+// migration from such a store), and the new value vouches for an inventory
+// nothing verified.
 //
 // The state is read from the store rather than passed in, because the store is
 // what an attacker who deletes the value has also to leave looking new.
@@ -2119,8 +2089,8 @@ func (s *StorageService) baselineInventoryHMACLocked(ctx context.Context, hmacKe
 			"scheme", s.inventoryScheme(), "inventory_empty", len(entries) == 0 && len(blob) == 0,
 			"crl_present", hasCRL,
 			"expected_once_after", "adopting a cadir from OpenVox Server, importing a CA with openvox-ca-ctl "+
-				"import, migrating from a store with no integrity value, or decomposing a legacy etcd/Redis "+
-				"inventory; otherwise the value was removed and the inventory may have been altered")
+				"import, or migrating from a store with no integrity value; otherwise the value was removed "+
+				"and the inventory may have been altered")
 	}
 	return s.backend.Put(ctx, KeyInventoryHMAC, foldInventoryHead(hmacKey, entries, blob, chained), BlobPrivate)
 }

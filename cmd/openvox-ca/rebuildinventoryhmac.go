@@ -132,31 +132,6 @@ is the safe way to inspect a CA that will not start.`,
 			}
 			reportInventoryIntegrity(out, rep)
 
-			if rep.LegacyUndecomposed {
-				// Refuse rather than report: this store's entries have not been
-				// decomposed yet, so the report above describes an inventory
-				// that is not the one in use, and rebuilding would write an
-				// empty chain head over the whole-blob MAC that is the only
-				// thing able to validate the real inventory. The server
-				// decomposes on start; this command deliberately does not,
-				// because reporting must not write. Deliberately not "start the
-				// server and re-run": decomposition verifies the legacy blob
-				// against its own stored MAC before it commits, and returns
-				// ErrInventoryTampered on a mismatch. So starting the server
-				// fixes the benign case (a legacy blob no server has started on
-				// yet) and fails the very case an operator with a failing
-				// integrity check is in. Saying otherwise sends them in a
-				// circle. The server's own refusal names the remedy for the
-				// other sub-case, so point at it rather than restating it.
-				return fmt.Errorf("this store still holds an undecomposed legacy inventory, so the entry " +
-					"count above describes the decomposed rows rather than the inventory in use. Rebuilding " +
-					"now would replace the only value that can validate the legacy blob, and this command " +
-					"cannot repair a pre-decomposition inventory. Start the server: if the legacy blob still " +
-					"verifies it decomposes and starts, after which this command applies normally. If it does " +
-					"not, the server refuses with an integrity error naming the stored legacy value to remove " +
-					"in order to acknowledge a lost baseline")
-			}
-
 			if rep.KeyState == storage.HMACKeyAbsent {
 				// RebuildInventoryHMAC is a no-op with no key, so a "success"
 				// here would be a lie: nothing would be written and the CA would
@@ -433,12 +408,11 @@ is the safe way to inspect a CA that will not start.`,
 // order to decide whether re-asserting is the right response.
 //
 // It reports the scheme because a mismatch also fires when a store is served
-// under a different scheme than the value was written with (only builds of main
-// from before v1.0.0-alpha1 produced one), which is a different problem with a
-// different fix; the entry count and both head values because they are what the
-// new value would cover; and it stops there. It does not claim to say which
-// entry diverged: only one head is persisted, so nothing records what any
-// prefix should have hashed to.
+// under a different scheme than the value was written with, which is a
+// different problem with a different fix; the entry count and both head values
+// because they are what the new value would cover; and it stops there. It does
+// not claim to say which entry diverged: only one head is persisted, so nothing
+// records what any prefix should have hashed to.
 func reportInventoryIntegrity(w io.Writer, rep storage.InventoryIntegrityReport) {
 	_, _ = fmt.Fprintf(w, "\nInventory integrity\n")
 	_, _ = fmt.Fprintf(w, "  scheme:        %s\n", rep.Scheme)
