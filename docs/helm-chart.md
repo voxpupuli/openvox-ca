@@ -1483,17 +1483,17 @@ config:
     kubernetes_role: openvox-ca
 ```
 
-If you also pin the CA *certificate* to a Secret, note that the `ca` block sets
-both `ca_cert_file` and `ca_key_file`, and under this provider there is no key
-file to point at. Clear that one explicitly — the empty string survives the
-merge, and the server treats an empty `ca_key_file` as unset:
+If you also pin the CA *certificate* to a Secret, set `ca.certificateOnly`. By
+default the `ca` block sets both `ca_cert_file` and `ca_key_file`, and under
+this provider there is no key file to point at; with `certificateOnly` it sets
+`ca_cert_file` alone and ignores `ca.keyKey`:
 
 ```yaml
 ca:
-  existingSecret: openvox-ca-cert   # certificate only
+  existingSecret: openvox-ca-cert
+  certificateOnly: true
 config:
   ca_key_provider: openbao
-  ca_key_file: ""
 ```
 
 With `auth_method: kubernetes` the pod authenticates with its own projected

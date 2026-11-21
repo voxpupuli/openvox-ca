@@ -20,6 +20,12 @@ metadata:
     {{- end }}
   {{- end }}
 spec:
+  {{- /*
+    Unset by default on purpose: the Operator then takes job from the Service
+    name, which is distinct per release. Do not default it to
+    app.kubernetes.io/name, which concurrent releases share; the
+    metrics.serviceMonitor.jobLabel row in the chart's README says why.
+  */}}
   {{- with .Values.metrics.serviceMonitor.jobLabel }}
   jobLabel: {{ . | quote }}
   {{- end }}

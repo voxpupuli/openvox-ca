@@ -81,6 +81,7 @@
       "additionalProperties": false,
       "properties": {
         "existingSecret": { "type": "string" },
+        "certificateOnly": { "type": "boolean" },
         "certKey": { "type": "string" },
         "keyKey": { "type": "string" },
         "mountPath": { "type": "string" }

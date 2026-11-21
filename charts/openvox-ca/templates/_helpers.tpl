@@ -141,7 +141,9 @@ disagree with the values that shape the matching Kubernetes object.
 {{- end -}}
 {{- if .Values.ca.existingSecret -}}
 {{- $_ := set $c "ca_cert_file" (printf "%s/%s" (trimSuffix "/" .Values.ca.mountPath) .Values.ca.certKey) -}}
+{{- if not .Values.ca.certificateOnly -}}
 {{- $_ := set $c "ca_key_file" (printf "%s/%s" (trimSuffix "/" .Values.ca.mountPath) .Values.ca.keyKey) -}}
+{{- end -}}
 {{- end -}}
 {{- if .Values.caKeyPassphrase.existingSecret -}}
 {{- $_ := set $c "encrypt_ca_key" true -}}

@@ -119,7 +119,8 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 | `tls.existingSecret` | `""` | Secret holding the server certificate; sets `tls_cert`/`tls_key`. The server re-reads the keypair on `SIGHUP`, but nothing sends one, so a renewal needs a signal (`kubectl debug --target` running `kill -HUP 1`, since the default image has no `kill`; `kubectl exec <pod> -- kill -HUP 1` on `-alpine`) or a restart. Mutually exclusive with `config.serving_cert`, which the chart refuses at install time — see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) |
 | `tls.certKey` / `tls.keyKey` | `tls.crt` / `tls.key` | Data keys within that Secret |
 | `tls.mountPath` | `/run/secrets/openvox-ca-tls` | |
-| `ca.existingSecret` | `""` | Secret holding the CA certificate and key; sets `ca_cert_file`/`ca_key_file`. Under a provider that holds the key (`config.ca_key_provider: openbao`) clear the latter with `config.ca_key_file: ""` |
+| `ca.existingSecret` | `""` | Secret holding the CA certificate and key; sets `ca_cert_file`/`ca_key_file` |
+| `ca.certificateOnly` | `false` | The Secret holds only the certificate: set `ca_cert_file` alone and ignore `ca.keyKey`. For a provider that holds the key (`config.ca_key_provider: openbao`). An explicit `config.ca_key_file` still wins |
 | `ca.certKey` / `ca.keyKey` | `tls.crt` / `tls.key` | Data keys within that Secret |
 | `ca.mountPath` | `/run/secrets/openvox-ca-ca` | |
 | `caKeyPassphrase.existingSecret` | `""` | Secret holding the CA key passphrase; sets `encrypt_ca_key` and `ca_key_passphrase_file` |
