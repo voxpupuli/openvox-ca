@@ -160,12 +160,12 @@ worth paging on depends on the deployment; see the
 A failed gather does not empty the storage-derived series. For up to an hour
 after the last successful gather, the exporter republishes that gather's values
 unchanged, with `openvoxca_collector_scrape_success` at `0`; after an hour they
-are dropped, as every failed gather dropped them before. The point is the
-expiry alerts: their `for` clocks restart whenever their series is missing from
-one evaluation, so a CA whose gather failed more than once an hour never paged
-for an expiring certificate, and a CA under load is the likeliest to be in that
-state. An hour is the mixin's `expiryFor`, so held data cannot carry a new
-expiry alert to firing on its own.
+are dropped. The point is the expiry alerts: their `for` clocks restart
+whenever their series is missing from one evaluation, so dropping the series on
+every failed gather would keep a CA whose gather failed more than once an hour
+from ever paging for an expiring certificate, and a CA under load is the
+likeliest to be in that state. An hour is the mixin's `expiryFor`, so held
+data cannot carry a new expiry alert to firing on its own.
 
 **Held for up to an hour** (read from storage):
 
@@ -194,8 +194,7 @@ are worth knowing:
   so the two can appear to disagree during an outage. The stored number only
   ever rises, so a held one is never above the real one, and
   `OpenVoxCACRLStale` cannot raise a false alert from it. A lag that begins
-  during the outage stays hidden until it ends, as it did when the series
-  vanished.
+  during the outage stays hidden until it ends.
 - Aggregating a held gauge across replicas with `max` can mask a live value
   for up to an hour. One replica failing and holding 29 signed certificates
   while another is live and genuinely reports 0 gives
@@ -212,9 +211,9 @@ value has moved on, by a renewal or a re-signed CRL. The shipped expiry rules
 rule that out with `expiryFor`; give a time-relative rule of your own a `for` of
 an hour or more for the same reason. `max(openvoxca_leaf_certificates{state="signed"})
 == 0 and on() max(openvoxca_ca_ready) == 1`, held at zero, keeps paging through
-an outage, because `openvoxca_ca_ready` stays live. Before the hold its left
-side vanished and a firing page resolved itself minutes into the outage. A
-freshness gate would bring that back. The shipped expiry alerts depend on the
+an outage, because `openvoxca_ca_ready` stays live. Were its left side dropped
+on a failed gather, a firing page would resolve itself minutes into the outage;
+a freshness gate would do exactly that. The shipped expiry alerts depend on the
 same property to carry their `for` clocks through an outage, while
 `OpenVoxCAScrapeFailing` pages for the outage itself. Where a rule must stay
 quiet for the whole of an outage, qualify it with `and on(instance)
@@ -677,7 +676,7 @@ sweep is not completing — check the failure counter.
 | --- | --- |
 | `openvoxca_client_crl_usable` | 1 when a `client_ca` trust domain holds any currently valid CRL, 0 when it holds none, labelled by `client_ca`. Present only where `client_ca` is configured **and the policy is `require`** — `crl_file` is optional under `check` and `skip`, so a domain without CRLs is correct there and a 0 would alert on a healthy server. **Alert on 0**: the domain has nothing to check against. It does **not** report partial coverage — whether an uncovered anchor matters depends on chains that have not arrived, so a domain can read 1 while clients of one of its anchors are refused. `openvoxca_client_crl_refusals_total` is the signal for that. |
 | `openvoxca_client_crl_last_reload_timestamp_seconds` | When this `client_ca` entry's `crl_file` was last applied, labelled by `client_ca`. A reload that fails, that would cover fewer anchors than the set in use, that would drop an enforced partial CRL, or that would move an anchor backwards to an older CRL, or that cannot be shown to be newer at all (this server will not date the CRLs it holds for that anchor, and neither side publishes a `cRLNumber`), deliberately keeps the previous set — right for availability, and invisible on every other series, because the retained CRLs are still current and clients are still served. What has stopped is the file being applied, so revocations published since are not honoured. **Alert on it going stale** relative to `client_crl_refresh_interval_sec`. |
-| `openvoxca_client_crl_refusals_total` | Counter of clients refused **because revocation information was missing**, labelled by `client_ca`. Not incremented when a CRL was found and said the client is revoked — that is the feature working, and counting it made this alert driveable at will by the holder of a revoked certificate. Published under every policy, and zero-initialised so `increase()` can see the first refusal. Unlike the gauge this is not an estimate: it counts requests actually turned away, so it sees a partially covered entry — one anchor's CRL missing while another's is fine — which no load-time check can distinguish from a healthy one. **Alert on `increase(...) > 0`.** Resets to `0` on process restart. |
+| `openvoxca_client_crl_refusals_total` | Counter of clients refused **because revocation information was missing**, labelled by `client_ca`. Not incremented when a CRL was found and said the client is revoked — that is the feature working, and counting it would make this alert driveable at will by the holder of a revoked certificate. Published under every policy, and zero-initialised so `increase()` can see the first refusal. Unlike the gauge this is not an estimate: it counts requests actually turned away, so it sees a partially covered entry — one anchor's CRL missing while another's is fine — which no load-time check can distinguish from a healthy one. **Alert on `increase(...) > 0`.** Resets to `0` on process restart. |
 
 Emitted only when [`client_ca`](configuration.md#trusting-client-certificates-from-another-ca) is
 configured. A foreign issuer's CRLs are not the chain above: they come from that
@@ -761,8 +760,7 @@ and on(instance) openvoxca_collector_scrape_success == 1
 The mixin ships this as `OpenVoxCAManagedCertificateNeverIssued`, modulo its
 target selector and a `for` of `managedCertNeverIssuedFor` (1 hour).
 
-The two qualifiers are not decoration, and each was added after the rule was
-found to be wrong without it:
+Each qualifier is load-bearing; without it the rule is wrong:
 
 - `and on(instance) ... scrape_success == 1`, because the two sides come from
   different places. The configured series is built from the CA's own
@@ -775,8 +773,8 @@ found to be wrong without it:
   certificate in place: the CA revokes what it has just issued and restores the
   predecessor. On a first issuance there is no predecessor, so the subject is
   left holding one revoked certificate — and a revoked certificate still emits
-  its leaf series, which silenced the rule for precisely the RBAC refusal and
-  unadoptable-Secret failures its description tells you to go and check. An
+  its leaf series, which would silence the rule for precisely the RBAC refusal
+  and unadoptable-Secret failures its description tells you to go and check. An
   ordinary revoke-then-reissue is unaffected: `max without (serial, state)`
   collapses every serial for the subject, so a signed certificate beside a
   revoked predecessor still satisfies the entry.

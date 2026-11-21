@@ -503,7 +503,7 @@ func (c *CA) warnPlaintextKey() {
 	}
 	slog.Warn("encrypt_ca_key is set, but the stored CA key is not encrypted: "+
 		"the setting applies only when a CA key is created and does not re-encrypt an existing one; "+
-		"see \"Backward compatibility\" in docs/ca-key-security.md", args...)
+		"see \"Encrypting a key that already exists\" in docs/ca-key-security.md", args...)
 }
 
 func (c *CA) bootstrapCA(ctx context.Context) error {

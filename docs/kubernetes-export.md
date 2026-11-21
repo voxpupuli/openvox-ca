@@ -114,9 +114,11 @@ much of one it wants:
 
 `root` publishes the last certificate in the stored bundle without inspecting
 it, so it is only a *trust anchor* if the bundle you imported was a complete
-chain ending at a self-signed root. Nothing enforces that today —
-`openvox-ca-ctl import` accepts a partial bundle — so `root` on a bundle that
-stops at an intermediate publishes that intermediate. It fails closed rather
+chain ending at a self-signed root. `openvox-ca-ctl import` and `openvox-ca
+import-ca-cert` both refuse a bundle that does not, but a bundle placed in
+storage by another route (`ca_cert_file`, or a cadir adopted as it is) is not
+checked, and `root` on one that stops at an intermediate publishes that
+intermediate. It fails closed rather
 than open (an intermediate grants strictly less trust than the real root, and
 consumers trusting it simply fail to verify), but it fails, so import the whole
 chain. For a Puppet agent that failure is not subtle and is not confined to
