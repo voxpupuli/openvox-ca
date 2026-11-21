@@ -118,8 +118,9 @@ change under `packaging/scripts/`:
 
 ```bash
 shellcheck -s sh packaging/scripts/first-boot packaging/scripts/record-environment \
-  packaging/scripts/debian-config packaging/scripts/preinstall \
-  packaging/scripts/postinstall packaging/scripts/preremove packaging/scripts/postremove
+  packaging/scripts/write-ctl-config packaging/scripts/debian-config \
+  packaging/scripts/preinstall packaging/scripts/postinstall \
+  packaging/scripts/preremove packaging/scripts/postremove
 ```
 
 A new maintainer script has to be added to the `shellcheck` job in

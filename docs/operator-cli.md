@@ -103,7 +103,16 @@ The config file is located by checking, in order:
 2. `OPENVOX_CA_CTL_CONFIG` environment variable
 3. `/etc/openvox-ca/ctl.yaml` (auto-detected if the file exists)
 
-**Example `/etc/openvox-ca/ctl.yaml`:**
+The `.deb` and `.rpm` write `/etc/openvox-ca/ctl.yaml` when they provision the
+CA, so on a packaged host `openvox-ca-ctl` reaches the local CA with no flags.
+See [the CLI's configuration](systemd.md#the-clis-configuration-ctlyaml) for
+what goes in it and when it is written.
+
+**Example `/etc/openvox-ca/ctl.yaml`**, for a CA installed by hand or from a
+tarball, listening on 8140 with its CA directory at
+`/etc/puppetlabs/puppet/ssl/ca`. A packaged host listens on 8141 instead and
+keeps the CA certificate at `/etc/puppetlabs/puppet/ssl/certs/ca.pem`; the file
+its provisioning writes already has the right values.
 
 ```yaml
 server_url:  https://openvox-ca.example.com:8140
