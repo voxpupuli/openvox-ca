@@ -572,6 +572,14 @@ func (b *RedisBackend) ModTime(ctx context.Context, key string) (time.Time, erro
 	return mtime, nil
 }
 
+// RedisLockPollMaxBackoff caps the backoff between AcquireLock's polls for a
+// held lock. Exported because the CA's background sweeps pause between steps
+// for longer than this, so that a revocation polling on another replica gets
+// its turn. A spec there compares the two constants. Nothing measures the
+// interval AcquireLock actually waits, so the backoff below must stay capped
+// by this constant rather than by a value of its own.
+const RedisLockPollMaxBackoff = 500 * time.Millisecond
+
 // AcquireLock obtains a distributed mutex under <prefix>:locks:<name> using
 // SET NX PX with a per-acquisition token. Local goroutines racing on the
 // same name are serialised by a per-name process-local mutex first, then
@@ -602,7 +610,6 @@ func (b *RedisBackend) AcquireLock(ctx context.Context, name string) (Unlocker, 
 	// per-iteration form put pressure on the runtime timer heap (and
 	// pre-Go-1.23, kept the timer alive until it fired).
 	backoff := 50 * time.Millisecond
-	const maxBackoff = 500 * time.Millisecond
 	timer := time.NewTimer(backoff)
 	defer timer.Stop()
 	for {
@@ -620,7 +627,7 @@ func (b *RedisBackend) AcquireLock(ctx context.Context, name string) (Unlocker, 
 			return nil, fmt.Errorf("acquiring redis lock %q: %w", name, ctx.Err())
 		case <-timer.C:
 		}
-		backoff = min(backoff*2, maxBackoff)
+		backoff = min(backoff*2, RedisLockPollMaxBackoff)
 		timer.Reset(backoff)
 	}
 

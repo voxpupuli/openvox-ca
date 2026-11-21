@@ -128,7 +128,8 @@ func (s *StorageService) WithLock(ctx context.Context, name string, fn func() er
 // What it promises is scoped to this process. WithLock callers here are
 // visible to it; a caller on another replica or in another process is not, and
 // contends with it on the backend's own terms. A caller bounds that wait by
-// keeping each WithLockYielding hold short.
+// keeping each WithLockYielding hold short, as the CA's background CRL jobs do
+// in bounded steps; see docs/development/locking.md, rule 13.
 //
 // Nor is it pre-emptive. A WithLock caller that arrives after fn has started
 // waits for fn to return; standing aside happens only before fn runs.

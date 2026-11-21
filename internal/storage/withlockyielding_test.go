@@ -21,7 +21,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -397,6 +400,21 @@ var _ = Describe("WithLockYielding", func() {
 		releaseHolder()
 		Eventually(holderDone).Should(Receive(BeNil()))
 		Eventually(neutralDone2).Should(Receive(BeNil()))
+	})
+
+	// The etcd and Redis prune caps are a backstop the comments beside them say
+	// the CA's cleanup never reaches, because its steps are smaller. The step
+	// size lives in internal/ca, which cannot see these caps, so the relation
+	// is read from its source here.
+	It("keeps the CA's step size under every backend's prune cap", func() {
+		src, err := os.ReadFile(filepath.Join("..", "ca", "crlyield.go"))
+		Expect(err).NotTo(HaveOccurred())
+		m := regexp.MustCompile(`(?m)^\s*sweepStepEntries\s*=\s*(\d+)\s*$`).FindSubmatch(src)
+		Expect(m).NotTo(BeNil(), "sweepStepEntries is no longer a literal in internal/ca/crlyield.go")
+		step, err := strconv.Atoi(string(m[1]))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(step).To(BeNumerically("<", etcdPruneBatch*etcdPruneMaxBatchesPerCall))
+		Expect(step).To(BeNumerically("<", redisPruneMaxPerCall))
 	})
 
 	// A WithLock that never got the lock must still leave the gate, or every

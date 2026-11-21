@@ -70,10 +70,12 @@ func (g *goroutineGroup) Go(f func(ctx context.Context)) {
 //     at once. net/rpc then fails the pending call with EOF within
 //     milliseconds. Under --single-process, an OpenBao signature takes no
 //     context and runs to its own login timeout.
-//   - A store write that deliberately ignores cancellation: the rollbacks and
-//     write-backs in internal/ca that use context.WithoutCancel, each capped at
-//     ca.LockTimeout/2. Against a healthy store these take milliseconds. Only
-//     a stalled store makes them the worst case.
+//   - A store write that deliberately ignores cancellation: the managed
+//     certificate path's detached writes in internal/ca (its rollbacks and the
+//     predecessor's retirement), which use context.WithoutCancel, each capped
+//     at ca.LockTimeout/2, and a background sweep's step in progress, capped
+//     at its own budget, ca.LockTimeout/4. Against a healthy store these take
+//     milliseconds. Only a stalled store makes them the worst case.
 //
 // Beyond that the process is bounded from outside: the launcher kills the
 // frontend after its drain budget plus headroom, and a service manager stops a

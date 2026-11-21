@@ -414,7 +414,8 @@ const maxCRLChainFileEntries = 64
 // stuck mount and time out against LockTimeout while it holds the lock forever.
 //
 // Ten seconds is generous for a file bounded at 4 MiB on any mount that is
-// working, and short against LockTimeout. Failing is the safe direction here:
+// working, and short against LockTimeout and against sweepStepBudget, which
+// the refresh job runs on. Failing is the safe direction here:
 // a refusal leaves the published chain exactly as it was, is counted into
 // crl_chain_refresh_failures_total, and the next pass retries -- which is what
 // every other unreadable-file case already does.
@@ -643,9 +644,6 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
-	defer cancel()
-
 	// The comparison runs *inside* the CRL lock, not before it. Deciding
 	// outside meant every replica that noticed the same change re-signed: each
 	// compared against the pre-change chain, each took the lock in turn, and
@@ -664,7 +662,15 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 	// read, a re-sign -- to the chain file, so a storage outage paged someone to
 	// go and inspect a perfectly healthy file. See readStoredCRL's comment in
 	// crl.go for the same argument made about crl_update_failures.
-	err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
+	//
+	// Background work, so it runs as one sweep step, yielding to a revocation
+	// and holding the lock for at most a step's budget plus the CA signature it
+	// has in flight, the budget starting when the lock is granted; see
+	// crlyield.go (#347).
+	lock := func(ctx context.Context, fn func() error) error {
+		return c.Storage.WithLockYielding(ctx, lockNameCRL, fn)
+	}
+	err := c.sweepStep(ctx, lock, func(ctx context.Context) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
@@ -738,7 +744,11 @@ func (c *CA) RefreshCRLChainFile(ctx context.Context) (bool, error) {
 		// its hourly refresh behind a log line while every series read healthy
 		// until the ancestors expired a fortnight later. The two sibling
 		// maintenance tasks count their own failures for the same reason.
-		if !errors.Is(err, errChainFileFault) && !countedByCRLLayer {
+		//
+		// Except a wait for the lock that a shutdown ended, as for those
+		// siblings: the process is stopping, and the pass did not fail.
+		stopped := StoppedByShutdown(ctx, err)
+		if !errors.Is(err, errChainFileFault) && !countedByCRLLayer && !stopped {
 			c.crlUpdateFailures.Add(1)
 		}
 		return false, err

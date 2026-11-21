@@ -774,9 +774,10 @@ var _ = Describe("Delayed supersession", func() {
 	// on the same deadline clears the whole backlog. The spec is kept, aimed at
 	// the property that replaced it — every other sweep spec runs on
 	// context.Background(), so without this one nothing exercises the sweep
-	// with a deadline near enough to matter at all. ReconcileSuperseded's own
-	// WithTimeout keeps an earlier parent deadline, so the short context here
-	// really is the one the pass runs under.
+	// with a deadline near enough to matter at all. Since #347 the deadline
+	// here governs the pass between steps, and each step runs on a budget of
+	// its own, so what the spec pins is that a pass on a short deadline still
+	// finishes a backlog that fits in one step.
 	Describe("ReconcileSuperseded on a deadline that used to ration the pass", func() {
 		It("drains the whole backlog rather than deferring part of it", func() {
 			first := issue("node-y")

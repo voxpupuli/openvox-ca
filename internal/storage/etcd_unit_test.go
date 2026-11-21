@@ -333,16 +333,16 @@ var _ = Describe("EtcdInventoryDecodeCorruptKeyspace", func() {
 	})
 })
 
-// EtcdPruneBacklogGrowing pins the log-level decision the operator docs
-// advertise: a deferral larger than one whole call's removal capacity means
-// the backlog is growing at the current cleanup cadence and warrants a
-// warning rather than an informational line.
+// EtcdPruneBacklogGrowing pins the log-level decision for a deferral: one
+// larger than a whole call's removal capacity warrants a warning rather than
+// an informational line. The CA's cleanup no longer asks for that much (#347),
+// so this guards the backend's own contract for any caller that does.
 var _ = Describe("EtcdPruneBacklogGrowing", func() {
 	It("warns only when more is deferred than a full call can remove", func() {
 		capacity := etcdPruneMaxBatchesPerCall * etcdPruneBatch
 		Expect(pruneBacklogGrowing(0, capacity)).To(BeFalse())
-		Expect(pruneBacklogGrowing(capacity, capacity)).To(BeFalse(), "a backlog one run can clear is not growing")
-		Expect(pruneBacklogGrowing(capacity+1, capacity)).To(BeTrue(), "beyond one run's capacity the backlog outpaces the cadence")
+		Expect(pruneBacklogGrowing(capacity, capacity)).To(BeFalse(), "a deferral one call can clear stays informational")
+		Expect(pruneBacklogGrowing(capacity+1, capacity)).To(BeTrue(), "a deferral beyond one call's capacity warns")
 	})
 })
 

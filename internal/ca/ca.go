@@ -339,6 +339,11 @@ type CA struct {
 	// unbounded, as for signSlots. See acquireAutosignSlot.
 	autosignSlots chan struct{}
 
+	// sweep sizes the steps the background sweeps take the CRL lock in. The
+	// zero value means the defaults; specs override it, as they do signWait.
+	// See crlyield.go.
+	sweep sweepTuning
+
 	// signWait is how long acquireSigningSlotOrShed waits for a slot before
 	// shedding. Set to ocspSigningWait by initSigningBound; overridden in tests
 	// so a spec that must observe a shed does not spend a real second doing it,
@@ -417,6 +422,11 @@ type CA struct {
 	// superseded certificate may still be a valid credential. Exposed via the
 	// metrics exporter (openvoxca_crl_update_failures_total) for alerting.
 	crlUpdateFailures atomic.Uint64
+
+	// ready is set once CACert and CAKey are both loaded, so IsReady can answer
+	// without c.mu. Neither is ever cleared once set, so it only goes from
+	// false to true; see markReadyLocked.
+	ready atomic.Bool
 
 	// crlSyncFailures counts failures to refresh the in-memory CRL from storage
 	// (see SyncCRLCache): an unreadable or unparseable stored CRL, or one this
@@ -680,11 +690,22 @@ func (c *CA) CRLUpdated() <-chan struct{} {
 	return c.crlNotify
 }
 
-// IsReady reports whether the CA has been fully initialized and can serve requests.
+// IsReady reports whether the CA has been fully initialized and can serve
+// requests. It takes no lock: the readiness probe, the metrics collector and
+// the API all ask it, and none of them may wait behind work that holds c.mu,
+// such as a background cleanup step, which holds it for up to a step's budget
+// by design (#347). A probe that failed for that long would take the replica
+// out of its Service during routine maintenance.
 func (c *CA) IsReady() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.CACert != nil && c.CAKey != nil
+	return c.ready.Load()
+}
+
+// markReadyLocked records for IsReady that the CA certificate and key are both
+// loaded. The caller holds c.mu for writing, as every assignment of either does.
+func (c *CA) markReadyLocked() {
+	if c.CACert != nil && c.CAKey != nil {
+		c.ready.Store(true)
+	}
 }
 
 // LoadKey loads the CA private key and certificate from disk without full

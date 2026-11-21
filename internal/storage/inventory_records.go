@@ -291,10 +291,12 @@ func latestPerSubject(recs []indexedRecord, stored map[string]bool, ambiguous fu
 }
 
 // pruneBacklogGrowing reports whether a prune's deferred-match count exceeds
-// perCall, what one whole call can remove — the signal that, at the current
-// cleanup cadence, the backlog is growing rather than draining, which the
-// deferral log escalates to a warning. Below that threshold a deferral is
-// expected (a one-off backlog draining over several runs) and logs at info.
+// perCall, what one whole call can remove, which the deferral log escalates to
+// a warning. Below that threshold a deferral is expected (a one-off backlog
+// draining over several calls) and logs at info. The CA's cleanup asks for at
+// most sweepStepEntries (internal/ca, 100) entries a call since #347, well
+// under either backend's cap, so it reaches neither branch; they guard a
+// caller that asks for more.
 func pruneBacklogGrowing(deferred, perCall int) bool {
 	return deferred > perCall
 }

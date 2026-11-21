@@ -26,6 +26,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -118,9 +119,30 @@ var _ = Describe("refreshCRLChainOnce", func() {
 		Expect(os.WriteFile(path, []byte("-----BEGIN X509 CRL-----\nZm9v\n-----END X509 CRL-----\n"), 0o644)).To(Succeed())
 		myCA.CRLChainFile = path
 
-		Expect(func() { refreshCRLChainOnce(ctx, myCA, path) }).NotTo(Panic())
+		var out string
+		Expect(func() {
+			out = captureLogs(slog.LevelInfo, func() { refreshCRLChainOnce(ctx, myCA, path) })
+		}).NotTo(Panic())
 		Expect(myCA.CRLChainFailures()).To(BeNumerically("==", 1),
 			"a refusal that is not counted is a refusal nothing can alert on")
+		Expect(out).To(ContainSubstring("Could not refresh the upstream CRL chain"),
+			"the line the shutdown spec's absence check names must exist")
+	})
+
+	It("logs a pass that a shutdown ended as stopped, not failed", func() {
+		path := filepath.Join(GinkgoT().TempDir(), "chain.pem")
+		Expect(os.WriteFile(path, nil, 0o600)).To(Succeed())
+		myCA.CRLChainFile = path
+		holdCRLLock(store)
+
+		out := captureLogs(slog.LevelInfo, func() {
+			passCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			time.AfterFunc(100*time.Millisecond, cancel)
+			refreshCRLChainOnce(passCtx, myCA, path)
+		})
+		Expect(out).To(ContainSubstring("CRL chain refresh stopped by shutdown"))
+		Expect(out).NotTo(ContainSubstring("Could not refresh the upstream CRL chain"))
 	})
 })
 

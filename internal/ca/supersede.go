@@ -240,7 +240,11 @@ func (c *CA) recordSuperseded(ctx context.Context, subject, serial string, after
 	// and makes the stored form the same one every reader computes.
 	serial = canonical
 	revokeAt := time.Now().UTC().Add(after)
-	err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
+	// Neutral rather than a priority caller: this revokes nothing, and every
+	// agent renewal comes here by default, so a stream of them would otherwise
+	// hold off the sweep that does the revoking, and the CRL refresh with it,
+	// for as long as it lasted (#347).
+	err := c.Storage.WithLockNeutral(ctx, lockNameCRL, func() error {
 		entries, _, err := c.readSuperseded(ctx)
 		if err != nil {
 			// Appending to what we could not read would write a one-entry list
@@ -292,17 +296,31 @@ func (c *CA) recordSuperseded(ctx context.Context, subject, serial string, after
 //
 // # Lock discipline
 //
-// The whole read-modify-write and the revocations it drives run under the
+// Each step's read-modify-write and the revocations it drives run under the
 // cluster CRL lock — the same lock recordSuperseded appends under, and the same
 // one revokeSerialLocked requires. One acquisition covers all three, so the
 // order stays subject → crl → c.mu and this adds no new nesting. On the
 // single-node backends the window this closes is invisible; on etcd, Redis or
 // SQL — the multi-replica deployments delayed supersession exists for — it is
 // real.
+//
+// A pass works in steps of at most sweepStepEntries due entries, each its own
+// acquisition taken through WithLockYielding and held for at most
+// sweepStepBudget, plus any CA signature in flight (#347). A revocation in this
+// process does not queue behind a step that has not taken the lock, unless that
+// step is already waiting on another process, and waits for at most the step in
+// progress. One on another replica waits for that step and for any step another
+// replica already has queued; locking.md's known gaps say what each of those
+// leaves. Each step writes back its own survivors, so stopping between steps
+// loses nothing. ctx ends the pass between steps and ends a step's wait for the
+// lock, but never a step that holds it; see sweepStep. A pass that ctx ends is
+// not counted as a failure: what it did not reach is still listed, and the next
+// pass reaches it.
+//
+// The lock is taken directly rather than through withCRLLockYielding, so a
+// failure to take it moves supersedeFailures below and not crlUpdateFailures,
+// as it always has.
 func (c *CA) ReconcileSuperseded(ctx context.Context) (int, error) {
-	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
-	defer cancel()
-
 	// Fast path, before the lock: the overwhelming majority of deployments
 	// never enable a window, and this job runs on every replica every interval
 	// forever. Acquiring a cluster-wide lock to discover an absent key would
@@ -314,14 +332,97 @@ func (c *CA) ReconcileSuperseded(ctx context.Context) (int, error) {
 	// one must reach the locked path: the first needs counting, the second
 	// needs overwriting. An append landing just after this read is picked up on
 	// the next tick, which the interval already tolerates by design.
-	if data, err := c.loadSuperseded(ctx); err == nil {
+	readCtx, cancelRead := context.WithTimeout(ctx, c.sweepStepBudget())
+	data, err := c.loadSuperseded(readCtx)
+	cancelRead()
+	if err == nil {
 		if entries, perr := parseSuperseded(data); perr == nil && len(entries) == 0 {
 			return 0, nil
 		}
 	}
 
 	var revoked int
-	err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
+	var leftBehind bool
+	progress := newSweepProgress("Superseded-certificate revocation sweep", "revoked")
+	for {
+		if err = ctx.Err(); err != nil {
+			break
+		}
+		var step supersedeStepOutcome
+		step, err = c.reconcileSupersededStep(ctx)
+		revoked += step.revoked
+		leftBehind = leftBehind || step.leftBehind
+		// A step whose batch could not be written ends the pass. That says
+		// the CRL cannot be amended right now rather than anything about those
+		// entries, and the entries it failed go back on the list still due,
+		// so the next step would only pick them up and fail again. Stopping
+		// also keeps a failing pass to one crl_update_failures increment
+		// however large the backlog, which OpenVoxCACRLUpdateFailing's
+		// description relies on. The next pass retries them.
+		if err != nil || !step.more || step.unwritten {
+			break
+		}
+		progress.step(revoked)
+		if err = c.pauseBetweenSweepSteps(ctx); err != nil {
+			break
+		}
+	}
+
+	// A pass that left certificates past their window unrevoked is the
+	// condition this counter exists to surface, for either of the two reasons
+	// that can now produce one: a batch that could not be written, and an entry
+	// discarded as unrevocable. Without it a backlog looks like a high pending
+	// gauge that never falls and nothing else — and the gauge's own guidance
+	// sends the operator to this counter. Once per pass, however many steps it
+	// took.
+	if leftBehind {
+		c.supersedeFailures.Add(1)
+	}
+	// A pass that a shutdown ended, between steps or while a step waited for
+	// the lock, failed at nothing: every entry it did not reach is still on
+	// the list. Counting it would make every restart during a backlog look
+	// like the storage fault the counter's alert is for. Cancellation only, as
+	// for the other background jobs: a caller's deadline that ran out is a
+	// pass that did not finish, and is counted.
+	stopped := StoppedByShutdown(ctx, err)
+	if err != nil && !stopped {
+		// A pass that could not take the lock, could not read the list, or
+		// could not write it back left every entry it had not yet reached
+		// unrevoked. Counted here, once per pass, so the one alert that bounds
+		// this exposure can fire: without it a storage fault that blocks every
+		// sweep leaves both new signals reading clean — a flat counter and,
+		// because an unreadable list is not a drained one, a pending gauge that
+		// has to be omitted rather than reported as zero. readSuperseded's parse
+		// arm counts separately and does not return an error, so this cannot
+		// double-count it.
+		c.supersedeFailures.Add(1)
+	}
+	return revoked, err
+}
+
+// supersedeStepOutcome is what one step of ReconcileSuperseded reports to the
+// pass driving it.
+type supersedeStepOutcome struct {
+	// revoked is how many certificates the step put on the CRL.
+	revoked int
+	// leftBehind reports that the step left a due entry unrevoked or
+	// discarded one; see the counter in ReconcileSuperseded.
+	leftBehind bool
+	// unwritten reports that the step's batch could not be put on the CRL.
+	unwritten bool
+	// more reports that due entries remain beyond those this step took.
+	more bool
+}
+
+// reconcileSupersededStep is one step of ReconcileSuperseded: it revokes at most
+// sweepStepEntries due entries, oldest first, and writes the list back with
+// everything still owed a revocation.
+func (c *CA) reconcileSupersededStep(parent context.Context) (supersedeStepOutcome, error) {
+	var out supersedeStepOutcome
+	lock := func(ctx context.Context, fn func() error) error {
+		return c.Storage.WithLockYielding(ctx, lockNameCRL, fn)
+	}
+	err := c.sweepStep(parent, lock, func(ctx context.Context) error {
 		entries, corrupt, err := c.readSuperseded(ctx)
 		if err != nil {
 			return err
@@ -356,47 +457,43 @@ func (c *CA) ReconcileSuperseded(ctx context.Context) (int, error) {
 
 		// Oldest first. This used to be what made stopping part-way safe, when
 		// a pass could run out of deadline mid-drain; since #176 batched the
-		// re-sign a pass attempts every due entry or none of them, so what it
-		// buys now is a deterministic order for the entries the batch appends
-		// to the CRL — the same list, swept on two replicas, produces the same
-		// sequence of revocation entries rather than one that depends on the
-		// order the store happened to return.
+		// re-sign a step attempts every entry it selects or none of them, so
+		// what it buys now is which entries a step selects when there are more
+		// than it takes, and a deterministic order for the entries the batch
+		// appends to the CRL — the same list, swept on two replicas, produces
+		// the same sequence of revocation entries rather than one that depends
+		// on the order the store happened to return.
 		sort.Slice(due, func(i, j int) bool { return due[i].RevokeAt.Before(due[j].RevokeAt) })
+		if limit := c.sweepStepEntries(); len(due) > limit {
+			out.more = true
+			pending = append(pending, due[limit:]...)
+			due = due[:limit]
+		}
 
+		// The drain gets half of what remains of the step and the write-back
+		// the rest. The write-back has to survive a drain that ran out of time,
+		// or the step loses its own bookkeeping: entries it revoked would stay
+		// on the list, the pending gauge would never fall, and every later pass
+		// would re-walk them. Splitting the hold's budget keeps that time for it
+		// without holding the lock past the budget, which is what a concurrent
+		// revocation waiting on this lock is counting on.
+		drainCtx, cancelDrain := shareOfStep(ctx)
+		defer cancelDrain()
 		outcome := func() drainOutcome {
 			c.mu.Lock()
 			defer c.mu.Unlock()
-			return c.drainDueLocked(ctx, due)
+			return c.drainDueLocked(drainCtx, due)
 		}()
-		revoked = outcome.revoked
+		out.revoked = outcome.revoked
 
-		// A pass that left certificates past their window unrevoked is the
-		// condition this counter exists to surface, for either of the two
-		// reasons that can now produce one: a batch that could not be written,
-		// and an entry discarded as unrevocable. Without it a backlog looks like
-		// a high pending gauge that never falls and nothing else — and the
-		// gauge's own guidance sends the operator to this counter.
-		//
 		// outcome.deferred is still tested rather than dropped from the
-		// condition, because drainOutcome keeps the field for a future
-		// implementation that has to stop part-way; see its godoc. It is always
-		// empty today, so the middle term never fires.
-		if len(outcome.failed) > 0 || len(outcome.deferred) > 0 || outcome.discarded > 0 {
-			c.supersedeFailures.Add(1)
-		}
-		// The drain may have spent most (or, on a deadline error, all) of ctx's
-		// budget, and that is exactly when a partial pass is most likely. The
-		// write-back has to survive it or the pass loses its own bookkeeping:
-		// entries it revoked would stay on the list, the pending gauge would
-		// never fall, and every later pass would re-walk them — a re-walk that
-		// now costs one CRL read for the whole pass rather than one per entry,
-		// but is still a pass that can never finish — while holding the CRL lock
-		// for the full budget. Same reasoning, and the same modest budget, as
-		// CleanupExpiredCerts gives its post-prune cleanup: the CRL lock is
-		// still held, and a concurrent revocation waits on it with a LockTimeout
-		// of its own.
-		writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), LockTimeout/2)
-		defer cancelWrite()
+		// condition, because drainOutcome keeps the field; see its godoc. It is
+		// always empty today, so the middle term never fires. The entries a
+		// step leaves for the next one do not go through it: they are not owed
+		// a failure count, and they are carried in pending instead.
+		out.leftBehind = len(outcome.failed) > 0 || len(outcome.deferred) > 0 || outcome.discarded > 0
+		out.unwritten = len(outcome.failed) > 0
+
 		// Built explicitly rather than by chained appends: pending, failed and
 		// deferred each have their own backing array, and a chained append can
 		// write into one of them. Everything still owed a revocation goes back.
@@ -404,20 +501,9 @@ func (c *CA) ReconcileSuperseded(ctx context.Context) (int, error) {
 		keep = append(keep, pending...)
 		keep = append(keep, outcome.failed...)
 		keep = append(keep, outcome.deferred...)
-		return c.writeSuperseded(writeCtx, keep)
+		return c.writeSuperseded(ctx, keep)
 	})
-	if err != nil {
-		// A pass that could not take the lock, could not read the list, or
-		// could not write it back left every entry unrevoked. Counted here, once
-		// per pass, so the one alert that bounds this exposure can fire: without
-		// it a storage fault that blocks every sweep leaves both new signals
-		// reading clean — a flat counter and, because an unreadable list is not
-		// a drained one, a pending gauge that has to be omitted rather than
-		// reported as zero. readSuperseded's parse arm counts separately and
-		// does not return an error, so this cannot double-count it.
-		c.supersedeFailures.Add(1)
-	}
-	return revoked, err
+	return out, err
 }
 
 // retireSupersededForSubjectLocked revokes every pending entry recorded for
@@ -522,11 +608,16 @@ func (c *CA) retireSupersededForSubjectLocked(ctx context.Context, subject strin
 // than removed. It existed because N entries cost N re-signs, so a large
 // backlog could not fit in one lock hold; one re-sign for all of them removes
 // the budget problem that produced it. What it still buys is the shape of the
-// contract: a future implementation that has to stop part-way — a chunked batch
-// for a backlog too large for one CRL, say — reports it here without reshaping
-// the caller, and the write-back that carries it forward is already written and
-// already specified. Nothing sets it today, and the specs assert that it stays
-// empty.
+// contract: a drain that has to stop part-way reports it here without
+// reshaping the caller, and the write-back that carries it forward is already
+// written and already specified. Nothing sets it today, and the specs assert
+// that it stays empty.
+//
+// #347's steps are not that case and do not use it. A step takes at most
+// sweepStepEntries due entries before the drain starts and puts the rest back
+// in pending, so the drain itself never stops part-way. Routing them through
+// deferred instead would count every multi-step pass as one that left entries
+// behind.
 type drainOutcome struct {
 	revoked   int
 	failed    []supersededEntry

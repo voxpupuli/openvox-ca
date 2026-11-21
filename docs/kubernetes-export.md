@@ -11,8 +11,9 @@ volume.
 - The data keys, name, namespace, labels, annotations, and a Secret's `type`
   field are all configurable.
 - CRL-bearing targets are **re-exported whenever the CRL changes** (revoke,
-  reissue, background refresh, expired-cert cleanup). All targets are also
-  reconciled **once at startup**.
+  reissue, background refresh, expired-cert cleanup). A sweep working through a
+  large backlog changes the CRL once a step, so it re-exports once a step too.
+  All targets are also reconciled **once at startup**.
 
 The feature is **disabled by default**; it activates only when at least one
 target is configured.

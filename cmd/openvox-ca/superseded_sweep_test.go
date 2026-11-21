@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"time"
 
@@ -74,6 +75,31 @@ var _ = Describe("sweepSupersededOnce", func() {
 		sweepSupersededOnce(context.Background(), c)
 		Expect(crlLists(store, serial)).To(BeTrue(),
 			"a due entry should be on the CRL once the sweep has run")
+	})
+
+	It("logs a pass that failed as failed", func() {
+		c, store, be := newPutFailingTestCA(storage.KeySuperseded)
+		seedDueSupersession(store, "due-node", big.NewInt(0xABCDF1))
+		be.fail.Store(true)
+
+		out := captureLogs(slog.LevelInfo, func() { sweepSupersededOnce(context.Background(), c) })
+		Expect(out).To(ContainSubstring("Superseded-certificate revocation sweep failed"))
+		Expect(out).NotTo(ContainSubstring("stopped by shutdown"))
+	})
+
+	// The OpenVoxCASupersedeFailing runbook reads the sweep's warning as a
+	// storage fault, so a pass that a shutdown ended must not emit it.
+	It("logs a pass that a shutdown ended as stopped, not failed", func() {
+		c, store := newRefresherTestCA()
+		seedDueSupersession(store, "due-node", big.NewInt(0xABCDF0))
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		out := captureLogs(slog.LevelInfo, func() { sweepSupersededOnce(ctx, c) })
+		Expect(out).To(ContainSubstring("stopped by shutdown"))
+		Expect(crlLists(store, big.NewInt(0xABCDF0))).To(BeFalse(),
+			"a pass the shutdown ended before its first step revoked nothing")
+		Expect(out).NotTo(ContainSubstring("sweep failed"))
 	})
 })
 

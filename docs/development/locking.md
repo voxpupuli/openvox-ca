@@ -262,6 +262,97 @@ that reached the CRL work and does not count one refused at lock acquisition
 same-host acquisition that outlasts the deadline does fail at acquisition, and
 so is not counted — the one place where the split moved.
 
+#### Revocations go before background work
+
+A revocation always wins over a background job on the CRL lock
+([#347](https://github.com/voxpupuli/openvox-ca/issues/347)). Two mechanisms
+make that hold, and it needs both of them.
+
+**Priority by default, in this process.** `StorageService.WithLock` registers
+each caller for its name while it waits and while it holds the lock.
+`StorageService.WithLockYielding` takes the same name through the same tiers,
+but it does not queue while a `WithLock` caller in this process is registered.
+If one registers while it is queueing, it releases the lock it was granted and
+waits again. It is not a second lock. The name, its key and its file are
+unchanged, the two methods exclude each other as two `WithLock` calls do, and
+other replicas see nothing new. Priority is the default and yielding is opt-in,
+so a foreground operation added later is protected without anyone remembering
+to mark it.
+
+The four background jobs that write the CRL take it through
+`WithLockYielding`: `CleanupExpiredCerts`, `ReconcileSuperseded`,
+`RefreshCRLIfDue` and `RefreshCRLChainFile`. Every other acquisition of `crl`
+is foreground. What decides which side a job is on is whether anyone is
+waiting on it. Work an operator or a correctness path is waiting on keeps
+`WithLock`: `Revoke`, `RevokeSerial`, `ReissueCRL`, and `ReconcileManaged`'s
+rollback and the retirements it revokes inline, though that job runs on a
+timer. Scheduled work whose timing is already approximate yields: expiry
+pruning, the CRL refresh and the chain refresh, and the delayed-supersession
+sweep, whose revocations are owed after a window anyway and which #347 names as
+a sweep.
+
+Recording a supersession is neither. `recordSuperseded`, the retire step of
+`Renew`, `AutoRenew`, `RenewStored` and `ReconcileManaged` while the window is
+open, takes `crl` through `WithLockNeutral`. A client is waiting on it, so it
+does not yield, but it revokes nothing, so it does not go first either: it
+queues as every caller did before #347. Every agent renewal comes here by
+default, and as priority callers a stream of them could hold the background
+jobs off for as long as it lasted, among them the sweep that does the revoking.
+A retirement with the window closed revokes inline and keeps `WithLock`.
+
+**Bounded holds.** Yielding happens before a job takes the lock, and it is not
+pre-emptive: a revocation that arrives after a job's critical section has
+started waits for it to end. So no background hold may outlast a fixed budget,
+`sweepStepBudget` (a quarter of `lockTimeout`) in
+[crlyield.go](../../internal/ca/crlyield.go). The two sweeps work in steps of at
+most `sweepStepEntries` entries, through `CA.sweepStep`, and the two refresh
+jobs run as a single step each through it. Each step is its own
+acquisition, complete on its own: what it prunes it also drops from the CRL,
+and what it revokes it also writes back. Stopping between steps loses nothing.
+A step has two budgets, both `sweepStepBudget`. The wait for the lock runs on
+the job's context, so a shutdown ends it. The hold runs on a context detached
+from the job's, so a shutdown cannot cut a step off between a durable write and
+its bookkeeping, and its budget starts when the lock is granted, so a step that
+waited long still has all of it. The detachment happens *before* the lock is
+taken, and the hold's budget is fixed at acquisition. A step that needs two
+phases under the lock splits that budget between them rather than adding to
+it. A pass that a shutdown ends is not a failed pass. Before #347 both sweeps
+held the lock for a `lockTimeout` and then gave their post-prune work a further
+`lockTimeout/2` on a context detached inside the lock. A revocation waiting
+with a `lockTimeout` of its own could lose to that, and the managed-certificate
+rollback, waiting with half of one, lost to it by a wide margin.
+`crlyield_internal_test.go` fails if a CRL-lock closure derives a detached
+context again, by `context.WithoutCancel` or by starting from
+`context.Background` or `context.TODO`. It cannot see a closure that re-times a
+context detached before the lock, which only `CA.sweepStep` may do, once, at
+acquisition.
+
+One thing inside a hold does not honour its budget: the CA signature. A step
+that changes the CRL re-signs it, and the signer takes no context, so a
+signature that starts just before the budget ends runs to its own bound. That
+is about 10 s under `ca_key_provider: openbao` (roughly twice that when it has
+to log in again) and two minutes for the isolated signer, against a healthy
+signer's milliseconds. A step's hold is therefore `sweepStepBudget` plus at
+most one signature in flight. See [Known gaps](#known-gaps).
+
+The budget is pinned against the smallest revocation budget, the managed
+rollback's `lockTimeout/2`, which the spec reads out of `managedcert.go` rather
+than restating. A revocation that waits out one step keeps at least half of
+that, given a signer that answers in well under a step.
+
+**Across replicas the guarantee is weaker.** A revocation on another replica,
+or in another process on the host, is invisible to the gate. It waits for the
+step in progress, and also for every step other replicas already have queued
+ahead of it, so the worst case grows with the number of replicas sweeping at
+once. Between steps a sweep pauses for `sweepStepPause` (1 s), which stops a
+replica's own next step jumping the queue. On backends that queue lock waiters
+(etcd, and in practice PostgreSQL) a waiting revocation is granted the lock in
+its turn. MySQL behaves the same way while the waiter is inside one of its
+one-second `GET_LOCK` waits, and the pause covers the moment between two of
+them. Redis is the backend the pause is for: it polls with a backoff of up to
+`RedisLockPollMaxBackoff` (500 ms), so a sweep that re-queued at once would
+usually win the lock back. See [Known gaps](#known-gaps).
+
 ### Tier 2: storage-service mutexes
 
 `StorageService` guards each family of logical keys with its own process-local
@@ -300,9 +391,12 @@ without carrying the suffix.
 ### Tier 3: CA in-memory state (`c.mu`)
 
 `ca.CA.mu` protects the fields that make the hot read paths fast:
-`CACert`/`CAKey` (readiness), `serialIndex` (OCSP subject lookup), `ocspCache`
-(pre-signed responses), and `cachedCRL` (revocation checks for authentication
-without a storage round-trip).
+`CACert`/`CAKey`, `serialIndex` (OCSP subject lookup), `ocspCache` (pre-signed
+responses), and `cachedCRL` (revocation checks for authentication without a
+storage round-trip). Readiness reads none of them: `IsReady` reads an atomic
+flag set once the certificate and key are both loaded, and takes no lock, so
+no holder of `c.mu`, a background cleanup step included, can fail the readiness
+probe (#347).
 
 Mutating operations hold `c.mu` (write) across the storage mutation *and* the
 cache update, so within a process the caches can never be observed out of step
@@ -749,7 +843,8 @@ path — still provides no cross-replica guarantee anyway.
 12. **A new nesting is protocol too, not only a new name.** Rule 7 covers
     defining and documenting a lock *name*; this covers holding two of them at
     once. Any pair of **two different** named locks that the **CA layer** can
-    hold simultaneously through `StorageService.WithLock` must appear both in
+    hold simultaneously through any of `StorageService.WithLock`,
+    `WithLockYielding` or `WithLockNeutral` must appear both in
     the **Lock ordering** section above and in `allowedLockNesting` in
     [lockorder_test.go](../../internal/ca/lockorder_test.go), added together —
     a pair in only one is drift. **The obligation is unconditional; the
@@ -770,17 +865,96 @@ path — still provides no cross-replica guarantee anyway.
     `bootstrap` over the source store and then over the destination, which the
     Lock ordering section documents and the table cannot express, because pairs
     are keyed by name and `("bootstrap", "bootstrap")` would read as a
-    self-nesting it is not. **CA layer, through `WithLock`**: `bootstrap` →
-    `sql-schema-migrate` is a live nesting reached from `MigrateService`, but
+    self-nesting it is not. **CA layer, through the `WithLock` family**:
+    `bootstrap` → `sql-schema-migrate` is a live nesting reached from
+    `MigrateService`, but
     `EnsureReady` takes that name through `Backend.AcquireLock`, so no
     `WithLock`-level observer can see it; it stays governed by rules 7 and 9.
     Do not add either pair to satisfy this rule — adding them would make the
     table claim coverage it does not have.
+13. **Background work on the CRL lock yields, in bounded steps.** Scheduled
+    work on `crl` whose timing is already approximate — expiry pruning, the
+    CRL refresh, the chain refresh, the delayed-supersession sweep — takes it
+    through `WithLockYielding`, through `withCRLLockYielding` in the CA if a
+    failure to take it should move `crl_update_failures`. Each hold is bounded by
+    `sweepStepBudget`; a sweep takes its steps through `CA.sweepStep`. Do not
+    derive a detached context inside the closure to finish work the budget did
+    not cover: make the work resumable and do it in a later step, or split the
+    hold's budget between its phases. Work an operator or a correctness path
+    is waiting on keeps plain `WithLock` however it is scheduled —
+    `ReconcileManaged` runs on a timer, but its rollback is the compensating
+    action for a certificate it could not store, and moving it onto the
+    yielding path would reopen #347 for exactly that case. So do `ReissueCRL`
+    and the CA import, which an operator calls, though neither revokes
+    anything. Work a client waits on that revokes nothing and arrives at
+    request volume takes the lock through `WithLockNeutral` instead, neither
+    going first nor yielding: as priority callers, a stream of such calls could
+    hold the background jobs off for as long as it lasted. Recording a
+    supersession, which every agent renewal does, is the one such case, and
+    the spec "lets only the recording of a supersession take the CRL lock
+    neutrally" lists it. A new yielding job goes into the allowlist in
+    `crlyield_internal_test.go`'s "lets only the background jobs take the CRL
+    lock by yielding", which fails until it is listed, and the same file's
+    "finds no detached context derived inside a CRL-lock closure" checks the
+    no-detached-context rule above. See
+    [Revocations go before background work](#revocations-go-before-background-work).
 
 ## Known gaps
 
 Concurrency limitations that are understood and tracked. This list reflects the
 state when the document was last updated and is not guaranteed exhaustive.
+
+- **A slow CA signature extends a background hold.** A step's hold is bounded
+  by `sweepStepBudget` for everything that honours its context, and the CA
+  signature does not: `signCRLLocked` calls a `crypto.Signer`, which takes
+  none. A step whose re-sign starts late holds the lock until the signer
+  answers or its own timeout fires — about 10 s on OpenBao, two minutes for
+  the isolated signer. A revocation queued behind it waits as long. Bounding
+  it would mean skipping a re-sign that cannot fit and carrying its serials to
+  the next step, which #347 did not do.
+- **An in-process revocation can queue behind a step already waiting on
+  another process.** Every lock tier takes a per-name process-local mutex
+  before its cross-process wait. A yielding step that passed the gate and is
+  waiting there for another replica (or an `openvox-ca-ctl` command) holds
+  that mutex, so a revocation in this process that arrives then waits until
+  the step is granted the lock and gives it back, and then queues behind
+  whatever arrived meanwhile. It never waits for the step's hold. The wait is
+  bounded by the step's own wait budget, `sweepStepBudget`.
+- **A background step's own wait can run out behind other replicas' steps.** A
+  step waits for the lock for at most `sweepStepBudget`, the same budget that
+  bounds another replica's hold, where these jobs used to wait a `lockTimeout`.
+  With several replicas running long passes at once, a step queued behind two
+  of theirs can run out of it. The error then names the backend's lock
+  acquisition rather than a priority caller, and counts in
+  `crl_update_failures` or `supersede_failures` as a storage fault would. It is
+  contention while other replicas log cleanup or sweep progress. Lengthening
+  the wait would lengthen the in-process wait described above.
+- **A revocation on another replica has no priority over a sweep.** The gate in
+  front of `crl` sees callers in its own process only. A revocation that queues
+  on one replica behind sweep steps on others waits for the step in progress
+  and for every step queued ahead of it, each at most `sweepStepBudget`, and on
+  Redis it can lose the next acquisition too if its poll misses the pause
+  between steps. With three or more replicas sweeping a large backlog at once
+  that can use up the managed-certificate rollback's `lockTimeout/2`. The
+  priority does not hold across replicas, and the bound per step is all there
+  is. Giving it across replicas would need a signal
+  in the store, which is protocol, and #347 chose not to add one.
+- **Foreground CRL work holds the background jobs off for as long as it
+  lasts.** A yielding job needs a moment with no `WithLock` caller on `crl`
+  registered in this process, from its wake through its acquisition. A
+  sustained run of revocations, cleans or reissues gives it none, so each job
+  waits out its step budget, pass after pass, until the run ends. Renewals
+  recording supersessions are not part of it, because they take the lock
+  neutrally. Bounding it would mean letting a job that has waited long enough
+  stop standing aside, so that a revocation could then wait a step for it;
+  #347 kept the revocation first.
+- **A cleanup step's prune has a fixed ceiling.** `PruneInventory` reads and
+  verifies the whole inventory however few entries a step selects, and the
+  prune gets half of `sweepStepBudget`, about 7.5 s. An inventory too large to
+  prune in that time is never pruned: every pass fails the same way, with an
+  error naming the step's share. Raising the share or the budget would lengthen
+  the wait the step bounds; the ceiling is the price of that bound, and
+  `docs/configuration.md` gives operators measured figures for it.
 
 - ~~[#197](https://github.com/voxpupuli/openvox-ca/issues/197) — OCSP's slow
   path signs responses while holding `c.mu` exclusively, so nonced requests
@@ -1136,6 +1310,19 @@ unlock-error handling are covered in
 [withlock_test.go](../../internal/storage/withlock_test.go); each distributed
 implementation's mutual exclusion is exercised in its backend integration
 suite (build-tagged; see [testing](testing.md)).
+
+The priority gate is covered in
+[withlockyielding_test.go](../../internal/storage/withlockyielding_test.go):
+a `WithLock` caller goes before a yielding one whatever the arrival order, a
+lock granted while one registered is handed back, every woken caller runs and
+one woken too early parks again, a failed acquisition, an abandoned wait or a
+panic leaves the gate clear, a neutral caller neither registers nor parks, and
+each entry point releases the lock when its closure panics.
+[crlyield_internal_test.go](../../internal/ca/crlyield_internal_test.go) holds
+rule 13's: a revocation commits within one step of a stalled cleanup or
+supersession sweep, each background job lets a waiting revocation go first, the
+step budgets and their relation to the revocation budgets, and the three
+structural gates the rule names.
 
 The same-host tier is covered in
 [filelock_test.go](../../internal/storage/filelock_test.go), which runs in the

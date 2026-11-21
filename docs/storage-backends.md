@@ -591,16 +591,15 @@ etcd_tls_key_file:  /etc/openvox-ca/etcd-client-key.pem
   etcd transaction are split into multiple transactions; batch sizes stay
   well under etcd's default `--max-txn-ops` (128), so no cluster tuning is
   needed. Every *prune* transaction leaves the inventory and its integrity
-  head consistent, and a single expired-certificate cleanup pass removes at
-  most 900 entries so a large backlog drains over several runs rather than
-  stalling signing. At the default daily cleanup interval that is 900
-  entries/day: enabling cleanup for the first time on a large backlog, or
-  running a fleet whose expiry churn exceeds it, calls for a shorter
-  `expired_cert_cleanup_interval_sec` — the server logs every deferral, and
-  escalates to a warning once the deferred backlog exceeds what a whole pass
-  can remove, which is the point at which the backlog is growing rather than
-  draining. An in-progress *conversion* is instead covered by its own resume
-  behaviour, in which the blob stays authoritative until it completes.
+  head consistent. The expired-certificate cleanup prunes in steps of at most
+  100 entries, each its own hold on the CRL lock with a second's pause
+  between them, and a pass keeps stepping until the backlog is gone, so the
+  interval no longer limits how fast a backlog drains. Each step reads the
+  whole inventory, though, so a first pass over a backlog of N expired
+  certificates reads it N/100 times rather than once. An in-progress
+  *conversion* is instead covered
+  by its own resume behaviour, in which the blob stays authoritative until it
+  completes.
 - **Legacy inventories with duplicate serial numbers** (possible, because the
   pre-conversion blob had no cluster-wide uniqueness guarantee) are imported
   verbatim with a startup warning naming the serials. The certificate index
@@ -753,17 +752,14 @@ redis_tls_key_file:  /etc/openvox-ca/redis-client-key.pem
   expect it to take a while (progress is logged).
 - **Bulk inventory rewrites are bounded.** Redis executes a Lua script
   atomically, blocking every other client for its duration, so an inventory
-  conversion is split into scripts of 512 records and a single
-  expired-certificate cleanup pass removes at most 5000 entries. Each pass is
-  atomic — the inventory and its integrity head are never observably out of
-  step — and a large backlog simply drains over several runs rather than
-  stalling signing. At the default daily cleanup interval that is 5000
-  entries/day: enabling cleanup for the first time on a large backlog, or
-  running a fleet whose expiry churn exceeds it, calls for a shorter
-  `expired_cert_cleanup_interval_sec` — the server logs every deferral, and
-  escalates to a warning once the deferred backlog exceeds what a whole pass
-  can remove, which is the point at which the backlog is growing rather than
-  draining.
+  conversion is split into scripts of 512 records. The expired-certificate
+  cleanup prunes in steps of at most 100 entries, each one atomic script — the
+  inventory and its integrity head are never observably out of step — and its
+  own hold on the CRL lock, with a second's pause between them. A pass keeps
+  stepping until the backlog is gone, so the interval no longer limits how
+  fast a backlog drains, but each step reads the whole inventory, so a first
+  pass over a backlog of N expired certificates reads it N/100 times rather
+  than once, each in a script that blocks the server.
 - **Legacy inventories with duplicate serial numbers** (possible, because the
   pre-conversion blob had no cluster-wide uniqueness guarantee) are imported
   verbatim with a startup warning naming the serials. The certificate index

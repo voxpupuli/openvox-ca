@@ -437,10 +437,11 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 		starts = starts[len(starts)-maxBatches:]
 		logFn := slog.Info
 		if pruneBacklogGrowing(starts[0], etcdPruneMaxBatchesPerCall*etcdPruneBatch) {
-			// More is deferred than a whole run can remove: at the current
-			// cleanup interval the backlog is growing, not draining. Make
-			// that visible rather than inferable — the operator's lever is
-			// shortening the cleanup interval.
+			// More is deferred than a whole call can remove. The CA's cleanup
+			// asks for at most sweepStepEntries (internal/ca, 100) entries a
+			// call since #347, so it never reaches this; the cap and its
+			// warning are a backstop for a caller that asks for more, and say
+			// so loudly when one does.
 			logFn = slog.Warn
 		}
 		logFn("Bounding inventory prune to keep it inside the caller's time budget; later runs will remove the rest",

@@ -393,11 +393,17 @@ func (c *CA) parseStoredCRL(ctx context.Context) (*storedCRL, error) {
 // run this concurrently only the first re-signs (pushing NextUpdate far out)
 // and the rest observe a fresh CRL and return (false, nil). This makes the
 // background refresh job safe to run on any number of replicas sharing storage.
+//
+// It is background work, so it runs as one sweep step through sweepStep and
+// withCRLLockYielding: a revocation waiting in this process goes first, one
+// arriving after it starts waits for no longer than a sweep step plus the CA
+// signature the refresh has in flight, and the re-sign gets the step's whole
+// budget however long it waited (#347). Its re-sign is the same one a
+// revocation makes, so yielding costs it nothing: a revocation that goes first
+// leaves a fresh CRL behind it.
 func (c *CA) RefreshCRLIfDue(ctx context.Context, refreshBefore time.Duration) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
-	defer cancel()
 	var reissued bool
-	err := c.withCRLLockCounted(ctx, func() error {
+	err := c.sweepStep(ctx, c.withCRLLockYielding, func(ctx context.Context) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
