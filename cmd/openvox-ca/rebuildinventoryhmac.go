@@ -408,12 +408,11 @@ is the safe way to inspect a CA that will not start.`,
 // order to decide whether re-asserting is the right response.
 //
 // It reports the scheme because a mismatch also fires when a store is served
-// under a different scheme than the value was written with (only builds of main
-// from before v1.0.0-alpha1 produced one), which is a different problem with a
-// different fix; the entry count and both head values because they are what the
-// new value would cover; and it stops there. It does not claim to say which
-// entry diverged: only one head is persisted, so nothing records what any
-// prefix should have hashed to.
+// under a different scheme than the value was written with, which is a
+// different problem with a different fix; the entry count and both head values
+// because they are what the new value would cover; and it stops there. It does
+// not claim to say which entry diverged: only one head is persisted, so nothing
+// records what any prefix should have hashed to.
 func reportInventoryIntegrity(w io.Writer, rep storage.InventoryIntegrityReport) {
 	_, _ = fmt.Fprintf(w, "\nInventory integrity\n")
 	_, _ = fmt.Fprintf(w, "  scheme:        %s\n", rep.Scheme)
