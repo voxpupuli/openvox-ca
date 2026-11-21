@@ -114,11 +114,9 @@ type Target struct {
 	CertKey string `yaml:"cert_key"`
 	CRLKey  string `yaml:"crl_key"`
 
-	// CertScope and CRLScope select how much of each chain to publish. Empty
-	// selects ScopeChain, so an existing target keeps publishing exactly what it
-	// published before these fields existed. On a CA storing a single
-	// certificate — every CA that issued its own root — self, chain and root are
-	// byte-identical anyway.
+	// CertScope and CRLScope select how much of each chain to publish. On a CA
+	// storing a single certificate — every CA that issued its own root — self,
+	// chain and root are byte-identical anyway.
 	//
 	// Both default to "chain": the stored blob verbatim. A "self" default would
 	// narrow a target silently, with no configuration choosing it -- a

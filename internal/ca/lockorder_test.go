@@ -57,7 +57,7 @@ import (
 // cannot give: it is a hand-maintained list of callers, so a *further* caller
 // that nests two lock names — or a first caller that nests two *different*
 // names — is protected by nothing until somebody remembers to extend it. #261 is the
-// worked example: it adds a `bootstrap` → `hmac-key` nesting that no existing
+// worked example: it added a `bootstrap` → `hmac-key` nesting that no existing
 // Entry would have noticed, and two of its review rounds were spent correcting
 // prose claims about which nestings exist.
 //
@@ -190,7 +190,9 @@ var subjectClass = lockSubjectPrefix + "<name>"
 // allowedLockNesting is the set of (outer, inner) tier-1 acquisitions the CA
 // layer is permitted to make, keyed by lock class. It is the machine-readable
 // form of docs/development/locking.md's **Lock ordering** section, and the
-// value is where that section says so.
+// value is where that section says so — except bootstrap → hmac-key, which
+// MigrateService takes across two stores and this table keys out of scope by
+// construction; that section explains why it must not be added here.
 //
 // Adding an entry here is a protocol change. It means a new pair of named
 // locks may now be held at once, which is a new way for two replicas to

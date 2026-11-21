@@ -118,7 +118,8 @@ type ServerConfig struct {
 	// naming a number has already chosen their own headroom.
 	MemoryBudgetPercent int `yaml:"memory_budget_percent"`
 
-	// Key generation options (apply only when bootstrapping a new CA).
+	// Key generation options: the CA key's when bootstrapping a new CA, and
+	// every server-generated leaf key's.
 	CAKeyAlgo   string `yaml:"ca_key_algo"`
 	CAKeySize   int    `yaml:"ca_key_size"`
 	LeafKeyAlgo string `yaml:"leaf_key_algo"`
@@ -270,8 +271,7 @@ type ServerConfig struct {
 	// replaced stays valid before it is revoked, instead of being revoked
 	// inside the renewal call. Three states, per the CSRRateLimit convention:
 	//
-	//	 0  revoke immediately, inside the renewal — an explicit operator choice,
-	//	    and the behaviour of every release before this setting existed
+	//	 0  revoke immediately, inside the renewal — an explicit operator choice
 	//	>0  that duration
 	//	-1  unset: the built-in default (24h)
 	//
@@ -284,14 +284,13 @@ type ServerConfig struct {
 	// deployment has it unless it sets 0: for the length of the window the
 	// replaced certificate — and, on the CSR-based re-key path, the replaced
 	// private key — is still a credential this CA accepts. Set 0 to revoke the
-	// predecessor inside the renewal instead. What keeps the window bounded rather than open-ended
-	// is ca.CA.refuseIfSuperseded, which stops a certificate inside its window
-	// renewing itself into a fresh full-lifetime successor.
+	// predecessor inside the renewal instead. What keeps the window bounded
+	// rather than open-ended is ca.CA.refuseIfSuperseded, which stops a
+	// certificate inside its window renewing itself into a fresh full-lifetime
+	// successor.
 	//
-	// 24h is the same window the serving-certificate work settled on for the
-	// same question asked about a different subject. That work is not in this
-	// repository, so this deliberately does not name its setting: a comment
-	// pointing at a config key nobody can grep for is worse than no pointer.
+	// managed_certs and serving_cert entries inherit this window through their
+	// own revoke_after (certconfig), which can override it per entry.
 	//
 	// It governs every renewal path, an operator's POST /renew included.
 	// RevokeOnAutoRenew still decides whether a same-key renewal retires its

@@ -651,18 +651,16 @@ var _ = Describe("Export scopes", func() {
 
 	It("defaults to chain, publishing the stored blob verbatim", func() {
 		// The reason the default is not "self": a target that names no scope
-		// gets the stored blob verbatim. A narrow default would have silently dropped every intermediate from a
-		// consumer's trust bundle and every ancestor block from a CRL blob --
-		// the material crl_chain_file exists to distribute -- with no
-		// configuration change to notice and no error to catch, since a
-		// scoped-down value is not empty.
+		// gets the stored blob verbatim. A narrow default would drop every
+		// intermediate from a consumer's trust bundle and every ancestor
+		// block from a CRL blob -- the material crl_chain_file exists to
+		// distribute -- with no configuration choosing it and no error to
+		// catch, since a scoped-down value is not empty.
 		data := exportWith("", "")
-		Expect(string(data["ca.crt"])).To(ContainSubstring("SU5URVJNRURJQVRF"))
-		Expect(string(data["ca.crt"])).To(ContainSubstring("Uk9PVA=="),
-			"an unset cert_scope must not drop the root a deployed target was publishing")
-		Expect(string(data["ca.crl"])).To(ContainSubstring("T1VSUw=="))
-		Expect(string(data["ca.crl"])).To(ContainSubstring("VVBTVFJFQU0="),
-			"an unset crl_scope must not drop the ancestor CRLs this feature publishes")
+		Expect(string(data["ca.crt"])).To(Equal(certChain),
+			"an unset cert_scope must publish the whole stored chain, root included")
+		Expect(string(data["ca.crl"])).To(Equal(crlChain),
+			"an unset crl_scope must publish every stored CRL, ancestors included")
 	})
 
 	It("publishes the whole chain under chain", func() {
@@ -672,10 +670,10 @@ var _ = Describe("Export scopes", func() {
 	})
 
 	It("publishes the trust anchor under root", func() {
-		// root is positional: the last block, whatever it is. It is a trust
-		// anchor only if the imported bundle was a complete chain, which
-		// nothing currently enforces — see the scopes section of
-		// docs/kubernetes-export.md.
+		// root is positional: the last block, whatever it is. Both import
+		// paths refuse a bundle that does not end at a self-signed root, but
+		// a bundle placed another way (ca_cert_file, an adopted cadir) is not
+		// checked — see the scopes section of docs/kubernetes-export.md.
 		data := exportWith("root", "")
 		Expect(string(data["ca.crt"])).To(ContainSubstring("Uk9PVA=="))
 		Expect(string(data["ca.crt"])).NotTo(ContainSubstring("SU5URVJNRURJQVRF"))

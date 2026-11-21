@@ -75,16 +75,17 @@ func (s *Signer) Public() crypto.PublicKey {
 //
 // crypto.Signer.Sign carries no context, so each network op — the Transit
 // sign round trip plus any reactive re-authentication and single retry, which
-// all share this deadline — is bounded by the configured login timeout (see
-// TokenManager.loginTimeout). This matters because the CA holds its
-// process-wide mutex across x509.CreateCertificate — and therefore across this
-// network call — so an unbounded Sign against a stalled Transit backend would
-// pin that mutex and stall all issuance; the deadline caps how long that can
-// last. The worst case is roughly 2×loginTimeout, not 1×: the 403 path's
-// Reauth takes tm.mu, and if the background renewal loop is mid-login it can
-// hold that mutex (sync.Mutex.Lock does not honour ctx) for up to one more
-// loginTimeout before Reauth proceeds. It stays bounded either way. See
-// docs/openbao-transit.md ("Performance and outage behaviour").
+// all share this deadline — is bounded by the login timeout (see
+// TokenManager.loginTimeout; 10s, not exposed as a setting). This matters
+// because the CA holds its process-wide mutex across x509.CreateCertificate —
+// and therefore across this network call — so an unbounded Sign against a
+// stalled Transit backend would pin that mutex and stall all issuance; the
+// deadline caps how long that can last. The worst case is roughly
+// 2×loginTimeout, not 1×: the 403 path's Reauth takes tm.mu, and if the
+// background renewal loop is mid-login it can hold that mutex
+// (sync.Mutex.Lock does not honour ctx) for up to one more loginTimeout before
+// Reauth proceeds. It stays bounded either way. See docs/openbao-transit.md
+// ("Performance and outage behaviour").
 func (s *Signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.tm.loginTimeout)
 	defer cancel()
