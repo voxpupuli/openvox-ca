@@ -1909,17 +1909,6 @@ type InventoryIntegrityReport struct {
 	// ComputedHead is the value recomputed from the inventory as it now
 	// stands, nil when KeyState is not HMACKeyUsable.
 	ComputedHead []byte
-	// LegacyUndecomposed reports a structured backend still holding an
-	// undecomposed legacy inventory blob. Entries() reads only the decomposed
-	// rows, so such a store answers "no entries" while its real inventory sits
-	// in the blob and its stored head is a whole-blob MAC. Rebuilding there
-	// would write an empty hash-chain head over the only baseline that can
-	// validate the blob, which is destruction rather than repair.
-	//
-	// It can be true only because this report is reached without EnsureReady:
-	// the server decomposes on start (CA.Init -> EnsureDirs -> EnsureReady),
-	// and an offline command that reports rather than starts does not.
-	LegacyUndecomposed bool
 	// UnparseableLines counts lines the inventory blob holds that are not
 	// entry-shaped. Always zero on a structured backend, whose entries are
 	// rows. It is not a curiosity: the blob scheme MACs the whole blob, so
@@ -1990,29 +1979,16 @@ func (s *StorageService) InventoryIntegrityReport(ctx context.Context) (Inventor
 	}
 	rep.Entries = len(entries)
 
-	if chained && len(entries) == 0 {
-		// Distinguish "structured and empty" from "structured but not yet
-		// decomposed". Backend-agnostic: after decomposition the blob key
-		// renders the rows, so entries and blob agree; before it, the rows are
-		// absent and the blob holds everything. A SQL backend's blob key is an
-		// empty presence marker, so it cannot false-positive here.
-		// Fail closed. This detection is the only thing standing between a
-		// legacy store and a rebuild that would write an empty chain head over
-		// the whole-blob value that is its sole baseline, so a store that could
-		// not be read must not resolve to "not legacy" -- that is the answer
-		// which lets the destructive path proceed.
-		//
-		// An absent blob is a real answer rather than a failure: there is
-		// nothing to be undecomposed from. readInventoryForHMAC turns it into
-		// empty bytes rather than fs.ErrNotExist, so "no blob at all" arrives
-		// here as a nil error and no parseable entries -- a genuinely empty
-		// structured inventory, which is not legacy. Any error it does return
-		// is the unreadable case above.
-		legacy, err := s.readInventoryForHMAC(ctx)
-		if err != nil {
-			return rep, fmt.Errorf("reading the inventory blob to detect a legacy store: %w", err)
+	// An etcd or Redis store whose inventory is still a pre-alpha blob reads
+	// its rows without complaint: none, or the partial set an interrupted
+	// v1.0.0-alpha1 conversion left beside the blob. Its backend refuses it,
+	// reading the marker alone, so ask: the commands that report without
+	// starting the server (rebuild-inventory-hmac, migrate) then fail as the
+	// server does, rather than act on an inventory that is not the whole one.
+	if r, ok := asUndecomposedInventoryRefuser(s.backend); ok {
+		if err := r.RefuseUndecomposedInventory(ctx); err != nil {
+			return rep, fmt.Errorf("reading the inventory marker: %w", err)
 		}
-		rep.LegacyUndecomposed = len(parseInventoryBlob(legacy)) > 0
 	}
 
 	key, stored, err := s.loadHMACKey(ctx)
@@ -2158,10 +2134,9 @@ func (s *StorageService) storedAndComputedInventoryHMAC(ctx context.Context, hma
 // whose inventory stays empty because the CA's own certificate is never
 // recorded in it. Any other missing value logs at Warn: either it was removed,
 // or this store was produced by something that never wrote one (a cadir
-// adopted from OpenVox Server, one written by openvox-ca-ctl import, a
-// migration from such a store, or the one start after an etcd or Redis legacy
-// inventory is decomposed), and the new value vouches for an inventory nothing
-// verified.
+// adopted from OpenVox Server, one written by openvox-ca-ctl import, or a
+// migration from such a store), and the new value vouches for an inventory
+// nothing verified.
 //
 // The state is read from the store rather than passed in, because the store is
 // what an attacker who deletes the value has also to leave looking new.
@@ -2200,8 +2175,8 @@ func (s *StorageService) baselineInventoryHMACLocked(ctx context.Context, hmacKe
 			"scheme", s.inventoryScheme(), "inventory_empty", len(entries) == 0 && len(blob) == 0,
 			"crl_present", hasCRL,
 			"expected_once_after", "adopting a cadir from OpenVox Server, importing a CA with openvox-ca-ctl "+
-				"import, migrating from a store with no integrity value, or decomposing a legacy etcd/Redis "+
-				"inventory; otherwise the value was removed and the inventory may have been altered")
+				"import, or migrating from a store with no integrity value; otherwise the value was removed "+
+				"and the inventory may have been altered")
 	}
 	return s.backend.Put(ctx, KeyInventoryHMAC, foldInventoryHead(hmacKey, entries, blob, chained), BlobPrivate)
 }

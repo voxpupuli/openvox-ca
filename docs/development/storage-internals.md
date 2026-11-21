@@ -94,8 +94,8 @@ Stored values carry an 8-byte big-endian `time.UnixNano` mtime prefix so
 `If-Modified-Since` without a second round-trip.
 
 The certificate inventory is not stored at `inventory/data` — that key is only
-a presence marker (and where the legacy blob sits until the conversion empties
-it).
+a presence marker, with an empty payload. A payload there is an inventory blob
+from a build of main before v1.0.0-alpha1, which is refused at startup.
 The inventory itself is decomposed into one key per issued certificate under
 `inventory/entries/<seq>`, with `inventory/seq` acting as sequence allocator
 and mutation fence and `inventory/by-serial/<serial>` /
@@ -187,8 +187,8 @@ Stored values carry an 8-byte big-endian `time.UnixNano` mtime prefix so
 `ModTime` is answered from the same round-trip as the value.
 
 The certificate inventory is not stored at `inventory:data` — that key is only
-a presence marker (and where the legacy blob sits until the conversion empties
-it).
+a presence marker, with an empty payload. A payload there is an inventory blob
+from a build of main before v1.0.0-alpha1, which is refused at startup.
 The inventory itself is decomposed into one hash field per issued certificate
 in `inventory:entries`, with `inventory:seq` acting as sequence allocator and
 mutation fence and `inventory:by-serial` / `inventory:by-subject` as index

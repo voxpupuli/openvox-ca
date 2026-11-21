@@ -202,11 +202,6 @@ func verifyMigrationSource(ctx context.Context, src *StorageService, allow bool)
 
 	var reason string
 	switch {
-	case rep.LegacyUndecomposed:
-		// Checked first: the report's other fields describe the empty
-		// decomposed rows, not the legacy blob that holds the inventory.
-		reason = "the source still holds an undecomposed legacy inventory, which is verified only " +
-			"when a server starts against it"
 	case rep.KeyState == HMACKeyAbsent && rep.StoredHead == nil:
 		return "the source never recorded an inventory integrity value (no HMAC key and no value " +
 			"are stored), so there was nothing to verify it against", nil

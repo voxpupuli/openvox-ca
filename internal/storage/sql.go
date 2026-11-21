@@ -1336,9 +1336,8 @@ func (b *SQLBackend) localLockFor(name string) *sync.Mutex {
 // every other name is hashed into the derived half (see advisoryLockKey).
 //
 // The scope is deliberately "can reach a SQL backend" rather than "is a
-// singleton": etcdDecomposeLockName ("inventory-decompose") is a cluster-wide
-// singleton too, but only EtcdBackend ever takes it, so reserving it here would
-// claim a key nothing uses.
+// singleton": a cluster-wide singleton that only another backend ever takes
+// would claim a key here that nothing uses.
 //
 // These are protocol, in the same sense as the lock names themselves: every
 // replica must derive the same key or they will not exclude one another, so an
