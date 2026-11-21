@@ -419,35 +419,43 @@ var _ = Describe("RedisIntegrationInventoryStore", func() {
 		Expect(err).NotTo(HaveOccurred(), "the post-prune chain extends cleanly")
 	})
 
-	It("converts a pre-decomposition blob on EnsureReady and re-baselines integrity", func() {
+	It("replaces the inventory through Put, in the replacement scripts", func() {
+		// Put(KeyInventory) is how a migration into Redis lands: the wipe,
+		// batch and finish scripts, run here against real Lua.
 		ctx := context.Background()
-		b := newIntegrationBackend("inv-legacy")
+		b := newIntegrationBackend("inv-replace")
+		Expect(b.Put(ctx, KeyInventory, []byte("0009 2024-01-09T00:00:00UTC 2029-01-09T00:00:00UTC /stale\n"), BlobPublic)).
+			To(Succeed(), "an inventory for the replacement to wipe")
 
-		// Plant the state an upgrade finds: a text blob at the inventory key,
-		// an HMAC key, and the whole-blob HMAC over that blob.
 		blob := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n" +
-			"0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2\n"
-		key := make([]byte, hmacKeyLen)
-		for i := range key {
-			key[i] = byte(i)
-		}
-		Expect(b.client.Set(ctx, b.prefix+":private:hmac_key", encodeBlob(time.Now(), key), 0).Err()).To(Succeed())
-		Expect(b.client.Set(ctx, b.invPhys(redisInvDataSub), encodeBlob(time.Now(), []byte(blob)), 0).Err()).To(Succeed())
-		Expect(b.client.Set(ctx, b.invPhys(redisInvHMACSub),
-			encodeBlob(time.Now(), wholeBlobInventoryMAC(key, []byte(blob))), 0).Err()).To(Succeed())
-
-		Expect(b.EnsureReady(ctx)).To(Succeed(), "EnsureReady must convert the blob")
+			"0002 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2\n" +
+			"0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node1\n"
+		Expect(b.Put(ctx, KeyInventory, []byte(blob), BlobPublic)).To(Succeed())
 
 		got, err := b.Get(ctx, KeyInventory)
 		Expect(err).NotTo(HaveOccurred(), "Get(KeyInventory)")
-		Expect(string(got)).To(Equal(blob), "the rendered text must be byte-identical to the blob")
+		Expect(string(got)).To(Equal(blob), "the rendered text must be byte-identical to what was put")
+		Expect(b.client.HGetAll(ctx, b.invPhys(redisInvSerialSub)).Val()).To(Equal(map[string]string{
+			"0001": "1", "0002": "2", "0003": "3",
+		}), "the old serial is gone and each new one points at its sequence number")
+		Expect(b.client.HGetAll(ctx, b.invPhys(redisInvSubjectSub)).Val()).To(Equal(map[string]string{
+			"node1": "0003", "node2": "0002",
+		}), "each subject points at its newest serial")
+		Expect(b.client.Get(ctx, b.invPhys(redisInvSeqSub)).Val()).To(Equal("3"))
+		_, payload, err := decodeBlob([]byte(b.client.Get(ctx, b.invPhys(redisInvDataSub)).Val()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(payload).To(BeEmpty(), "the marker is written empty")
+	})
 
-		n, err := b.client.HLen(ctx, b.invPhys(redisInvEntriesSub)).Result()
-		Expect(err).NotTo(HaveOccurred(), "HLEN entries")
-		Expect(n).To(Equal(int64(2)), "one hash field per line")
+	It("refuses to start on a pre-alpha inventory blob", func() {
+		ctx := context.Background()
+		b := newIntegrationBackend("inv-prealpha")
+		blob := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n"
+		Expect(b.client.Set(ctx, b.invPhys(redisInvDataSub), encodeBlob(time.Now(), []byte(blob)), 0).Err()).To(Succeed())
 
-		svc := NewWithBackend(b, "")
-		Expect(svc.VerifyInventoryHMAC(ctx, key)).To(Succeed(), "the chained baseline re-establishes")
+		Expect(b.EnsureReady(ctx)).To(MatchError(errUndecomposedInventory))
+		_, err := b.Get(ctx, KeyInventory)
+		Expect(err).To(MatchError(errUndecomposedInventory))
 	})
 
 	It("serves the certificate index from the decomposed entries", func() {

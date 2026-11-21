@@ -411,6 +411,34 @@ type CertIndex interface {
 	SetProjection(ctx context.Context, serial string, proj CertProjection) error
 }
 
+// UndecomposedInventoryRefuser is an optional Backend capability: a backend
+// whose store can still hold a pre-alpha inventory blob in its presence marker
+// (see errUndecomposedInventory) refuses it here, reading the marker alone. The
+// etcd and Redis backends implement it, and call it from EnsureReady.
+//
+// It exists for the paths that read a store without starting it. The integrity
+// report probes it on every backend that has it, so rebuild-inventory-hmac and
+// migrate refuse such a store as the server does, rather than act on the rows
+// an interrupted conversion left, or on none.
+type UndecomposedInventoryRefuser interface {
+	RefuseUndecomposedInventory(ctx context.Context) error
+}
+
+// asUndecomposedInventoryRefuser probes b for the UndecomposedInventoryRefuser
+// capability, unwrapping wrapper backends the same way asCertIndex does.
+func asUndecomposedInventoryRefuser(b Backend) (UndecomposedInventoryRefuser, bool) {
+	for {
+		if r, ok := b.(UndecomposedInventoryRefuser); ok {
+			return r, true
+		}
+		unwrapper, ok := b.(interface{ Unwrap() Backend })
+		if !ok {
+			return nil, false
+		}
+		b = unwrapper.Unwrap()
+	}
+}
+
 // asKeyFileLister probes b for the KeyFileLister capability, unwrapping wrapper
 // backends the same way asCertIndex does.
 func asKeyFileLister(b Backend) (KeyFileLister, bool) {

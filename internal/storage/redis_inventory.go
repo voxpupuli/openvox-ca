@@ -19,7 +19,6 @@ package storage
 
 import (
 	"context"
-	"crypto/hmac"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -43,8 +42,9 @@ import (
 //	                      refuses to overwrite (see redisAppendEntryLua) is
 //	                      the atomic, cluster-wide duplicate-serial guard
 //	inventory:by-subject  HASH subject → most recently issued serial
-//	inventory:data        presence marker (empty payload); also where
-//	                      pre-decomposition versions kept the blob
+//	inventory:data        presence marker (empty payload; a payload is a
+//	                      pre-alpha inventory blob, which is refused: see
+//	                      errUndecomposedInventory)
 //	inventory:hmac        chained integrity head (blob-encoded, still
 //	                      addressed by the KeyInventoryHMAC logical key)
 //
@@ -112,12 +112,12 @@ const redisMaxRetries = 16
 // blocks the whole (single-threaded) server for its duration, so a bulk import
 // is split into scripts of a size whose ~1500 hash writes stay comfortably
 // sub-millisecond rather than stalling every other client for the length of a
-// fleet-scale conversion.
+// fleet-scale import.
 const redisImportBatch = 512
 
 // redisImportProgressEvery is how many imported entries pass between progress
-// log lines during a bulk inventory import (legacy conversion, migration), so
-// a fleet-scale conversion reads as a moving import rather than a hang.
+// log lines during a bulk inventory import (a migration into Redis), so a
+// fleet-scale import reads as a moving import rather than a hang.
 const redisImportProgressEvery = 4096
 
 // redisPruneMaxPerCall bounds how many entries one PruneEntries call removes.
@@ -129,13 +129,6 @@ const redisImportProgressEvery = 4096
 // contract permits.
 const redisPruneMaxPerCall = 5000
 
-// redisDecomposeLockName is the distributed lock serialising the one-time
-// legacy inventory blob conversion across replicas starting up together. It is
-// deliberately the same name the etcd backend uses (lock names are protocol —
-// see docs/development/locking.md — and a deployment only ever has one
-// backend, so the two can never contend).
-const redisDecomposeLockName = etcdDecomposeLockName
-
 // RedisBackend implements InventoryStore: the inventory lives as hash fields
 // keyed by issuance sequence (plus by-serial/by-subject index hashes) instead
 // of a single append-only blob, making appends O(1) and giving
@@ -143,6 +136,8 @@ const redisDecomposeLockName = etcdDecomposeLockName
 // remains as a presence marker so the KeyInventory logical key keeps its
 // Get/Put/Exists/ModTime behaviour.
 var _ InventoryStore = (*RedisBackend)(nil)
+
+var _ UndecomposedInventoryRefuser = (*RedisBackend)(nil)
 
 // invPhys returns the physical Redis key for an inventory sub-path.
 func (b *RedisBackend) invPhys(sub string) string { return b.prefix + ":" + sub }
@@ -338,19 +333,11 @@ return {'ok'}
 // the decomposed structure and reset the sequence counter, so the import
 // batches that follow write into a known-empty state.
 //
-// ARGV[1] is the sequence-counter value the caller expects (the fence), and
-// ARGV[2..4] the marker guard described on redisReplaceBatchLua.
+// ARGV[1] is the sequence-counter value the caller expects (the fence).
 const redisReplaceWipeLua = `
 local seq = redis.call('GET', KEYS[2])
 if seq == false then seq = '0' end
 if seq ~= ARGV[1] then return {'conflict'} end
-if ARGV[2] == '1' then
-  local m = redis.call('GET', KEYS[6])
-  if m == false then m = '' end
-  if string.sub(m, 1, 8) ~= ARGV[3] or tostring(string.len(m)) ~= ARGV[4] then
-    return {'conflict'}
-  end
-end
 redis.call('DEL', KEYS[1], KEYS[3], KEYS[4])
 redis.call('SET', KEYS[2], '0')
 return {'ok'}
@@ -358,58 +345,32 @@ return {'ok'}
 
 // redisReplaceBatchLua writes one batch of an import. ARGV[1] is the sequence
 // counter the previous step left behind (the fence), ARGV[2] the value to
-// leave it at, ARGV[3..5] the marker guard, and ARGV[6] the record count
-// followed by that many (seq, serial, serialValue, subject, json) tuples.
-//
-// The marker guard is what makes a legacy conversion safe against a replica that
-// has not been upgraded yet: such a replica only writes the blob through
-// AppendLine or Put, both of which stamp a fresh mtime prefix, so comparing
-// the marker's first 8 bytes (and, belt and braces, its length) detects any
-// write to it between the conversion's read and each of its commits.
+// leave it at, and ARGV[3] the record count followed by that many (seq,
+// serial, subject, json) tuples.
 const redisReplaceBatchLua = `
 local seq = redis.call('GET', KEYS[2])
 if seq == false then seq = '0' end
 if seq ~= ARGV[1] then return {'conflict'} end
-if ARGV[3] == '1' then
-  local m = redis.call('GET', KEYS[6])
-  if m == false then m = '' end
-  if string.sub(m, 1, 8) ~= ARGV[4] or tostring(string.len(m)) ~= ARGV[5] then
-    return {'conflict'}
-  end
-end
-local n = tonumber(ARGV[6])
+local n = tonumber(ARGV[3])
 for i = 0, n - 1 do
-  local base = 7 + i * 5
-  redis.call('HSET', KEYS[1], ARGV[base], ARGV[base + 4])
-  redis.call('HSET', KEYS[3], ARGV[base + 1], ARGV[base + 2])
-  redis.call('HSET', KEYS[4], ARGV[base + 3], ARGV[base + 1])
+  local base = 4 + i * 4
+  redis.call('HSET', KEYS[1], ARGV[base], ARGV[base + 3])
+  redis.call('HSET', KEYS[3], ARGV[base + 1], ARGV[base])
+  redis.call('HSET', KEYS[4], ARGV[base + 2], ARGV[base + 1])
 end
 redis.call('SET', KEYS[2], ARGV[2])
 return {'ok'}
 `
 
-// redisReplaceFinishLua completes a replacement: empty the presence marker
-// (which is what retires a legacy blob, and only ever happens once every
-// record has been imported) and, for a legacy conversion, drop the whole-blob
-// integrity head that cannot carry over into the chained scheme.
+// redisReplaceFinishLua completes a replacement by writing the empty presence
+// marker, once every record has been imported.
 //
-// ARGV[1] is the fence, ARGV[2..4] the marker guard, ARGV[5] the fresh mtime
-// prefix, and ARGV[6] "1" to drop the head.
+// ARGV[1] is the fence and ARGV[2] the fresh mtime prefix.
 const redisReplaceFinishLua = `
 local seq = redis.call('GET', KEYS[2])
 if seq == false then seq = '0' end
 if seq ~= ARGV[1] then return {'conflict'} end
-if ARGV[2] == '1' then
-  local m = redis.call('GET', KEYS[6])
-  if m == false then m = '' end
-  if string.sub(m, 1, 8) ~= ARGV[3] or tostring(string.len(m)) ~= ARGV[4] then
-    return {'conflict'}
-  end
-end
-redis.call('SET', KEYS[6], ARGV[5])
-if ARGV[6] == '1' then
-  redis.call('DEL', KEYS[5])
-end
+redis.call('SET', KEYS[6], ARGV[2])
 return {'ok'}
 `
 
@@ -422,20 +383,6 @@ if redis.call('EXISTS', KEYS[6]) == 0 then
   return {'missing'}
 end
 redis.call('DEL', KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[6])
-return {'ok'}
-`
-
-// redisDropHeadLua deletes the integrity head iff it still holds the payload
-// in ARGV[1], so a concurrent append's freshly chained head is never mistaken
-// for the legacy whole-blob value and discarded.
-const redisDropHeadLua = `
-local cur = redis.call('GET', KEYS[5])
-local body = ''
-if cur then body = string.sub(cur, 9) end
-if body ~= ARGV[1] then
-  return {'conflict'}
-end
-redis.call('DEL', KEYS[5])
 return {'ok'}
 `
 
@@ -830,9 +777,9 @@ func appendCountedStrings(argv []any, items []string) []any {
 
 // getInventory renders the decomposed entries to byte-identical inventory.txt
 // text. An inventory that was never initialised (no marker, no entries) wraps
-// fs.ErrNotExist. A non-empty legacy blob that decomposeLegacyInventory has
-// not yet processed is returned verbatim so reads stay correct even before
-// EnsureReady has run.
+// fs.ErrNotExist. A marker holding a pre-alpha inventory blob is refused here
+// as well as at startup, so an offline reader such as migrate cannot take the
+// store for an empty one.
 func (b *RedisBackend) getInventory(ctx context.Context) ([]byte, error) {
 	callCtx, cancel := b.callCtx(ctx)
 	defer cancel()
@@ -862,13 +809,13 @@ func (b *RedisBackend) getInventory(ctx context.Context) ([]byte, error) {
 	if !markerPresent && len(fields) == 0 {
 		return nil, &fs.PathError{Op: "get", Path: KeyInventory, Err: fs.ErrNotExist}
 	}
-	if markerPresent && len(fields) == 0 {
-		_, legacy, err := decodeBlob(raw)
+	if markerPresent {
+		_, payload, err := decodeBlob(raw)
 		if err != nil {
 			return nil, fmt.Errorf("decoding blob %q: %w", KeyInventory, err)
 		}
-		if len(legacy) > 0 {
-			return legacy, nil
+		if len(payload) > 0 {
+			return nil, fmt.Errorf("redis %s: %w", redisInvDataSub, errUndecomposedInventory)
 		}
 	}
 
@@ -897,7 +844,7 @@ func (b *RedisBackend) putInventory(ctx context.Context, data []byte) error {
 	defer b.appendMu.Unlock()
 
 	for attempt := range redisMaxRetries {
-		conflict, err := b.replaceInventoryOnce(ctx, recs, nil, false)
+		conflict, err := b.replaceInventoryOnce(ctx, recs)
 		if err != nil {
 			return err
 		}
@@ -911,35 +858,15 @@ func (b *RedisBackend) putInventory(ctx context.Context, data []byte) error {
 	return fmt.Errorf("inventory replace failed: too many concurrent writers")
 }
 
-// redisMarkerGuard pins the presence marker's stored value for the duration of
-// a replacement: its 8-byte mtime prefix and its total length. Every write to
-// that key — an old replica's blob append, a Put, a marker touch — stamps a
-// fresh mtime, so an unchanged prefix means nothing has written it since the
-// caller read it. A nil guard disables the check.
-type redisMarkerGuard struct {
-	mtime  string
-	length int
-}
-
-// args renders the guard as the (enabled, mtime, length) ARGV triple the
-// replacement scripts expect.
-func (g *redisMarkerGuard) args() []any {
-	if g == nil {
-		return []any{"0", "", ""}
-	}
-	return []any{"1", g.mtime, strconv.Itoa(g.length)}
-}
-
 // replaceInventoryOnce performs one attempt at replacing the decomposed
 // structure with recs: wipe, import in batches, then write the fresh presence
 // marker. Every step is guarded on the sequence counter holding the value the
 // previous step left, so an interleaved append (which allocates from that
-// counter) is detected and the caller restarts; guard, when non-nil,
-// additionally pins the marker. dropHead also deletes the stored integrity
-// head in the final step, for callers whose head is known to be in the wrong
-// scheme. Returns conflict=true when a guard failed and the caller should
-// re-read and retry.
-func (b *RedisBackend) replaceInventoryOnce(ctx context.Context, recs []CertRecord, guard *redisMarkerGuard, dropHead bool) (bool, error) {
+// counter) is detected and the caller restarts. Returns conflict=true when a
+// guard failed and the caller should re-read and retry. recs must hold no
+// duplicate serials: the by-serial index is one-to-one, and the caller rejects
+// them first.
+func (b *RedisBackend) replaceInventoryOnce(ctx context.Context, recs []CertRecord) (bool, error) {
 	seqCmd, cancel := b.callCtx(ctx)
 	seq, err := b.client.Get(seqCmd, b.invPhys(redisInvSeqSub)).Result()
 	cancel()
@@ -950,24 +877,12 @@ func (b *RedisBackend) replaceInventoryOnce(ctx context.Context, recs []CertReco
 		seq = "0"
 	}
 
-	// Serials appearing on more than one record cannot be pointed at through
-	// the one-to-one by-serial index without picking a wrong record for the
-	// others; mark them ambiguous so index writes refuse instead of aliasing.
-	dupSerials := make(map[string]bool)
-	for _, serial := range duplicateSerials(recs) {
-		dupSerials[serial] = true
-	}
-
-	wipeArgs := append([]any{seq}, guard.args()...)
-	status, _, err := b.runInvScript(ctx, b.invReplaceWipeScript, wipeArgs...)
+	status, _, err := b.runInvScript(ctx, b.invReplaceWipeScript, seq)
 	if err != nil {
 		return false, err
 	}
 	if status != redisResultOK {
 		return true, nil
-	}
-	if b.importBatchHook != nil {
-		b.importBatchHook()
 	}
 
 	written := 0
@@ -975,22 +890,15 @@ func (b *RedisBackend) replaceInventoryOnce(ctx context.Context, recs []CertReco
 		batch := recs[start:min(start+redisImportBatch, len(recs))]
 		// One HSET per index field per script; later occurrences overwrite
 		// earlier ones, in this batch and across batches, leaving each subject
-		// pointing at its newest serial. A serial borne by several records
-		// gets the ambiguity sentinel instead of a sequence number.
-		argv := []any{strconv.Itoa(written), strconv.Itoa(written + len(batch))}
-		argv = append(argv, guard.args()...)
-		argv = append(argv, strconv.Itoa(len(batch)))
+		// pointing at its newest serial.
+		argv := []any{strconv.Itoa(written), strconv.Itoa(written + len(batch)), strconv.Itoa(len(batch))}
 		for i, rec := range batch {
 			val, err := encodeInventoryRecord(rec)
 			if err != nil {
 				return false, err
 			}
 			n := uint64(start+i) + 1
-			serialValue := strconv.FormatUint(n, 10)
-			if dupSerials[rec.Serial] {
-				serialValue = serialAmbiguous
-			}
-			argv = append(argv, strconv.FormatUint(n, 10), rec.Serial, serialValue, rec.Subject, string(val))
+			argv = append(argv, strconv.FormatUint(n, 10), rec.Serial, rec.Subject, string(val))
 		}
 		status, _, err := b.runInvScript(ctx, b.invReplaceBatchScript, argv...)
 		if err != nil {
@@ -999,34 +907,22 @@ func (b *RedisBackend) replaceInventoryOnce(ctx context.Context, recs []CertReco
 		if status != redisResultOK {
 			return true, nil
 		}
-		if b.importBatchHook != nil {
-			b.importBatchHook()
-		}
 		written += len(batch)
-		// A fleet-scale conversion is many sequential scripts; report progress
-		// periodically so the first post-upgrade start reads as a moving
-		// import rather than an apparent hang (the same reasoning as the
-		// certificate-index backfill's progress log).
+		// A fleet-scale import is many sequential scripts; report progress
+		// periodically so it reads as a moving import rather than an apparent
+		// hang (the same reasoning as the certificate-index backfill's
+		// progress log).
 		if written/redisImportProgressEvery != start/redisImportProgressEvery && written < len(recs) {
 			slog.Info("Inventory import progress", "imported", written, "total", len(recs))
 		}
 	}
 
-	finishArgs := []any{strconv.Itoa(len(recs))}
-	finishArgs = append(finishArgs, guard.args()...)
-	finishArgs = append(finishArgs, string(encodeMtime(time.Now())), boolArg(dropHead))
-	status, _, err = b.runInvScript(ctx, b.invReplaceFinishScript, finishArgs...)
+	status, _, err = b.runInvScript(ctx, b.invReplaceFinishScript,
+		strconv.Itoa(len(recs)), string(encodeMtime(time.Now())))
 	if err != nil {
 		return false, err
 	}
 	return status != redisResultOK, nil
-}
-
-func boolArg(v bool) string {
-	if v {
-		return "1"
-	}
-	return "0"
 }
 
 // appendInventoryLines appends the entries parsed from data as new records,
@@ -1097,327 +993,28 @@ func (b *RedisBackend) deleteInventory(ctx context.Context) error {
 	return nil
 }
 
-// --- Legacy blob decomposition ---
+// --- Pre-alpha inventory blob ---
 
-// decomposeLegacyInventory upgrades an inventory written by a pre-#139 version
-// of this backend — a single text blob at inventory:data — into the decomposed
-// hash structure. It runs from EnsureReady on every start; when there is no
-// legacy blob (fresh deployment, or already decomposed) it is a cheap no-op.
-//
-// The blob stays authoritative until the import completes: the marker is only
-// emptied by the final script, so an interrupted import (crash, Redis error,
-// Ctrl-C) leaves the blob intact and the next start detects the partial entry
-// set as a resumable state and redoes the import from the blob. Entries that
-// are NOT a prefix of the blob mean something else wrote to the decomposed
-// structure while the blob still had content — a mixed-version deployment —
-// and that is refused with an explicit error rather than guessing which side
-// to keep.
-//
-// Integrity: when both the HMAC key and a stored head are present, the blob's
-// whole-blob HMAC is verified before it is trusted, and a mismatch fails
-// startup with ErrInventoryTampered exactly as the pre-decomposition code
-// would have. The (verified) head is then deleted as part of the import — it
-// is not a hash-chain head, so it cannot carry over — and the next
-// VerifyInventoryHMAC re-establishes the baseline from the imported entries.
-// Only the import window itself is therefore uncovered; run all replicas on
-// the same version so no old replica keeps appending to the blob mid-upgrade
-// (such an append is detected via the marker guard and the import restarts,
-// but the window only closes once the old writers are gone).
-func (b *RedisBackend) decomposeLegacyInventory(ctx context.Context) error {
-	// Cheap probe first: on every start after the one-time conversion this
-	// path must not transfer the whole inventory, so read only the marker to
-	// decide whether the expensive state read is needed at all.
-	state, err := b.legacyMarkerState(ctx)
+// RefuseUndecomposedInventory refuses a store whose presence marker still
+// holds an inventory blob (see errUndecomposedInventory and
+// UndecomposedInventoryRefuser). It reads the marker alone, so on every ordinary
+// start it costs one key.
+func (b *RedisBackend) RefuseUndecomposedInventory(ctx context.Context) error {
+	ctx, cancel := b.callCtx(ctx)
+	defer cancel()
+	raw, err := b.client.Get(ctx, b.invPhys(redisInvDataSub)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if len(state.blob) == 0 {
-		// Nothing to import — but an upgraded CA whose inventory was empty
-		// still carries a whole-blob head that no import will ever drop.
-		return b.convertLegacyEmptyHead(ctx)
-	}
-
-	// Serialise the import across replicas starting up together.
-	ul, err := b.AcquireLock(ctx, redisDecomposeLockName)
-	if err != nil {
-		return fmt.Errorf("locking for inventory decomposition: %w", err)
-	}
-	defer func() {
-		if err := ul.Unlock(); err != nil {
-			slog.Warn("Failed to release inventory-decompose lock", "error", err)
-		}
-	}()
-
-	for attempt := range redisMaxRetries {
-		// (Re-)read under the lock: another replica may have completed the
-		// import while we waited, or an old-version replica may have appended.
-		state, entries, err := b.legacyInventoryState(ctx)
-		if err != nil {
-			return err
-		}
-		if len(state.blob) == 0 {
-			return nil
-		}
-		recs, err := parseInventoryRecords(state.blob)
-		if err != nil {
-			return fmt.Errorf("decomposing legacy redis inventory: %w", err)
-		}
-		if len(entries) > 0 {
-			if !recordsArePrefixOf(entries, recs) {
-				return fmt.Errorf("redis inventory holds both a non-empty legacy blob and decomposed entries that do not match it; " +
-					"this usually means a replica still writing the legacy blob format appended to it after another replica converted it. " +
-					"Refusing to guess: stop every replica still writing the legacy format first. The blob then usually holds only issuances made after the conversion, so deleting either the inventory:data or the inventory:entries key loses records; reconcile them under the key prefix by hand; a snapshot from before the conversion lacks those issuances too")
-			}
-			slog.Info("Resuming interrupted redis inventory decomposition", "imported", len(entries), "total", len(recs))
-		}
-		if err := b.verifyLegacyInventoryMAC(ctx, state.blob); err != nil {
-			return err
-		}
-		if dups := duplicateSerials(recs); len(dups) > 0 {
-			// Blob backends never had a cluster-wide duplicate-serial
-			// guarantee, so a legacy inventory can legitimately carry
-			// repeats. Refusing would brick startup; instead every line is
-			// imported verbatim (preserving the rendered text), the serials
-			// stay reserved against reissue, and certificate-index writes for
-			// them are refused (see serialAmbiguous) so revocation state and
-			// projections cannot land on the wrong record.
-			slog.Warn("Legacy redis inventory contains duplicate serials; certificate-index state for them will be unavailable until the duplicates are resolved",
-				"serials", dups)
-		}
-		conflict, err := b.replaceInventoryOnce(ctx, recs, &state.guard, true)
-		if err != nil {
-			return fmt.Errorf("decomposing legacy redis inventory: %w", err)
-		}
-		if !conflict {
-			slog.Info("Decomposed legacy redis inventory blob into per-entry hash fields", "entries", len(recs))
-			return nil
-		}
-		if err := b.scriptBackoff(ctx, attempt); err != nil {
-			return err
-		}
-	}
-	return fmt.Errorf("decomposing legacy redis inventory: too many concurrent writers")
-}
-
-// redisLegacyState is a snapshot of the presence marker: the payload (empty
-// when there is nothing to decompose) plus the guard that pins the stored
-// value for the duration of an import.
-type redisLegacyState struct {
-	blob  []byte
-	guard redisMarkerGuard
-}
-
-// legacyMarkerState reads the marker alone. This is the cheap every-start
-// probe: one key, unlike legacyInventoryState which also transfers the whole
-// entry hash.
-func (b *RedisBackend) legacyMarkerState(ctx context.Context) (redisLegacyState, error) {
-	callCtx, cancel := b.callCtx(ctx)
-	defer cancel()
-	raw, err := b.client.Get(callCtx, b.invPhys(redisInvDataSub)).Bytes()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return redisLegacyState{}, nil
-		}
-		return redisLegacyState{}, err
-	}
-	return decodeLegacyMarker(raw)
-}
-
-// legacyInventoryState returns the not-yet-decomposed inventory blob together
-// with any decomposed entries already present, read atomically. A zero-length
-// blob means there is nothing to decompose (no marker, or an already-emptied
-// one).
-func (b *RedisBackend) legacyInventoryState(ctx context.Context) (redisLegacyState, []indexedRecord, error) {
-	callCtx, cancel := b.callCtx(ctx)
-	defer cancel()
-
-	var (
-		markerCmd  *redis.StringCmd
-		entriesCmd *redis.MapStringStringCmd
-	)
-	if _, err := b.client.TxPipelined(callCtx, func(p redis.Pipeliner) error {
-		markerCmd = p.Get(callCtx, b.invPhys(redisInvDataSub))
-		entriesCmd = p.HGetAll(callCtx, b.invPhys(redisInvEntriesSub))
-		return nil
-	}); err != nil && !errors.Is(err, redis.Nil) {
-		return redisLegacyState{}, nil, err
-	}
-
-	raw, err := markerCmd.Bytes()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return redisLegacyState{}, nil, nil
-		}
-		return redisLegacyState{}, nil, err
-	}
-	state, err := decodeLegacyMarker(raw)
-	if err != nil || len(state.blob) == 0 {
-		return state, nil, err
-	}
-
-	fields, err := entriesCmd.Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return redisLegacyState{}, nil, err
-	}
-	entries, err := decodeEntryFields(fields)
-	if err != nil {
-		return redisLegacyState{}, nil, err
-	}
-	return state, entries, nil
-}
-
-// decodeLegacyMarker splits a stored marker value into its payload and the
-// guard pinning it.
-func decodeLegacyMarker(raw []byte) (redisLegacyState, error) {
 	_, payload, err := decodeBlob(raw)
 	if err != nil {
-		return redisLegacyState{}, fmt.Errorf("decoding legacy inventory blob: %w", err)
+		return fmt.Errorf("decoding blob %q: %w", KeyInventory, err)
 	}
-	return redisLegacyState{
-		blob:  payload,
-		guard: redisMarkerGuard{mtime: string(raw[:8]), length: len(raw)},
-	}, nil
-}
-
-// convertLegacyEmptyHead completes the upgrade for a pre-decomposition CA
-// whose inventory was empty. Such a CA always stores a whole-blob HMAC (CA
-// bootstrap writes one over the empty inventory before the first cert is ever
-// issued), but with no blob content there is no import to drop it as part of,
-// so it would survive the upgrade and fail the first chain verification with a
-// spurious tampering error that nothing re-baselines away.
-//
-// The head is deleted only when it verifies as the whole-blob MAC of an empty
-// inventory under the stored key — the exact value the legacy code wrote — so
-// the next verification re-establishes the chained baseline. Any other
-// non-empty head over zero entries is deliberately left in place for
-// verification to flag: it is indistinguishable from the residue of a
-// decomposed inventory whose entries were tampered away, and deleting it would
-// silently accept that.
-func (b *RedisBackend) convertLegacyEmptyHead(ctx context.Context) error {
-	keyPhys, err := b.physicalKey(KeyHMACKey)
-	if err != nil {
-		return err
-	}
-	for attempt := range redisMaxRetries {
-		callCtx, cancel := b.callCtx(ctx)
-		var (
-			headCmd  *redis.StringCmd
-			keyCmd   *redis.StringCmd
-			countCmd *redis.IntCmd
-		)
-		_, err := b.client.TxPipelined(callCtx, func(p redis.Pipeliner) error {
-			headCmd = p.Get(callCtx, b.invPhys(redisInvHMACSub))
-			keyCmd = p.Get(callCtx, keyPhys)
-			countCmd = p.HLen(callCtx, b.invPhys(redisInvEntriesSub))
-			return nil
-		})
-		cancel()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return err
-		}
-
-		if n, err := countCmd.Result(); err != nil && !errors.Is(err, redis.Nil) {
-			return err
-		} else if n > 0 {
-			return nil // decomposed entries exist; the head is theirs
-		}
-
-		rawHead, err := headCmd.Bytes()
-		if err != nil {
-			if errors.Is(err, redis.Nil) {
-				return nil
-			}
-			return err
-		}
-		_, stored, err := decodeBlob(rawHead)
-		if err != nil {
-			return fmt.Errorf("decoding legacy inventory HMAC: %w", err)
-		}
-		if len(stored) == 0 {
-			return nil // already the chained baseline of an empty inventory
-		}
-		rawKey, err := keyCmd.Bytes()
-		if err != nil {
-			return nil //nolint:nilerr // cannot verify; leave it for verification to fail closed
-		}
-		_, key, err := decodeBlob(rawKey)
-		if err != nil || len(key) != hmacKeyLen {
-			return nil //nolint:nilerr // same: unverifiable, so leave the head alone
-		}
-		if !hmac.Equal(wholeBlobInventoryMAC(key, nil), stored) {
-			return nil
-		}
-
-		status, _, err := b.runInvScript(ctx, b.invDropHeadScript, string(stored))
-		if err != nil {
-			return err
-		}
-		if status == redisResultOK {
-			slog.Info("Removed legacy whole-blob inventory HMAC for an empty inventory; the integrity baseline will be re-established on first verification")
-			return nil
-		}
-		if err := b.scriptBackoff(ctx, attempt); err != nil {
-			return err
-		}
-	}
-	return fmt.Errorf("removing legacy inventory HMAC: too many concurrent writers")
-}
-
-// verifyLegacyInventoryMAC checks the legacy blob against its stored
-// whole-blob HMAC before the blob is trusted as the import source. Absent
-// head: nothing to check (the baseline is established after the import).
-// Mismatch: fail startup with ErrInventoryTampered, exactly as the
-// pre-decomposition verify would have. A head that cannot be verified —
-// because the HMAC key is missing or malformed — also fails startup: the
-// pre-decomposition code was fail-closed in that state too (it regenerated the
-// key and then flagged the surviving head as tampering), and proceeding would
-// silently promote an unverifiable blob to the new trusted baseline. The
-// operator acknowledges a lost baseline by deleting the stored head.
-func (b *RedisBackend) verifyLegacyInventoryMAC(ctx context.Context, blob []byte) error {
-	keyPhys, err := b.physicalKey(KeyHMACKey)
-	if err != nil {
-		return err
-	}
-	callCtx, cancel := b.callCtx(ctx)
-	defer cancel()
-
-	var headCmd, keyCmd *redis.StringCmd
-	if _, err := b.client.TxPipelined(callCtx, func(p redis.Pipeliner) error {
-		headCmd = p.Get(callCtx, b.invPhys(redisInvHMACSub))
-		keyCmd = p.Get(callCtx, keyPhys)
-		return nil
-	}); err != nil && !errors.Is(err, redis.Nil) {
-		return err
-	}
-
-	rawHead, err := headCmd.Bytes()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return nil
-		}
-		return err
-	}
-	_, stored, err := decodeBlob(rawHead)
-	if err != nil {
-		return fmt.Errorf("decoding legacy inventory HMAC: %w", err)
-	}
-	rawKey, err := keyCmd.Bytes()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return fmt.Errorf("legacy redis inventory has a stored integrity value but no HMAC key to verify it with; "+
-				"delete the %s key under the redis key prefix to acknowledge the lost baseline and retry: %w",
-				redisInvHMACSub, ErrInventoryTampered)
-		}
-		return err
-	}
-	_, key, err := decodeBlob(rawKey)
-	if err != nil || len(key) != hmacKeyLen {
-		return fmt.Errorf("legacy redis inventory HMAC key is unreadable or malformed, so the stored integrity value cannot be verified; "+
-			"delete the %s key under the redis key prefix to acknowledge the lost baseline and retry: %w",
-			redisInvHMACSub, ErrInventoryTampered)
-	}
-	if !hmac.Equal(wholeBlobInventoryMAC(key, blob), stored) {
-		return fmt.Errorf("legacy redis inventory failed integrity verification before decomposition: %w", ErrInventoryTampered)
+	if len(payload) > 0 {
+		return fmt.Errorf("redis %s: %w", redisInvDataSub, errUndecomposedInventory)
 	}
 	return nil
 }

@@ -107,10 +107,9 @@ import (
 //     StorageService.WithLock takes here. It is *not* every lock the codebase
 //     takes: backend-internal names are acquired through Backend.AcquireLock
 //     directly, bypassing WithLock entirely — `sql-schema-migrate` from
-//     SQLBackend.EnsureReady (internal/storage/sql.go), `inventory-decompose`
-//     from EtcdBackend (internal/storage/etcd_inventory.go). Neither backend is
-//     in play here, so neither name can appear; a harness over one of those
-//     backends would see them and would need its own allow-list entries.
+//     SQLBackend.EnsureReady (internal/storage/sql.go). That backend is not in
+//     play here, so the name cannot appear; a harness over it would see it and
+//     would need its own allow-list entries.
 //   - **MigrateService.** It nests the *same* name over two different stores —
 //     `bootstrap` (source) → `bootstrap` (destination), internal/storage/migrate.go
 //     — and on a SQL destination reaches `sql-schema-migrate` at a third level

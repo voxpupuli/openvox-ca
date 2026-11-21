@@ -137,18 +137,15 @@ type RedisBackend struct {
 	invReplaceBatchScript  *redis.Script
 	invReplaceFinishScript *redis.Script
 	invDeleteScript        *redis.Script
-	invDropHeadScript      *redis.Script
 	invSetRecordScript     *redis.Script
 
 	appendMu sync.Mutex // serialises AppendLine and inventory mutations in-process
 
-	// importBatchHook, when non-nil, runs after each committed import script;
-	// appendHeadHook runs between an append's head read and its guarded
-	// commit; pruneSnapshotHook does the same between a prune's snapshot read
-	// and its commit; mutateRecordHook the same for an index write. Test seams
-	// only: they let the suite interleave conflicting writes deterministically
-	// to exercise the resume and guard-retry paths.
-	importBatchHook   func()
+	// appendHeadHook, when non-nil, runs between an append's head read and
+	// its guarded commit; pruneSnapshotHook does the same between a prune's
+	// snapshot read and its commit; mutateRecordHook the same for an index
+	// write. Test seams only: they let the suite interleave conflicting
+	// writes deterministically to exercise the guard-retry paths.
 	appendHeadHook    func()
 	pruneSnapshotHook func()
 	mutateRecordHook  func()
@@ -287,7 +284,6 @@ func newRedisBackendFromClient(client redis.UniversalClient, owned bool, prefix 
 		invReplaceBatchScript:  redis.NewScript(redisReplaceBatchLua),
 		invReplaceFinishScript: redis.NewScript(redisReplaceFinishLua),
 		invDeleteScript:        redis.NewScript(redisDeleteInventoryLua),
-		invDropHeadScript:      redis.NewScript(redisDropHeadLua),
 		invSetRecordScript:     redis.NewScript(redisSetRecordLua),
 	}
 }
@@ -320,17 +316,16 @@ func (b *RedisBackend) callCtx(parent context.Context) (context.Context, context
 }
 
 // EnsureReady verifies connectivity with a PING (Redis has no directory
-// concept so there is nothing to create), then decomposes a legacy inventory
-// blob left by a pre-decomposition version of this backend into the per-entry
-// structure. Decomposition must run before the inventory is used: the
-// structured paths assume the blob key is only a presence marker.
+// concept so there is nothing to create), then refuses a store whose
+// inventory is still a pre-alpha blob: the structured paths assume the blob
+// key is only a presence marker.
 func (b *RedisBackend) EnsureReady(ctx context.Context) error {
 	pingCtx, cancel := b.callCtx(ctx)
 	defer cancel()
 	if err := b.client.Ping(pingCtx).Err(); err != nil {
 		return fmt.Errorf("redis not reachable: %w", err)
 	}
-	return b.decomposeLegacyInventory(ctx)
+	return b.RefuseUndecomposedInventory(ctx)
 }
 
 // Get returns the (unwrapped) blob at key, wrapping fs.ErrNotExist when

@@ -19,10 +19,10 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,7 +43,7 @@ import (
 const redisTestPrefix = "inv-test"
 
 // newRawRedisBackend wires a backend to cli WITHOUT running EnsureReady, so a
-// test can plant pre-decomposition state first.
+// test can plant state first.
 func newRawRedisBackend(cli redis.UniversalClient, prefix string) *RedisBackend {
 	return NewRedisBackendFromClient(cli, prefix, 5*time.Second, 5*time.Second)
 }
@@ -188,6 +188,26 @@ var _ = Describe("RedisInventoryStore", func() {
 		Expect(b.Delete(ctx, KeyInventory)).To(MatchError(fs.ErrNotExist))
 	})
 
+	It("refuses a replacement that carries a duplicate serial, changing nothing", func() {
+		// The replacement scripts write one by-serial field per record, so a
+		// serial borne twice would silently point at its last bearer. Refusing
+		// before the first script runs is the only thing that prevents that.
+		ctx := context.Background()
+		_, b, cli, stop := newRedisInventoryService()
+		defer stop()
+		entries := hashFields(cli, invKey(redisInvEntriesSub))
+		serials := hashFields(cli, invKey(redisInvSerialSub))
+		seq := cli.Get(ctx, invKey(redisInvSeqSub)).Val()
+
+		dup := "0009 2025-01-01T00:00:00UTC 2030-01-01T00:00:00UTC /node9\n" +
+			"0009 2025-01-02T00:00:00UTC 2030-01-02T00:00:00UTC /node8\n"
+		Expect(b.Put(ctx, KeyInventory, []byte(dup), BlobPrivate)).To(MatchError(ErrDuplicateSerial))
+
+		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(Equal(entries), "entries unchanged")
+		Expect(hashFields(cli, invKey(redisInvSerialSub))).To(Equal(serials), "by-serial index unchanged")
+		Expect(cli.Get(ctx, invKey(redisInvSeqSub)).Val()).To(Equal(seq), "sequence counter unchanged")
+	})
+
 	It("rejects a duplicate serial reissued by another replica", func() {
 		ctx := context.Background()
 		svc, _, cli, stop := newRedisInventoryService()
@@ -234,19 +254,6 @@ var _ = Describe("RedisInventoryStore", func() {
 			"a batch containing a duplicate must insert none of its lines")
 	})
 
-	It("serves a not-yet-decomposed legacy blob verbatim before EnsureReady has run", func() {
-		ctx := context.Background()
-		_, cli, stop := newMiniredis()
-		defer stop()
-
-		legacy := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n"
-		Expect(cli.Set(ctx, invKey(redisInvDataSub), encodeBlob(time.Now(), []byte(legacy)), 0).Err()).To(Succeed())
-
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		got, err := b.Get(ctx, KeyInventory)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(got)).To(Equal(legacy), "reads must stay correct before conversion runs")
-	})
 })
 
 var _ = Describe("RedisInventoryConcurrentAppends", func() {
@@ -720,7 +727,8 @@ var _ = Describe("RedisPrunePlan", func() {
 	})
 
 	It("keeps a serial reserved while any record still bears it", func() {
-		// Two records sharing a serial, as a converted legacy blob can hold.
+		// Two records sharing a serial, as a store converted from a pre-alpha
+		// inventory blob can hold.
 		recs := []indexedRecord{
 			{seq: 1, rec: CertRecord{InventoryEntry: InventoryEntry{Serial: "dup", Subject: "a"}}},
 			{seq: 2, rec: CertRecord{InventoryEntry: InventoryEntry{Serial: "dup", Subject: "b"}}},
@@ -749,218 +757,154 @@ var _ = Describe("RedisPrunePlan", func() {
 	})
 })
 
-var _ = Describe("RedisLegacyInventoryDecompose", func() {
-	// legacySetup plants a pre-decomposition CA: a blob at inventory:data, an
-	// HMAC key, and the whole-blob HMAC over that blob — exactly the state an
-	// upgrade finds.
-	legacySetup := func(lines []string) (redis.UniversalClient, func(), []byte, string) {
-		ctx := context.Background()
-		_, cli, stop := newMiniredis()
-		blob := ""
-		for _, l := range lines {
-			blob += l + "\n"
-		}
-		key := make([]byte, hmacKeyLen)
-		for i := range key {
-			key[i] = byte(i)
-		}
-		Expect(cli.Set(ctx, redisTestPrefix+":private:hmac_key", encodeBlob(time.Now(), key), 0).Err()).To(Succeed())
+// A store whose inventory:data marker still holds the single inventory blob
+// that builds of main from before v1.0.0-alpha1 wrote. v1.0.0-alpha1 converted
+// it on first start; this version refuses it instead, because read as the
+// per-entry format it would look empty, or smaller than it is where a
+// conversion was interrupted.
+var _ = Describe("RedisPreAlphaInventoryBlob", func() {
+	const blob = "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\n"
+
+	var (
+		ctx  context.Context
+		cli  redis.UniversalClient
+		stop func()
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		_, cli, stop = newMiniredis()
+		DeferCleanup(func() { stop() })
 		Expect(cli.Set(ctx, invKey(redisInvDataSub), encodeBlob(time.Now(), []byte(blob)), 0).Err()).To(Succeed())
-		Expect(cli.Set(ctx, invKey(redisInvHMACSub),
-			encodeBlob(time.Now(), wholeBlobInventoryMAC(key, []byte(blob))), 0).Err()).To(Succeed())
-		return cli, stop, key, blob
-	}
-
-	It("imports a pre-decomposition blob on EnsureReady and re-baselines integrity", func() {
-		ctx := context.Background()
-		cli, stop, key, blob := legacySetup(sampleInventoryLines)
-		defer stop()
-
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		Expect(b.EnsureReady(ctx)).To(Succeed())
-
-		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(HaveLen(3))
-		Expect(hashFields(cli, invKey(redisInvSerialSub))).To(Equal(map[string]string{
-			"0001": "1", "0002": "2", "0003": "3",
-		}))
-		Expect(hashFields(cli, invKey(redisInvSubjectSub))).To(Equal(map[string]string{
-			"node1": "0003", "node2": "0002",
-		}))
-		marker, err := cli.Get(ctx, invKey(redisInvDataSub)).Bytes()
-		Expect(err).NotTo(HaveOccurred())
-		_, payload, err := decodeBlob(marker)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(payload).To(BeEmpty(), "the blob is retired to a bare marker")
-		Expect(cli.Exists(ctx, invKey(redisInvHMACSub)).Val()).To(BeZero(),
-			"the whole-blob head cannot carry over into the chained scheme")
-
-		svc := NewWithBackend(b, "")
-		got, err := b.Get(ctx, KeyInventory)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(got)).To(Equal(blob), "the rendered text must be byte-identical to the blob")
-		Expect(svc.VerifyInventoryHMAC(ctx, key)).To(Succeed(), "the baseline re-establishes")
-		_, err = svc.ReadInventory(ctx)
-		Expect(err).NotTo(HaveOccurred())
 	})
 
-	It("is a cheap no-op on every start after the conversion", func() {
-		ctx := context.Background()
-		cli, stop, _, _ := legacySetup(sampleInventoryLines)
-		defer stop()
-
+	It("refuses to start, naming the release that converts it, and changes nothing", func() {
 		b := newRawRedisBackend(cli, redisTestPrefix)
-		Expect(b.EnsureReady(ctx)).To(Succeed())
-		before := hashFields(cli, invKey(redisInvEntriesSub))
 
-		var imports atomic.Int32
-		b.importBatchHook = func() { imports.Add(1) }
-		Expect(b.EnsureReady(ctx)).To(Succeed())
-		Expect(imports.Load()).To(BeZero(), "a converted inventory must not be re-imported")
-		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(Equal(before))
-	})
-
-	It("resumes an interrupted import from the intact blob", func() {
-		ctx := context.Background()
-		lines := make([]string, 0, redisImportBatch+5)
-		for i := range redisImportBatch + 5 {
-			lines = append(lines, fmt.Sprintf(
-				"%06d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node%d", i+1, i))
-		}
-		cli, stop, key, blob := legacySetup(lines)
-		defer stop()
-
-		// Abort after the wipe and the first batch have committed. The blob is
-		// still authoritative — the marker is only emptied by the final step —
-		// so the next start must redo the import from it.
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		var n atomic.Int32
-		abort := errors.New("simulated interruption")
-		func() {
-			defer func() {
-				r := recover()
-				Expect(r).To(Equal(abort))
-			}()
-			b.importBatchHook = func() {
-				if n.Add(1) == 2 {
-					panic(abort)
-				}
-			}
-			_ = b.EnsureReady(ctx)
-		}()
-
-		partial := hashFields(cli, invKey(redisInvEntriesSub))
-		Expect(len(partial)).To(BeNumerically("<", len(lines)), "the import really was interrupted")
-		marker, err := cli.Get(ctx, invKey(redisInvDataSub)).Bytes()
-		Expect(err).NotTo(HaveOccurred())
-		_, payload, err := decodeBlob(marker)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(payload)).To(Equal(blob), "the blob stays authoritative until the final step")
-
-		b2 := newRawRedisBackend(cli, redisTestPrefix)
-		Expect(b2.EnsureReady(ctx)).To(Succeed())
-		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(HaveLen(len(lines)))
-		svc := NewWithBackend(b2, "")
-		Expect(svc.VerifyInventoryHMAC(ctx, key)).To(Succeed())
-	})
-
-	It("refuses to decompose when the blob and existing entries contradict each other", func() {
-		ctx := context.Background()
-		cli, stop, _, _ := legacySetup(sampleInventoryLines)
-		defer stop()
-
-		// Entries that are not the import-written prefix of the blob: a
-		// mixed-version deployment wrote both forms.
-		rec, err := encodeInventoryRecord(CertRecord{InventoryEntry: InventoryEntry{
-			Serial: "9999", NotBefore: "2024-01-01T00:00:00UTC", NotAfter: "2029-01-01T00:00:00UTC",
-			Subject: "elsewhere",
-		}})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(cli.HSet(ctx, invKey(redisInvEntriesSub), "1", string(rec)).Err()).To(Succeed())
-
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		err = b.EnsureReady(ctx)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("Refusing to guess"))
-		// The remedy, not just the refusal: deleting either side loses records.
-		Expect(err.Error()).To(ContainSubstring("stop every replica still writing the legacy format"))
-		Expect(err.Error()).To(ContainSubstring("reconcile them under the key prefix by hand"))
-		// A remedy that offered a snapshot restore could pass the pins above;
-		// these two fail it: the first says why a snapshot does not help, and
-		// the second that none is offered.
-		Expect(err.Error()).To(ContainSubstring("lacks those issuances"))
-		Expect(err.Error()).NotTo(ContainSubstring("restore from a snapshot"))
-	})
-
-	It("fails startup when the legacy blob does not match its stored HMAC", func() {
-		ctx := context.Background()
-		cli, stop, _, _ := legacySetup(sampleInventoryLines)
-		defer stop()
-
-		tampered := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /attacker\n"
-		Expect(cli.Set(ctx, invKey(redisInvDataSub), encodeBlob(time.Now(), []byte(tampered)), 0).Err()).To(Succeed())
-
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		Expect(b.EnsureReady(ctx)).To(MatchError(ErrInventoryTampered))
-		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(BeEmpty(), "nothing may be imported")
-	})
-
-	It("fails startup when the HMAC key is missing or malformed rather than importing unverified", func() {
-		ctx := context.Background()
-		cli, stop, _, _ := legacySetup(sampleInventoryLines)
-		defer stop()
-
-		Expect(cli.Del(ctx, redisTestPrefix+":private:hmac_key").Err()).To(Succeed())
-		b := newRawRedisBackend(cli, redisTestPrefix)
 		err := b.EnsureReady(ctx)
-		Expect(err).To(MatchError(ErrInventoryTampered))
-		Expect(err.Error()).To(ContainSubstring("no HMAC key to verify it with"))
+		Expect(err).To(MatchError(errUndecomposedInventory))
+		Expect(err.Error()).To(ContainSubstring("v1.0.0-alpha1"))
 
-		Expect(cli.Set(ctx, redisTestPrefix+":private:hmac_key", encodeBlob(time.Now(), []byte("short")), 0).Err()).To(Succeed())
-		err = b.EnsureReady(ctx)
-		Expect(err).To(MatchError(ErrInventoryTampered))
-		Expect(err.Error()).To(ContainSubstring("unreadable or malformed"))
-		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(BeEmpty())
+		raw, gerr := cli.Get(ctx, invKey(redisInvDataSub)).Bytes()
+		Expect(gerr).NotTo(HaveOccurred())
+		_, payload, derr := decodeBlob(raw)
+		Expect(derr).NotTo(HaveOccurred())
+		Expect(string(payload)).To(Equal(blob), "the blob is left for a release that converts it")
+		Expect(cli.Exists(ctx, invKey(redisInvEntriesSub)).Val()).To(BeZero(), "nothing is imported")
 	})
 
-	It("fails startup on a malformed legacy line, leaving the blob intact", func() {
+	It("refuses a read of the inventory rather than serving it as empty", func() {
+		b := newRawRedisBackend(cli, redisTestPrefix)
+		_, err := b.Get(ctx, KeyInventory)
+		Expect(err).To(MatchError(errUndecomposedInventory))
+	})
+
+	It("refuses a migration from it, which never starts the store", func() {
+		src := NewWithBackend(newRawRedisBackend(cli, redisTestPrefix), "")
+		dstDir := GinkgoT().TempDir()
+		_, err := MigrateService(ctx, src, New(dstDir), MigrateOptions{})
+		Expect(err).To(MatchError(errUndecomposedInventory))
+		Expect(err.Error()).To(ContainSubstring("checking the source inventory's integrity"),
+			"refused by the source check, before anything is copied")
+		Expect(filepath.Join(dstDir, "inventory.txt")).NotTo(BeAnExistingFile(),
+			"no inventory, empty or otherwise, reaches the destination")
+	})
+
+	It("refuses an integrity report over it, which rebuild-inventory-hmac reads", func() {
+		_, err := NewWithBackend(newRawRedisBackend(cli, redisTestPrefix), "").InventoryIntegrityReport(ctx)
+		Expect(err).To(MatchError(errUndecomposedInventory))
+	})
+
+	// What an interrupted v1.0.0-alpha1 conversion left: the blob still in
+	// the marker, and some of its records already written as entries. Read by
+	// its entries alone, such a store looks like a smaller inventory than it is.
+	Context("beside the entries an interrupted conversion wrote", func() {
+		BeforeEach(func() {
+			recs, err := parseInventoryRecords([]byte(blob))
+			Expect(err).NotTo(HaveOccurred())
+			val, err := encodeInventoryRecord(recs[0])
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cli.HSet(ctx, invKey(redisInvEntriesSub), "1", string(val)).Err()).To(Succeed())
+			Expect(cli.HSet(ctx, invKey(redisInvSerialSub), recs[0].Serial, "1").Err()).To(Succeed())
+			Expect(cli.Set(ctx, invKey(redisInvSeqSub), "1", 0).Err()).To(Succeed())
+		})
+
+		It("refuses to start", func() {
+			Expect(newRawRedisBackend(cli, redisTestPrefix).EnsureReady(ctx)).To(MatchError(errUndecomposedInventory))
+		})
+
+		It("refuses a read of the inventory rather than serving the entries alone", func() {
+			_, err := newRawRedisBackend(cli, redisTestPrefix).Get(ctx, KeyInventory)
+			Expect(err).To(MatchError(errUndecomposedInventory))
+		})
+
+		It("refuses an integrity report over it", func() {
+			_, err := NewWithBackend(newRawRedisBackend(cli, redisTestPrefix), "").InventoryIntegrityReport(ctx)
+			Expect(err).To(MatchError(errUndecomposedInventory))
+		})
+
+		It("refuses a migration from it", func() {
+			src := NewWithBackend(newRawRedisBackend(cli, redisTestPrefix), "")
+			dstDir := GinkgoT().TempDir()
+			_, err := MigrateService(ctx, src, New(dstDir), MigrateOptions{})
+			Expect(err).To(MatchError(errUndecomposedInventory))
+			Expect(err.Error()).To(ContainSubstring("checking the source inventory's integrity"),
+				"refused by the source check, before anything is copied")
+			Expect(filepath.Join(dstDir, "inventory.txt")).NotTo(BeAnExistingFile())
+		})
+	})
+
+	It("refuses to start on a marker it cannot decode", func() {
+		Expect(cli.Set(ctx, invKey(redisInvDataSub), "abc", 0).Err()).To(Succeed())
+		err := newRawRedisBackend(cli, redisTestPrefix).EnsureReady(ctx)
+		Expect(err).To(MatchError(ContainSubstring("decoding blob")))
+	})
+
+	It("starts on the empty marker every release since has written", func() {
+		Expect(cli.Set(ctx, invKey(redisInvDataSub), encodeBlob(time.Now(), nil), 0).Err()).To(Succeed())
+		Expect(newRawRedisBackend(cli, redisTestPrefix).EnsureReady(ctx)).To(Succeed())
+	})
+})
+
+// A serial borne by more than one record. Nothing writes one any more, but
+// v1.0.0-alpha1's conversion of a pre-alpha inventory blob did, marking the
+// serial ambiguous in the by-serial index, and a store converted then keeps
+// it. Planted here as that conversion left it.
+var _ = Describe("RedisAmbiguousSerial", func() {
+	It("keeps the serial reserved and refuses index writes for it", func() {
 		ctx := context.Background()
 		_, cli, stop := newMiniredis()
 		defer stop()
-		blob := "0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1\nrubbish\n"
-		Expect(cli.Set(ctx, invKey(redisInvDataSub), encodeBlob(time.Now(), []byte(blob)), 0).Err()).To(Succeed())
 
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		err := b.EnsureReady(ctx)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("malformed inventory line"))
-		got, err := b.Get(ctx, KeyInventory)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(got)).To(Equal(blob), "the blob must survive a refused conversion")
-	})
-
-	It("tolerates duplicate serials in the legacy blob, refusing index writes for them", func() {
-		ctx := context.Background()
 		lines := []string{
 			"0001 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node1",
 			"0001 2024-01-02T00:00:00UTC 2029-01-02T00:00:00UTC /node2",
 			"0003 2024-01-03T00:00:00UTC 2029-01-03T00:00:00UTC /node3",
 		}
-		cli, stop, key, blob := legacySetup(lines)
-		defer stop()
+		text := ""
+		for _, l := range lines {
+			text += l + "\n"
+		}
+		recs, err := parseInventoryRecords([]byte(text))
+		Expect(err).NotTo(HaveOccurred())
+		for i, rec := range recs {
+			val, err := encodeInventoryRecord(rec)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cli.HSet(ctx, invKey(redisInvEntriesSub), strconv.Itoa(i+1), string(val)).Err()).To(Succeed())
+			Expect(cli.HSet(ctx, invKey(redisInvSubjectSub), rec.Subject, rec.Serial).Err()).To(Succeed())
+		}
+		Expect(cli.HSet(ctx, invKey(redisInvSerialSub), "0001", serialAmbiguous, "0003", "3").Err()).To(Succeed())
+		Expect(cli.Set(ctx, invKey(redisInvSeqSub), "3", 0).Err()).To(Succeed())
+		Expect(cli.Set(ctx, invKey(redisInvDataSub), encodeBlob(time.Now(), nil), 0).Err()).To(Succeed())
 
 		b := newRawRedisBackend(cli, redisTestPrefix)
-		Expect(b.EnsureReady(ctx)).To(Succeed(), "a duplicated serial must not brick startup")
-
-		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(HaveLen(3), "every line is imported verbatim")
-		Expect(hashFields(cli, invKey(redisInvSerialSub))).To(Equal(map[string]string{
-			"0001": serialAmbiguous, "0003": "3",
-		}))
+		Expect(b.EnsureReady(ctx)).To(Succeed(), "a converted store starts")
 		got, err := b.Get(ctx, KeyInventory)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(string(got)).To(Equal(blob))
+		Expect(string(got)).To(Equal(text))
 
 		svc := NewWithBackend(b, "")
-		Expect(svc.VerifyInventoryHMAC(ctx, key)).To(Succeed())
+		Expect(svc.InitHMAC(ctx)).To(Succeed())
 		for _, subject := range []string{"node1", "node2", "node3"} {
 			Expect(b.Put(ctx, CertKey(subject), []byte("pem-"+subject), BlobPublic)).To(Succeed())
 		}
@@ -974,197 +918,18 @@ var _ = Describe("RedisLegacyInventoryDecompose", func() {
 		// readers consult the CRL instead.
 		Expect(svc.MarkCertRevoked(ctx, "0001", time.Now())).To(Succeed())
 		Expect(svc.SetCertProjection(ctx, "0001", CertProjection{Fingerprint: "aa:bb"})).To(Succeed())
-		recs, ok, err := svc.CertStatuses(ctx, "")
+		statuses, ok, err := svc.CertStatuses(ctx, "")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ok).To(BeTrue())
-		Expect(recs).To(HaveLen(3))
+		Expect(statuses).To(HaveLen(3))
 		bySubject := map[string]CertRecord{}
-		for _, r := range recs {
+		for _, r := range statuses {
 			bySubject[r.Subject] = r
 		}
 		Expect(bySubject["node1"].State).To(Equal(CertStateUnknown))
 		Expect(bySubject["node1"].Fingerprint).To(BeEmpty(), "the projection write was refused")
 		Expect(bySubject["node2"].State).To(Equal(CertStateUnknown))
 		Expect(bySubject["node3"].State).To(Equal(CertStateSigned), "the unique serial is unaffected")
-	})
-
-	It("removes the stale whole-blob head when upgrading a CA whose inventory is empty", func() {
-		ctx := context.Background()
-		cli, stop, key, _ := legacySetup(nil)
-		defer stop()
-		// legacySetup with no lines leaves an empty blob plus the whole-blob
-		// MAC over it — what CA bootstrap writes before the first issuance.
-		Expect(cli.Exists(ctx, invKey(redisInvHMACSub)).Val()).To(Equal(int64(1)))
-
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		Expect(b.EnsureReady(ctx)).To(Succeed())
-		Expect(cli.Exists(ctx, invKey(redisInvHMACSub)).Val()).To(BeZero(),
-			"no import would ever have dropped it, so EnsureReady must")
-
-		svc := NewWithBackend(b, "")
-		Expect(svc.VerifyInventoryHMAC(ctx, key)).To(Succeed(), "the chained baseline re-establishes cleanly")
-	})
-
-	It("leaves an unverifiable head over an empty inventory for verification to fail closed", func() {
-		ctx := context.Background()
-		cli, stop, key, _ := legacySetup(nil)
-		defer stop()
-		// A head that is NOT the whole-blob MAC of an empty inventory is
-		// indistinguishable from the residue of a decomposed inventory whose
-		// entries were tampered away; deleting it would silently accept that.
-		Expect(cli.Set(ctx, invKey(redisInvHMACSub), encodeBlob(time.Now(), []byte("not-the-empty-mac")), 0).Err()).To(Succeed())
-
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		Expect(b.EnsureReady(ctx)).To(Succeed())
-		Expect(cli.Exists(ctx, invKey(redisInvHMACSub)).Val()).To(Equal(int64(1)))
-
-		svc := NewWithBackend(b, "")
-		Expect(svc.VerifyInventoryHMAC(ctx, key)).To(MatchError(ErrInventoryTampered))
-	})
-
-	// The two //nolint:nilerr branches of convertLegacyEmptyHead: an empty
-	// pre-decomposition inventory whose stored whole-blob head cannot be
-	// verified, because the HMAC key is missing or malformed. Both deliberately
-	// leave the head in place rather than dropping it — dropping an
-	// unverifiable head would launder a tampered-away entry set into a clean
-	// baseline — so the fail-closed claim is that startup succeeds and the
-	// NEXT verification rejects the state. The sibling spec above proves that
-	// for the mismatching-head branch; these prove it for the unverifiable
-	// ones, which the comments only asserted in prose.
-	It("leaves the head alone when the HMAC key is missing, failing closed later", func() {
-		ctx := context.Background()
-		cli, stop, key, _ := legacySetup(nil)
-		defer stop()
-		Expect(cli.Del(ctx, redisTestPrefix+":private:hmac_key").Err()).To(Succeed())
-
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		Expect(b.EnsureReady(ctx)).To(Succeed(), "an unverifiable head must not block startup")
-		Expect(cli.Exists(ctx, invKey(redisInvHMACSub)).Val()).To(Equal(int64(1)),
-			"the head must be left in place, not dropped unverified")
-
-		Expect(NewWithBackend(b, "").VerifyInventoryHMAC(ctx, key)).To(MatchError(ErrInventoryTampered),
-			"verification must reject the state the conversion declined to resolve")
-	})
-
-	It("leaves the head alone when the HMAC key is malformed, failing closed later", func() {
-		ctx := context.Background()
-		cli, stop, key, _ := legacySetup(nil)
-		defer stop()
-		Expect(cli.Set(ctx, redisTestPrefix+":private:hmac_key",
-			encodeBlob(time.Now(), []byte("too-short")), 0).Err()).To(Succeed())
-
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		Expect(b.EnsureReady(ctx)).To(Succeed(), "an unverifiable head must not block startup")
-		Expect(cli.Exists(ctx, invKey(redisInvHMACSub)).Val()).To(Equal(int64(1)),
-			"the head must be left in place, not dropped unverified")
-
-		Expect(NewWithBackend(b, "").VerifyInventoryHMAC(ctx, key)).To(MatchError(ErrInventoryTampered),
-			"verification must reject the state the conversion declined to resolve")
-	})
-
-	// redisDropHeadLua is the last compare-and-set in this file without a
-	// conflict spec. Its guard matters in one narrow window: another replica
-	// signing the first certificate — and so writing a chained head — between
-	// this replica's read of the legacy head and its delete. Were the guard an
-	// unconditional DEL, that live chained head would be dropped, and the next
-	// verification would find nothing, log "No inventory HMAC found" and
-	// adopt whatever it saw, with only a warning to show for it. That is the same laundering the two
-	// specs above exist to prevent, in the concurrent case.
-	It("refuses to drop a head that changed since it was read", func() {
-		ctx := context.Background()
-		cli, stop, _, _ := legacySetup(nil)
-		defer stop()
-		b := newRawRedisBackend(cli, redisTestPrefix)
-
-		before, err := cli.Get(ctx, invKey(redisInvHMACSub)).Bytes()
-		Expect(err).NotTo(HaveOccurred())
-
-		// Present the script a payload that is not the stored one, which is
-		// exactly what a caller holding a stale read would present.
-		status, _, err := b.runInvScript(ctx, b.invDropHeadScript, "not-the-stored-payload")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(status).To(Equal(redisResultConflict))
-
-		after, err := cli.Get(ctx, invKey(redisInvHMACSub)).Bytes()
-		Expect(err).NotTo(HaveOccurred(), "the head must survive a refused drop")
-		Expect(after).To(Equal(before))
-	})
-
-	It("lets two replicas decompose concurrently without double-importing", func() {
-		ctx := context.Background()
-		cli, stop, key, blob := legacySetup(sampleInventoryLines)
-		defer stop()
-
-		// Counting committed import steps is the assertion, not the end state:
-		// a second replica that re-wiped and re-imported the same blob would
-		// leave exactly the same three entries, so an entry count alone would
-		// stay green with the decompose lock removed. One import of a
-		// three-line blob commits two steps — the wipe and a single batch.
-		var steps atomic.Int32
-		a := newRawRedisBackend(cli, redisTestPrefix)
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		a.importBatchHook = func() { steps.Add(1) }
-		b.importBatchHook = func() { steps.Add(1) }
-		var wg sync.WaitGroup
-		wg.Add(2)
-		for _, backend := range []*RedisBackend{a, b} {
-			go func() {
-				defer GinkgoRecover()
-				defer wg.Done()
-				Expect(backend.EnsureReady(ctx)).To(Succeed())
-			}()
-		}
-		wg.Wait()
-
-		Expect(steps.Load()).To(Equal(int32(2)), "the lock must keep the second replica from re-importing")
-		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(HaveLen(3), "imported exactly once")
-		got, err := a.Get(ctx, KeyInventory)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(got)).To(Equal(blob))
-		Expect(NewWithBackend(a, "").VerifyInventoryHMAC(ctx, key)).To(Succeed())
-	})
-
-	It("restarts the import when a legacy writer touches the blob mid-import", func() {
-		ctx := context.Background()
-		lines := make([]string, 0, redisImportBatch+5)
-		for i := range redisImportBatch + 5 {
-			lines = append(lines, fmt.Sprintf(
-				"%06d 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /node%d", i+1, i))
-		}
-		cli, stop, key, blob := legacySetup(lines)
-		defer stop()
-
-		// A not-yet-upgraded replica appends to the blob after the import has
-		// read it. The marker guard must catch that and restart from the new
-		// blob rather than import a snapshot that is already stale.
-		// The blob is two batches' worth, so an import commits three steps:
-		// the wipe, then batch 1, then batch 2. Interfering after step 2 lets
-		// the assertion below distinguish the batch guard from the final one:
-		// the batch guard aborts at step 3, so the first attempt commits two
-		// steps and the (clean) retry commits three. Were only the final guard
-		// live, the first attempt would import every stale record first and
-		// six steps would be committed in total.
-		extra := "999999 2024-01-01T00:00:00UTC 2029-01-01T00:00:00UTC /latecomer\n"
-		b := newRawRedisBackend(cli, redisTestPrefix)
-		var steps atomic.Int32
-		b.importBatchHook = func() {
-			if steps.Add(1) != 2 {
-				return
-			}
-			updated := blob + extra
-			Expect(cli.Set(ctx, invKey(redisInvDataSub), encodeBlob(time.Now(), []byte(updated)), 0).Err()).To(Succeed())
-			Expect(cli.Set(ctx, invKey(redisInvHMACSub),
-				encodeBlob(time.Now(), wholeBlobInventoryMAC(key, []byte(updated))), 0).Err()).To(Succeed())
-		}
-		Expect(b.EnsureReady(ctx)).To(Succeed())
-		Expect(steps.Load()).To(Equal(int32(5)),
-			"the import must abort at the batch after the interfering write, not run to completion first")
-
-		Expect(hashFields(cli, invKey(redisInvEntriesSub))).To(HaveLen(len(lines)+1),
-			"the restarted import must include the latecomer")
-		got, err := b.Get(ctx, KeyInventory)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(string(got)).To(Equal(blob + extra))
 	})
 })
 

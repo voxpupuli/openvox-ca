@@ -1215,9 +1215,8 @@ the real store. On a ReadWriteOnce PVC, scale the Deployment to zero before the
 Job can mount the cadir.
 
 Set `backoffLimit: 0` on that Job when running the report. Report-only mode
-exits non-zero when it refuses to act — on a mismatch, on both no-key states,
-and on an undecomposed legacy inventory — and zero when the value verifies or
-when no baseline is stored, so a
+exits non-zero when it refuses to act — on a mismatch and on both no-key
+states — and zero when the value verifies or when no baseline is stored, so a
 Job left at the default retries the pod six more times on exactly the runs worth
 reading, and `kubectl logs job/...` then has several pods to choose between.
 Note also that every failure exits 1, so the status distinguishes "something is
@@ -1228,26 +1227,9 @@ The verdict — the refusal, or an error — goes to stderr, as does the audit
 record when no `logfile` is configured, so capture both for a support ticket:
 `openvox-ca rebuild-inventory-hmac > integrity.txt 2>&1`.
 
-Five states it treats differently, and **none of them is the ordinary
+Four states it treats differently, and **none of them is the ordinary
 mismatch** the transcript above shows — that one is a usable key with a stored
 value the inventory no longer matches.
-
-If the store still holds an **undecomposed legacy inventory** — an etcd or Redis
-store whose inventory is still a single blob, because no server has started on
-it to convert it into per-entry keys — the command refuses outright. It reads
-the decomposed rows, which do not exist yet, so it would report an empty
-inventory for a store holding a full one, and rebuilding would write an empty
-chain head over the whole-blob value that is the only thing able to validate the
-real inventory.
-
-Start the server, and which of two things happens tells you where you are. If
-the legacy blob still verifies, the server decomposes it and starts, after which
-this command applies normally. If it does not, the server refuses with an
-integrity error — decomposition checks the blob against its own stored value
-before committing — and that error names the stored legacy value to remove in
-order to acknowledge a lost baseline. This command cannot repair an
-undecomposed inventory either way, which is why it refuses rather than
-reporting.
 
 If **no HMAC key is stored and no integrity value is either**, there is nothing
 to rebuild and the command refuses. This CA never initialised integrity;

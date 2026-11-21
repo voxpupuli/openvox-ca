@@ -85,13 +85,12 @@ type EtcdBackend struct {
 	timeout  time.Duration
 	appendMu sync.Mutex // serialises inventory mutations within this process
 
-	// pruneBatchHook and importBatchHook, when non-nil, run after each
-	// committed prune/import transaction; mutateRecordHook runs between an
-	// index write's entry read and its guarded commit. Test seams only:
-	// they let the suite interleave conflicting writes deterministically to
-	// exercise the partial-completion and guard-retry paths.
+	// pruneBatchHook, when non-nil, runs after each committed prune
+	// transaction; mutateRecordHook runs between an index write's entry read
+	// and its guarded commit. Test seams only: they let the suite interleave
+	// conflicting writes deterministically to exercise the partial-completion
+	// and guard-retry paths.
 	pruneBatchHook   func()
-	importBatchHook  func()
 	mutateRecordHook func()
 	// unlockHook, when non-nil, runs before each attempt to delete a lock
 	// key; an error from it stands in for a failed delete. Test seam only:
@@ -216,10 +215,9 @@ func (b *EtcdBackend) callCtx(parent context.Context) (context.Context, context.
 }
 
 // EnsureReady verifies connectivity by listing the cluster status (etcd has
-// no directory concept so there is nothing to create), then decomposes a
-// legacy inventory blob left by a pre-decomposition version of this backend
-// into the per-entry structure. Decomposition must run before the inventory
-// is used: the structured paths assume the blob key is only a presence marker.
+// no directory concept so there is nothing to create), then refuses a store
+// whose inventory is still a pre-alpha blob: the structured paths assume the
+// blob key is only a presence marker.
 func (b *EtcdBackend) EnsureReady(ctx context.Context) error {
 	if len(b.client.Endpoints()) == 0 {
 		return fmt.Errorf("etcd backend has no endpoints configured")
@@ -229,7 +227,7 @@ func (b *EtcdBackend) EnsureReady(ctx context.Context) error {
 	if _, err := b.client.Status(statusCtx, b.client.Endpoints()[0]); err != nil {
 		return fmt.Errorf("etcd not reachable: %w", err)
 	}
-	return b.decomposeLegacyInventory(ctx)
+	return b.RefuseUndecomposedInventory(ctx)
 }
 
 // Get returns the (unwrapped) blob at key, wrapping fs.ErrNotExist when
