@@ -2698,9 +2698,10 @@ var _ = Describe("API Workflow", func() {
 				// apart.
 				Expect(rr.Body.String()).To(ContainSubstring("not eligible for renewal"))
 
-				// The migration guide publishes this string as a grep target,
-				// which makes it a contract like the middleware's own denial
-				// log. The empty-body form has its own message: an operator
+				// The migration guide publishes this string as a grep target.
+				// Message text is not a semver surface (releasing.md), so this
+				// pins a runbook aid; the subject= and error= fields below are
+				// the covered part. The empty-body form has its own message: an operator
 				// filtering for one must not silently miss the other.
 				Expect(logBuf.String()).To(ContainSubstring("Auto-renewal rejected: certificate not eligible"))
 				Expect(logBuf.String()).To(ContainSubstring("subject=" + subject))

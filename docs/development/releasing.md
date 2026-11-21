@@ -2,7 +2,9 @@
 
 > This is a maintainer reference. It describes how to publish a tagged release
 > of OpenVox CA, what the automation does, and how to rehearse the whole thing
-> on a personal fork before touching the upstream repository.
+> on a personal fork before touching the upstream repository. It also declares
+> [what the version number promises](#what-the-version-number-promises): the
+> public API that semantic versioning covers from 1.0.0.
 
 A release is two actions: **land a change setting the release version, then
 push an annotated `v*` tag** pointing at it. Everything else is automation —
@@ -15,6 +17,143 @@ the Helm chart's `version` and `appVersion` track it, and the Release workflow
 refuses to publish a tag that does not equal `"v" + Version`. Between releases
 the constant carries a `-dev` suffix, so a stray tag on an unprepared commit
 fails the gate instead of shipping mislabelled artefacts.
+
+## What the version number promises
+
+From 1.0.0, openvox-ca follows [semantic versioning](https://semver.org/).
+Semver measures every release against a declared public API: a change that
+breaks it needs a new major version, a backwards-compatible addition a new
+minor, and a fix that does neither a new patch. Until 1.0.0 is tagged nothing
+is promised, and a breaking change can land in any release.
+
+**The rule.** The public API is whatever this documentation tells an operator,
+or a tool an operator runs, to depend on: a setting to set, a path to mount or
+read, a name or identity to pin or verify against, a metric or a value to alert
+or match on. A change that breaks something the documentation describes that
+way needs a new major version, unless it is listed below as not covered. The list that follows names what that means today; it is
+a set of examples, and where it and the rest of the documentation disagree, the
+rule wins.
+
+1. **The HTTP API.** Every route, its request and response formats, its status
+   codes, and who may reach it (its [authorisation
+   tier](../api.md#authorization-tiers)), as [the API reference](../api.md)
+   documents them. Widening who may reach a route is a breaking change, not an
+   addition.
+2. **Both command lines.** The subcommands, flags and exit statuses of
+   `openvox-ca` and `openvox-ca-ctl`, and which stream carries what where a
+   command's output is data: `openvox-ca-ctl generate` writes the certificate
+   to standard output and its message to standard error, so `> cert.pem` yields
+   a usable file.
+3. **Configuration.** Every key in `config.yaml` and `ctl.yaml`, every
+   `OPENVOX_CA_*` and `OPENVOX_CA_CTL_*` environment variable, the meaning of
+   each value, where the files are read from by default
+   (`/etc/openvox-ca/config.yaml` and `/etc/openvox-ca/ctl.yaml`), and the
+   values the shipped configuration files set: the packages' port 8141 and
+   serving-credential paths (`certs/openvox-ca-server.pem`,
+   `private_keys/openvox-ca-server.pem`), and the images' `serving_cert` names.
+4. **Storage and the cross-replica lock protocol.** What each backend stores and
+   where, so that a store one 1.x release wrote is one every later 1.x release
+   reads. The lock names, which named lock guards each mutation, their key
+   derivation and the order in which any two are nested change only in a major
+   release, so replicas of two 1.x releases
+   never fail to exclude one another or deadlock on one another. A release that
+   cannot be rolled out one replica at a time (because a schema migration it
+   runs at start, or another storage change, is one an older replica cannot
+   work against), or that must reach every replica before a feature is turned
+   on, says so in its release notes.
+5. **Metrics**, which are what to alert on. The name and label names of every
+   `openvoxca_*` series, the label values the shipped alerts or the
+   documentation filter on, such as `reason="tampered"` and the `state` values,
+   and the condition each series and label value counts, as
+   [the metrics reference](../metrics.md) describes it. Renaming or removing
+   such a value, or changing what it counts, is a breaking change; adding one
+   is not.
+6. **The monitoring mixin's alert names and `_config` keys**, as published at a
+   release tag. Routing and silences are keyed on the alert names, and an
+   override on the `_config` key names: a renamed key would leave an override
+   silently doing nothing.
+7. **The Helm chart.** Its values, its OCI reference
+   (`ghcr.io/voxpupuli/openvox-ca-charts/openvox-ca`), and what `helm upgrade`
+   depends on: the names of the objects it renders, the PersistentVolumeClaim
+   and the Service included, and the Deployment's selector labels.
+8. **Install paths, names, identities and release artefacts.** For the images:
+   the tag scheme and image names, the paths an operator mounts or configures,
+   and the UID they run as (65532). For the packages: the systemd units
+   (`openvox-ca.service`, `openvox-ca-first-boot.service`), the binaries under
+   `/usr/bin`, the environment files (`/etc/sysconfig/openvox-ca` on EL,
+   `/etc/default/openvox-ca` on Debian), the debconf question names and
+   defaults, the `puppet` service account and the packaged CA directory,
+   `/etc/puppetlabs/puppet/ssl/ca`. For the tarballs: `openvox-ca.service` and
+   the `/usr/local/bin` path its `ExecStart` names. For every release: the
+   artefact names (tarballs, packages, `checksums.txt`, the `.spdx.json` and
+   `.cdx.json` SBOMs, `provenance.sigstore.json`), and the signing identities
+   and the SLSA v1 provenance predicate type
+   (`https://slsa.dev/provenance/v1`, which `cosign --type slsaprovenance1`
+   selects) the
+   [verification steps](../../README.md#verifying-what-you-downloaded) pin.
+9. **Log fields.** Structured field names, such as `client.cn` and
+   `client.domain`; the field values the documentation tells you to match on,
+   such as `reason="route requires admin access"`, the three shapes of
+   `client.domain` and the `renewal` values; and the `event` value of each
+   audit record, from the closed set the documentation lists. No record carries
+   one yet: [#666](https://github.com/voxpupuli/openvox-ca/issues/666) adds the
+   field and that list before 1.0.0. Fields are how you find and join the
+   records behind an alert.
+
+Not covered, so free to change in a minor or patch release:
+
+- **Log message text, and the order of fields in a record**, even where the
+  documentation quotes a message or tells you to look for one. Logs are for a
+  human to learn more once something has fired. Alert on a metric, or on an
+  audit record's `event` field; where a condition the documentation tells you
+  to watch for has neither yet,
+  [#666](https://github.com/voxpupuli/openvox-ca/issues/666) adds one before
+  1.0.0.
+- **The HTTP fine print:** error-body wording, response headers other than
+  `Content-Type`, the order of `certificate_statuses`, and the body and media
+  type of a request no route serves, the same things the [Puppet-parity
+  contract](../api.md#differences-from-openvox-server) leaves out.
+- **Go packages.** Every package another module could import is under
+  `internal/`, which the Go toolchain refuses to let it import; the rest are
+  commands and test tools.
+- **The mixin's alert thresholds and durations.** They are tuning. Override
+  them through the mixin's `_config`, whose key names are covered above, and
+  vendor the mixin at the same release tag as the server you run.
+- **SBOM formats and the attestation bundle format.** The SBOMs' document
+  format and version, hence the SPDX predicate type an image's SBOM attestation
+  carries, and the Sigstore bundle format follow the tools that generate them
+  and may change in any release. Read `spdxVersion` from the document rather
+  than hard-coding it. The SLSA provenance predicate type item 8 names stays
+  covered.
+- **The default of a performance or capacity setting**: a cache or memory size,
+  a timeout, a concurrency budget, or an interval that bounds only how fresh a
+  report or a display is. The default of `ocsp_index_sync_interval_sec` is
+  excluded too: OCSP is opt-in, and the interval bounds no revocation, only how
+  long a certificate signed on another replica reads `unknown` and how long one
+  another replica pruned after its expiry keeps its last answer. Such a default
+  moves when a better one is found, and a value you set keeps its meaning. A release that moves a
+  default a shipped mixin window is sized against says so in its release notes,
+  so that an operator who overrides the window through `_config` can resize it.
+  Every other default is covered and changes only in a major release. That includes one that grants access, accepts input
+  or relaxes a refusal (`allow_public_status`, `client_revocation_policy`,
+  `allow_subject_alt_names`, the `insecure_*` settings, rate limits that refuse
+  requests); one that sets how strong a key is (key sizes and algorithms); one
+  that sets how long a credential or a CRL is valid (certificate and CRL
+  validity, the OCSP response lifetime, `superseded_cert_revoke_after_sec`),
+  which is breaking in either direction; and one that bounds how long a
+  revocation, or tampering with the inventory, takes to be acted on or reported,
+  such as `crl_sync_interval_sec`, the CRL chain refresh interval,
+  `client_crl_refresh_interval_sec`, `superseded_cert_sweep_interval_sec`,
+  `file_export`'s `interval_sec` and `inventory_verify_interval_sec`, where
+  lengthening is breaking and shortening is not.
+
+One reservation. A fix for a security vulnerability may break the public API
+in a minor or patch release when there is no compatible way to fix it, for
+example by refusing a request or a configuration value that used to be
+accepted. The release notes say so and name the change.
+
+[AGENTS.md's compatibility contracts](../../AGENTS.md#compatibility-contracts-do-not-rename)
+are a subset of what this covers: the names that must not be rebranded.
 
 ## What a release produces
 
@@ -233,6 +372,14 @@ never name an image that does not exist.
    ```console
    $ git log --oneline --no-merges v0.8.0..origin/main   # or: origin/main, for the first tag
    ```
+
+   From 1.0.0, check for the notes [what the version number
+   promises](#what-the-version-number-promises) requires, and write any that
+   apply into the release's summary: a release that cannot be rolled out one
+   replica at a time, or must reach every replica before a feature is turned
+   on; a moved default that a shipped mixin window (a `*Window` key in
+   `mixin/config.libsonnet`) is sized against; and a break made under the
+   security-fix reservation.
 
 5. **Decide whether this is a pre-release.** See
    [Pre-1.0 and pre-release tags](#pre-10-and-pre-release-tags) below —

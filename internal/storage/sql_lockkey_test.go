@@ -193,7 +193,8 @@ var _ = Describe("SQLLockKeyGoldenVectors", func() {
 		// The derived encoding is protocol just as the reserved ordinals are:
 		// replicas exclude one another only by deriving the same key, so a
 		// change here is a cluster-wide breaking change needing a full restart,
-		// not a rolling one (rule 11 of docs/development/locking.md).
+		// not a rolling one, and from 1.0.0 a major release (rule 11 of
+		// docs/development/locking.md).
 		//
 		// The structural assertions elsewhere in this file — bit 63 set, the
 		// openvox-ca:1: tag, the 32-hex width — all survive a change of

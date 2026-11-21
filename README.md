@@ -3,10 +3,12 @@
 > [!WARNING]
 > openvox-ca has not yet reached 1.0.0. Until a 1.0.0 release is tagged,
 > breaking changes may land at any time, without notice and without much in
-> the way of migration instructions. From 1.0.0 onwards, releases will strictly
-> follow [semantic versioning](https://semver.org/). The project is under heavy
-> development, so do not run your production fleet on it without understanding
-> the consequences.
+> the way of migration instructions. From 1.0.0 onwards, releases will follow
+> [semantic versioning](https://semver.org/) over the public API
+> [declared here](docs/development/releasing.md#what-the-version-number-promises),
+> with one reservation for security fixes.
+> The project is under heavy development, so do not run your production fleet on
+> it without understanding the consequences.
 >
 > If you are trying it out, and especially if you are adopting it early, come
 > and find us in the `#openvox-ca` channel on the
