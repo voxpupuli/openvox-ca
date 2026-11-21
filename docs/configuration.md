@@ -142,7 +142,7 @@ leaf_key_algo: ""     # "rsa" (default) or "ecdsa"
 # Either key may be set without the other: a size with no algorithm means that
 # size with the default algorithm (RSA). A size the chosen algorithm does not
 # accept is refused at startup. With neither set, leaf keys are RSA 2048; with
-# leaf_key_algo set and no size, they are RSA 4096 or ECDSA 256.
+# leaf_key_algo: ecdsa and no size, they are ECDSA 256.
 leaf_key_size: 0      # RSA: 2048/3072/4096; ECDSA: 256/384/521
 # CA certificate subject fields (applied only when bootstrapping a new CA).
 ca_subject_org: ""
