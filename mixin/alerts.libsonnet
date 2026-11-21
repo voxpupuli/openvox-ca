@@ -518,9 +518,13 @@
             // renewal), so a revoked/superseded certificate may remain valid.
             // Not every revocation that missed the CRL lands here, and which
             // ones do depends on the backend: one refused at a lock
-            // acquisition fails ahead of any CRL work and is logged only —
-            // every backend's cross-node acquisition, and on filesystem/SQLite
-            // a wait for another process on the host — while on
+            // acquisition fails ahead of any CRL work and is not counted here
+            // — every backend's cross-node acquisition, and on filesystem/SQLite
+            // a wait for another process on the host. Where the CA swallows
+            // such a failure it is counted elsewhere: the renewal and reissue
+            // retire steps on openvoxca_supersede_failures_total
+            // (OpenVoxCASupersedeFailing), a clean's revoke step on
+            // openvoxca_clean_failures_total (OpenVoxCACleanIncomplete). Meanwhile on
             // filesystem/SQLite a revocation that merely queued behind an
             // issuance in this same process past lockTimeout fails at its first
             // storage read and is counted: a benign cause worth ruling out
@@ -546,20 +550,23 @@
           },
           {
             alert: 'OpenVoxCASupersedeFailing',
-            // A certificate a renewal replaced is still a valid credential,
-            // because the CA could not schedule or carry out its delayed
-            // revocation: a supersession the renewal path could not record, a
+            // A certificate a renewal or a managed certificate's reissue
+            // replaced is still a valid credential, because the CA could not
+            // retire it: an immediate revocation that failed (where
+            // superseded_cert_revoke_after_sec, or the entry's revoke_after, is
+            // 0), a supersession the renewal path could not record, a
             // pending-revocation list it could not read or parse, or a sweep
             // pass that left an entry unrevoked or discarded one whose serial it
-            // could never revoke. Live on any CA that renews certificates,
-            // since superseded_cert_revoke_after_sec defaults to 24h; only
-            // where it is 0 does the revocation happen inside the renewal, and
-            // a failure there is a CRL failure that counts towards the alert
-            // above, which needs crlUpdateThreshold of them in its window, so a
-            // single one is left to its log warning.
-            // Even then the sweep, every renewal and every subject revocation
-            // read the pending list whatever the setting says, so a store that
-            // cannot serve that key fires this with the window closed too.
+            // could never revoke. Live on any CA that renews certificates. The
+            // immediate arm is here, and not left to the CRL alert above,
+            // because that one needs crlUpdateThreshold failures in its window
+            // and never sees the CRL lock arm; nothing retries an immediate
+            // revocation, so one failure is a certificate left valid (#679).
+            // The same holds for a managed reissue's revocation of a
+            // certificate it signed and could not store, which counts here too.
+            // The sweep, every renewal and every subject revocation read the
+            // pending list whatever the setting says, so a store that cannot
+            // serve that key fires this with the window closed too.
             // Counter resets on restart, so alert on increase() over a window.
             expr: 'increase(openvoxca_supersede_failures_total{%(selector)s}[%(window)s]) > 0' % {
               selector: $._config.openvoxCASelector,
@@ -569,7 +576,7 @@
             labels: { severity: 'warning' } + $._config.alertLabels,
             annotations: {
               summary: 'OpenVox CA is failing to revoke superseded certificates.',
-              description: 'The OpenVox CA on {{ $labels.instance }} could not schedule or carry out the revocation of a certificate a renewal replaced (openvoxca_supersede_failures_total is rising), so that certificate is still a valid credential. Check the CA logs to tell the causes apart: "Superseded-certificate revocation sweep failed" means the sweep could not read the list, take the CRL lock or write the list back, which is the likeliest cause and blocks every pending revocation at once; "failed to retire replaced certificate" means the supersession was never recorded and the serial is in the warning; "Could not revoke superseded certificates" means they were recorded but the sweep could not amend the CRL; it re-signs once for the whole pass, so every entry that pass attempted stays listed and is retried together; "Discarding" means the entry is gone and will never be retried. A store that cannot serve the superseded key raises this even where the overlap window is closed (superseded_cert_revoke_after_sec: 0) — look for "cannot determine supersession status" or "Revoke: could not read pending supersessions", which also mean renewals are being refused. Retire anything the sweep will not with openvox-ca-ctl revoke --serial <hex>. openvoxca_supersede_pending shows how many are still waiting.',
+              description: 'The OpenVox CA on {{ $labels.instance }} could not retire a certificate that a renewal or a managed certificate\'s reissue replaced (openvoxca_supersede_failures_total is rising), so that certificate is still a valid credential. Check the CA logs to tell the causes apart: "Superseded-certificate revocation sweep failed" means the sweep could not read the list, take the CRL lock or write the list back, which is the likeliest cause and blocks every pending revocation at once; "failed to retire replaced certificate" means the supersession was never recorded or, with the window closed, the immediate revocation failed, and the serial is in the warning; "could not be stored and could not then be revoked" means a managed reissue could not revoke the certificate it had just signed, and names its serial; "Could not revoke superseded certificates" means they were recorded but the sweep could not amend the CRL; it re-signs once for the whole pass, so every entry that pass attempted stays listed and is retried together; "Discarding" means the entry is gone and will never be retried. A store that cannot serve the superseded key raises this even where the overlap window is closed (superseded_cert_revoke_after_sec: 0) — look for "cannot determine supersession status" or "Revoke: could not read pending supersessions", which also mean renewals are being refused. Retire anything the sweep will not with openvox-ca-ctl revoke --serial <hex>. openvoxca_supersede_pending shows how many are still waiting.',
             },
           },
           {
@@ -998,10 +1005,10 @@
             // can present, and a first issuance that never succeeded at all --
             // the same outcome, reached two ways.
             //
-            // A failure with a live predecessor is still silent, and that is
-            // intended: the component has a working certificate, the CA logs
-            // the failure every pass, and the expiry alerts take over as the
-            // predecessor ages. This rule is about having nothing, not about
+            // A failure with a live predecessor is still silent here, and that
+            // is intended: the component has a working certificate, so this
+            // rule, which is about having nothing, has nothing to say.
+            // OpenVoxCAManagedCertificateReissueFailing, below, is the one about
             // the reconcile loop being unhappy.
             //
             // It does not cover a crashlooping CA and must not be read as
@@ -1042,6 +1049,46 @@
             annotations: {
               summary: 'A managed certificate has never been issued, or holds only revoked ones.',
               description: 'The OpenVox CA on {{ $labels.instance }} has {{ $labels.subject }} configured in managed_certs or serving_cert but no usable certificate for it after %(managedCertNeverIssuedFor)s: either none was ever issued, or every certificate it has is revoked. Whatever depends on that certificate has nothing to present. Check the CA logs for the managed-certificate reconcile pass and for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret holding somebody else\'s material, or a directory that does not exist. If the subject is the CA\'s own certname it came from serving_cert, and the CA would not have started at all had it never been issued -- so a certificate that existed no longer has a live inventory row. The rule fires on the absence of a non-revoked row, so revocation is the likeliest cause but not the only one -- check the CRL first, then the inventory itself.' % { managedCertNeverIssuedFor: $._config.managedCertNeverIssuedFor },
+            },
+          },
+          {
+            alert: 'OpenVoxCAManagedCertificateReissueFailing',
+            // The latest attempt to reconcile a managed certificate failed and
+            // nothing has succeeded since (#679). The case this exists for is
+            // an entry that has issued before: a failed store write revokes
+            // what it just signed and puts the predecessor back, so a signed
+            // certificate remains, the component keeps working, and the rule
+            // above is right to stay quiet. Without this, nothing said so
+            // until the expiry alerts took over as the predecessor aged.
+            //
+            // A gauge compared to 1 rather than increase() over a counter,
+            // because after the second consecutive failure the CA withholds
+            // the entry's passes on a backoff that doubles from 15m to a day.
+            // A counter would rise once and sit flat, and any window short
+            // enough to be useful would resolve between attempts while the
+            // entry was still broken. A withheld pass leaves the gauge at 1.
+            //
+            // The first failure is free: the next pass, one
+            // managed_cert_interval_sec later, retries it. The dwell outlasts
+            // that interval so a failure the retry clears does not fire; see
+            // managedCertReissueFailingFor.
+            //
+            // It also fires for an entry that has never issued, beside the
+            // rule above. That overlap is accepted: the rule above still covers
+            // the case this gauge cannot see, a reconcile loop that never runs
+            // and so never fails.
+            //
+            // Per replica, like the gauge: every replica reconciles every
+            // entry, and a replica that loses the subject lock reads what the
+            // winner wrote, which reads as success.
+            expr: 'openvoxca_managed_certificate_reconcile_failing{%(selector)s} == 1' % {
+              selector: $._config.openvoxCASelector,
+            },
+            'for': $._config.managedCertReissueFailingFor,
+            labels: { severity: 'warning' } + $._config.alertLabels,
+            annotations: {
+              summary: 'A managed certificate is failing to reissue.',
+              description: 'The OpenVox CA on {{ $labels.instance }} has failed to reconcile the managed certificate {{ $labels.subject }} for at least %(managedCertReissueFailingFor)s (openvoxca_managed_certificate_reconcile_failing). If it has issued before, the previous certificate is still in service, but it will not be renewed and the expiry alerts take over as it ages. The CA retries on a backoff of up to a day, and a failed store write revokes the certificate it had just signed each time. Check the CA logs for "Managed certificate not reconciled", and for "Not reissuing a managed certificate yet", whose retry_in says when it will next try, then for the store it writes to -- a Secret refused by RBAC, an unadoptable Secret, or a directory that does not exist or is read-only. If every managed certificate fires at once beside OpenVoxCAScrapeFailing, the cause is the CA\'s own storage instead: each pass takes a lock there. Fixing the store clears this only at the next attempt; restarting the CA retries at once.' % { managedCertReissueFailingFor: $._config.managedCertReissueFailingFor },
             },
           },
         ],

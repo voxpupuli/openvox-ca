@@ -150,15 +150,17 @@ func (c *CA) refuseIfSuperseded(ctx context.Context, presentedCert *x509.Certifi
 //
 // Best-effort in both modes: the caller has a signed replacement in hand and a
 // failure here must not undo it. The error is returned either way and no caller
-// treats it as fatal, but the two modes are counted in different places and
-// neither logs here — the caller does, so the log line can name the path:
+// treats it as fatal. Neither mode logs here — the caller does, so the log line
+// can name the path — but both count every failure into supersedeFailures, the
+// CRL lock acquisition included, because either way a certificate that was
+// replaced is still a valid credential and nothing will retry it:
 //
-//   - immediate — revokeSerialLocked and signCRLLocked count their own failures
-//     into crlUpdateFailures. A failure to acquire the CRL lock is counted
-//     nowhere, which is the pre-existing behaviour of the renewal paths.
-//   - delayed — recordSuperseded counts every failure into supersedeFailures,
-//     the lock acquisition included, because an unrecorded supersession is lost
-//     outright rather than merely unwritten to the CRL.
+//   - immediate — supersedeReplacedAfter counts it. revokeSerialLocked and
+//     signCRLLocked also count their own failures into crlUpdateFailures, but
+//     that alert needs two in its window, so one failure there alone would be
+//     left to the log line. The lock arm reaches neither of those.
+//   - delayed — recordSuperseded counts it, because an unrecorded supersession
+//     is lost outright rather than merely unwritten to the CRL.
 //
 // The caller must hold subject's lock and must NOT hold c.mu or the CRL lock:
 // both modes acquire the CRL lock themselves, keeping the documented
@@ -180,11 +182,17 @@ func (c *CA) supersedeReplaced(ctx context.Context, subject, oldSerial string) e
 func (c *CA) supersedeReplacedAfter(ctx context.Context, subject, oldSerial string,
 	after time.Duration) error {
 	if after <= 0 {
-		return c.Storage.WithLock(ctx, lockNameCRL, func() error {
+		err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			return c.revokeSerialLocked(ctx, oldSerial)
 		})
+		if err != nil {
+			// Whatever stopped it, the lock included: nothing records this
+			// serial, so no sweep will try again (#679).
+			c.supersedeFailures.Add(1)
+		}
+		return err
 	}
 	return c.recordSuperseded(ctx, subject, oldSerial, after)
 }
@@ -795,10 +803,12 @@ func (c *CA) PendingSupersessions(ctx context.Context) (int, error) {
 	return len(entries), nil
 }
 
-// SupersedeFailures returns the number of times the CA failed to schedule or
-// carry out a delayed revocation: a supersession it could not record, and each
-// sweep that left an entry unrevoked or discarded one it never could revoke. A
-// rising value means a certificate a renewal replaced may still be a valid
+// SupersedeFailures returns the number of times the CA failed to retire a
+// certificate a renewal or a managed certificate's reissue replaced: an
+// immediate revocation that did not happen (a managed reissue's rollback of a
+// certificate it could not store included), a supersession it could not record,
+// and each sweep that left an entry unrevoked or discarded one it never could
+// revoke. A rising value means a replaced certificate may still be a valid
 // credential; the metrics exporter surfaces it as
 // openvoxca_supersede_failures_total.
 func (c *CA) SupersedeFailures() uint64 {

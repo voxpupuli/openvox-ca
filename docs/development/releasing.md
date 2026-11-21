@@ -104,12 +104,8 @@ Not covered, so free to change in a minor or patch release:
 - **Log message text, and the order of fields in a record**, even where the
   documentation quotes a message or tells you to look for one. Logs are for a
   human to learn more once something has fired. Alert on a metric, or on an
-  audit record's `event` field. Two conditions the documentation describes
-  still have neither: a best-effort immediate revocation, after a renewal or a
-  managed certificate's reissue, that fails once, and a managed certificate
-  whose reissue keeps failing.
-  [#679](https://github.com/voxpupuli/openvox-ca/issues/679) gives them a
-  metric before 1.0.0.
+  audit record's `event` field: every condition the documentation tells you to
+  watch for has one or the other.
 - **The HTTP fine print:** error-body wording, response headers other than
   `Content-Type`, the order of `certificate_statuses`, and the body and media
   type of a request no route serves, the same things the [Puppet-parity

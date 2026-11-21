@@ -74,11 +74,11 @@ alerting rules for the openvox-ca exporter. It alerts on:
   every hourly refresh pass and warns by the second, 15 minutes after it. A
   CRL that reads but cannot be signed or written counts only when the CA
   tries to amend it, because the refresh pass writes only when the CRL is due.
-  A best-effort revocation the CA does not retry, of a certificate a renewal or
-  managed-certificate reissue replaced with immediate revocation, failing once
-  is left to its log warning. See
-  [storage-retry alerts](../docs/metrics.md#storage-retry-alerts). The same
-  failure in a clean raises `OpenVoxCACleanIncomplete`, above.
+  A best-effort revocation the CA does not retry, failing once, is reported by
+  a rule that fires on one: `OpenVoxCASupersedeFailing`, below, for a
+  certificate a renewal or managed-certificate reissue replaced with immediate
+  revocation, and `OpenVoxCACleanIncomplete`, above, for one in a clean. See
+  [storage-retry alerts](../docs/metrics.md#storage-retry-alerts).
 - **CRL propagation** — a replica that cannot reload the stored CRL, or that
   keeps enforcing one behind it. On a shared backend each replica decides
   revocation from its own copy, so a replica left behind still accepts
@@ -111,17 +111,16 @@ alerting rules for the openvox-ca exporter. It alerts on:
   reflects only the key and certificate in memory and the scrape does not read
   the inventory there; on the structured backends the scrape alert also fires,
   but without naming the inventory.
-- **Delayed-revocation failures** — the CA failing to schedule or carry out the
-  revocation of a certificate a renewal replaced, which leaves that certificate
-  a valid credential. Live on any CA that renews certificates, since
-  `superseded_cert_revoke_after_sec` defaults to 24 hours; only where it is set
-  to `0` does the revocation happen inside the renewal instead, and a failure
-  there counts towards the CRL-update alert above, which needs a second failure
-  within its window: a single one is left to its log warning. Even then a store
-  that cannot
-  serve the pending-supersession key fires this, because the sweep, every
-  renewal and every subject revocation read that key whatever the setting says.
-  See
+- **Supersession failures** — the CA failing to retire a certificate a renewal
+  or a managed certificate's reissue replaced, which leaves that certificate a
+  valid credential. Live on any CA that renews certificates. With an overlap
+  window (`superseded_cert_revoke_after_sec`, 24 hours by default) that is a
+  supersession it could not record or a sweep that could not carry it out;
+  where the window is `0` (or a `managed_certs` entry's `revoke_after` is) the
+  revocation happens inside the renewal or reissue, and one that fails fires
+  this too, since nothing retries it. A store that cannot
+  serve the pending-supersession key also fires it whatever the window, because
+  the sweep, every renewal and every subject revocation read that key. See
   [delayed supersession](../docs/configuration.md#delayed-supersession).
 - **Client trust domains** in three rules, and only where
   [`client_ca`](../docs/configuration.md#trusting-client-certificates-from-another-ca)
@@ -151,9 +150,15 @@ alerting rules for the openvox-ca exporter. It alerts on:
   in use; the CA's own serving certificate is one such entry).
   It covers an entry whose store has never accepted a write, and an entry whose
   live certificate was revoked and not yet reissued; both leave the component
-  with nothing to present, which is why they page under one name. It does not
-  cover an entry that is failing to renew — once a signed certificate exists,
-  the leaf expiry alerts above cover it with no new series.
+  with nothing to present, which is why they page under one name. An entry that
+  is failing to renew has its own alert, below.
+- **Managed certificates failing to reissue**
+  (`OpenVoxCAManagedCertificateReissueFailing`, a warning) — an entry whose
+  latest reconcile failed and has not succeeded for 30 minutes. A failed store
+  write puts the previous certificate back, so the component keeps working, but
+  it will not be renewed and the leaf expiry alerts would otherwise be the
+  first word of it. It fires for a never-issued entry too, beside the alert
+  above.
 
 All thresholds and the target selector live in [`config.libsonnet`](config.libsonnet)
 and can be overridden without editing the rules.
@@ -288,6 +293,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `fileExportStaleAfterSeconds` | 600 (10 minutes) | How long a file export target may go without a sync that confirms it current before `OpenVoxCAFileExportStale` counts it stale. The CA syncs every `file_export.interval_sec` (60s by default, at most 300s), so keep this at least twice that ceiling; a spec in `internal/fileexport` fails if it drops below. |
 | `fileExportStaleFor` | `5m` | `for:` dwell on top of the threshold. Together they page 15 minutes after the last confirmed sync, and 5 minutes into a CA whose target has never synced. |
 | `managedCertNeverIssuedFor` | `1h` | How long a configured managed certificate may go without ever being issued before alerting. Deliberately longer than one reconcile interval: every remedy is manual, and a certificate nothing has yet is not an emergency in the first hour of an install. Raise it if you have raised `managed_cert_interval_sec`. |
-| `supersedeWindow` | `1h` | Window over which delayed-revocation failures are counted (the metric is a restart-resetting counter). |
-| `supersedeFor` | `30m` | `for:` debounce for the delayed-revocation-failure alert. Longer than the CRL ones because the sweep retries on its own interval; raise it if you have raised `superseded_cert_sweep_interval_sec`. |
+| `managedCertReissueFailingFor` | `30m` | How long a managed certificate's latest reconcile may stay failed before alerting. Outlasts one reconcile interval (`managed_cert_interval_sec`, 15 minutes by default) so the free retry of a single failure does not fire it; raise it if you raise that interval. |
+| `supersedeWindow` | `1h` | Window over which supersession failures — immediate or delayed — are counted (the metric is a restart-resetting counter). |
+| `supersedeFor` | `30m` | `for:` debounce for the supersession-failure alert. Longer than the CRL ones because the sweep retries on its own interval; raise it if you have raised `superseded_cert_sweep_interval_sec`. An immediate revocation is not retried, but one failure still holds the alert for the whole `supersedeWindow`, so it fires all the same. |
 | `expiryFor` / `scrapeFor` / `readyFor` / `downFor` | `1h` / `15m` / `10m` / `5m` | `for:` debounce durations. Below `1h`, `expiryFor` lets an expiry alert fire on data the exporter is holding after a failed gather — see [When a gather fails](../docs/metrics.md#when-a-gather-fails). |
