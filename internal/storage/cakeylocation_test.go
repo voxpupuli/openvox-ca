@@ -44,16 +44,16 @@ func skipAsRoot(why string) {
 
 // The filesystem backend keeps the CA key where OpenVox Server does, at the top
 // of the cadir, so a cadir handed back to OpenVox Server has it where it looks.
-// A cadir that has it only in private/, where builds of main before
-// v1.0.0-alpha1 kept it, is read and written there; neither layout is
-// rearranged by starting on it.
 var _ = Describe("Filesystem CA key location", func() {
 	var (
-		ctx    = context.Background()
-		dir    string
-		store  *storage.StorageService
-		top    string
-		legacy string
+		ctx   = context.Background()
+		dir   string
+		store *storage.StorageService
+		top   string
+		// stray is private/ca_key.pem: the name a key generated for the
+		// subject "ca" would have, and nothing this backend reads as the CA
+		// key.
+		stray string
 	)
 
 	BeforeEach(func() {
@@ -61,7 +61,7 @@ var _ = Describe("Filesystem CA key location", func() {
 		store = storage.New(dir)
 		Expect(store.EnsureDirs(ctx)).To(Succeed())
 		top = filepath.Join(dir, "ca_key.pem")
-		legacy = filepath.Join(dir, "private", "ca_key.pem")
+		stray = filepath.Join(dir, "private", "ca_key.pem")
 	})
 
 	It("writes a new key at the top of the cadir, private to the owner", func() {
@@ -70,7 +70,7 @@ var _ = Describe("Filesystem CA key location", func() {
 		info, err := os.Stat(top)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o600)))
-		Expect(legacy).NotTo(BeAnExistingFile())
+		Expect(stray).NotTo(BeAnExistingFile())
 	})
 
 	It("reads the key OpenVox Server left at the top of the cadir", func() {
@@ -93,138 +93,40 @@ var _ = Describe("Filesystem CA key location", func() {
 		Expect(info.Mode().Perm()).To(Equal(os.FileMode(0o640)))
 	})
 
-	Context("when the cadir keeps the key only in private/", func() {
+	Context("when a file named ca_key.pem sits in private/", func() {
 		BeforeEach(func() {
-			Expect(os.WriteFile(legacy, []byte("old-key"), 0o600)).To(Succeed())
+			Expect(os.WriteFile(stray, []byte("other-key"), 0o600)).To(Succeed())
 		})
 
-		It("reads it there", func() {
-			Expect(store.GetCAKey(ctx)).To(Equal([]byte("old-key")))
-			Expect(store.HasCAKey(ctx)).To(BeTrue())
-		})
-
-		It("writes it there, rather than creating a second key beside it", func() {
-			// A write to the top of the cadir would leave two different keys,
-			// which every later read refuses.
-			Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(Succeed())
-			Expect(os.ReadFile(legacy)).To(Equal([]byte("new-key")))
-			Expect(top).NotTo(BeAnExistingFile())
-		})
-
-		It("deletes it there, and leaves no key behind", func() {
-			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(Succeed())
-			Expect(legacy).NotTo(BeAnExistingFile())
-			Expect(top).NotTo(BeAnExistingFile())
+		It("does not take it for the CA key", func() {
 			Expect(store.HasCAKey(ctx)).To(BeFalse())
 			_, err := store.GetCAKey(ctx)
 			Expect(err).To(MatchError(fs.ErrNotExist))
 		})
-	})
 
-	Context("when both locations hold the same key", func() {
-		BeforeEach(func() {
-			Expect(os.WriteFile(top, []byte("same-key"), 0o600)).To(Succeed())
-			Expect(os.WriteFile(legacy, []byte("same-key"), 0o600)).To(Succeed())
-		})
-
-		It("reads it", func() {
-			Expect(store.GetCAKey(ctx)).To(Equal([]byte("same-key")))
-		})
-
-		It("replaces both copies when a new key is written", func() {
-			// Written to the top-level file alone, the private/ copy would
-			// still hold the old key, and every later read would refuse.
+		It("writes a new key at the top of the cadir, and leaves that file alone", func() {
 			Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(Succeed())
 			Expect(os.ReadFile(top)).To(Equal([]byte("new-key")))
-			Expect(legacy).NotTo(BeAnExistingFile())
+			Expect(os.ReadFile(stray)).To(Equal([]byte("other-key")))
 			Expect(store.GetCAKey(ctx)).To(Equal([]byte("new-key")))
 		})
 
-		It("changes nothing when the private/ copy cannot be removed", func() {
-			// The old copy goes first, so a failure there leaves the pair
-			// as it was rather than a new key beside an old one.
-			skipAsRoot("root removes a file whatever the directory's mode")
-			privDir := filepath.Dir(legacy)
-			Expect(os.Chmod(privDir, 0o500)).To(Succeed())
-			DeferCleanup(os.Chmod, privDir, os.FileMode(0o750))
-
-			Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(MatchError(fs.ErrPermission))
-			Expect(store.GetCAKey(ctx)).To(Equal([]byte("same-key")))
-		})
-
-		It("removes both copies when the key is deleted", func() {
-			// Left behind, the second copy would be found and used.
+		It("deletes the CA key without touching it", func() {
+			Expect(os.WriteFile(top, []byte("ca-key"), 0o600)).To(Succeed())
 			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(Succeed())
 			Expect(top).NotTo(BeAnExistingFile())
-			Expect(legacy).NotTo(BeAnExistingFile())
-			_, err := store.GetCAKey(ctx)
-			Expect(err).To(MatchError(fs.ErrNotExist))
+			Expect(os.ReadFile(stray)).To(Equal([]byte("other-key")))
 		})
 	})
 
-	Context("when the two locations hold different keys", func() {
-		BeforeEach(func() {
-			Expect(os.WriteFile(top, []byte("one-key"), 0o600)).To(Succeed())
-			Expect(os.WriteFile(legacy, []byte("another-key"), 0o600)).To(Succeed())
-		})
+	It("refuses to read a key file it cannot read", func() {
+		skipAsRoot("root reads a file whatever its mode")
+		Expect(os.WriteFile(top, []byte("one-key"), 0o600)).To(Succeed())
+		Expect(os.Chmod(top, 0o000)).To(Succeed())
+		DeferCleanup(os.Chmod, top, os.FileMode(0o600))
 
-		It("refuses to read either", func() {
-			_, err := store.GetCAKey(ctx)
-			Expect(err).To(MatchError(storage.ErrCAKeyConflict))
-			Expect(err).To(MatchError(ContainSubstring(top)), "the error must name both files")
-			Expect(err).To(MatchError(ContainSubstring(legacy)), "the error must name both files")
-		})
-
-		It("still says a key exists, which needs neither file read", func() {
-			// The refusal belongs to the operations that handle the key:
-			// answering "is there a key" must not read it (see the
-			// "without reading the key" Context below).
-			Expect(store.HasCAKey(ctx)).To(BeTrue())
-		})
-
-		It("refuses to overwrite either, and changes neither", func() {
-			Expect(store.SaveCAKey(ctx, []byte("third-key"))).To(MatchError(storage.ErrCAKeyConflict))
-			Expect(os.ReadFile(top)).To(Equal([]byte("one-key")))
-			Expect(os.ReadFile(legacy)).To(Equal([]byte("another-key")))
-		})
-
-		It("refuses to delete either", func() {
-			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(MatchError(storage.ErrCAKeyConflict))
-			Expect(top).To(BeAnExistingFile())
-			Expect(legacy).To(BeAnExistingFile())
-		})
-	})
-
-	Context("when a key file cannot be read", func() {
-		BeforeEach(func() {
-			skipAsRoot("root reads a file whatever its mode")
-		})
-
-		// Unreadable is not absent. Read as absent, an unreadable ca_key.pem
-		// would hand every operation the private/ copy instead, which may
-		// not be the key this CA signs with.
-		It("refuses rather than fall back to private/ca_key.pem", func() {
-			Expect(os.WriteFile(top, []byte("one-key"), 0o600)).To(Succeed())
-			Expect(os.WriteFile(legacy, []byte("another-key"), 0o600)).To(Succeed())
-			Expect(os.Chmod(top, 0o000)).To(Succeed())
-			DeferCleanup(os.Chmod, top, os.FileMode(0o600))
-
-			_, err := store.GetCAKey(ctx)
-			Expect(err).To(MatchError(fs.ErrPermission))
-			Expect(store.SaveCAKey(ctx, []byte("third-key"))).To(MatchError(fs.ErrPermission))
-			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(MatchError(fs.ErrPermission))
-			Expect(os.ReadFile(legacy)).To(Equal([]byte("another-key")))
-		})
-
-		It("refuses when private/ca_key.pem cannot be read either", func() {
-			Expect(os.WriteFile(top, []byte("one-key"), 0o600)).To(Succeed())
-			Expect(os.WriteFile(legacy, []byte("another-key"), 0o600)).To(Succeed())
-			Expect(os.Chmod(legacy, 0o000)).To(Succeed())
-			DeferCleanup(os.Chmod, legacy, os.FileMode(0o600))
-
-			_, err := store.GetCAKey(ctx)
-			Expect(err).To(MatchError(fs.ErrPermission))
-		})
+		_, err := store.GetCAKey(ctx)
+		Expect(err).To(MatchError(fs.ErrPermission))
 	})
 
 	// The network-facing frontend never has the CA key in its address space
@@ -237,11 +139,8 @@ var _ = Describe("Filesystem CA key location", func() {
 		BeforeEach(func() {
 			skipAsRoot("root reads a file whatever its mode")
 			Expect(os.WriteFile(top, []byte("one-key"), 0o600)).To(Succeed())
-			Expect(os.WriteFile(legacy, []byte("another-key"), 0o600)).To(Succeed())
 			Expect(os.Chmod(top, 0o044)).To(Succeed())
-			Expect(os.Chmod(legacy, 0o044)).To(Succeed())
 			DeferCleanup(os.Chmod, top, os.FileMode(0o600))
-			DeferCleanup(os.Chmod, legacy, os.FileMode(0o600))
 		})
 
 		It("reports the key's permissions", func() {
@@ -268,14 +167,13 @@ var _ = Describe("Filesystem CA key location", func() {
 
 	Context("when ca_key.pem is a link that leads nowhere", func() {
 		// A dangling link where the key is expected is a key that should be
-		// there. It must fail, never read as absent: that would hand every
-		// operation the private/ copy, or let a write or a delete remove it.
+		// there. It must fail, never read as absent: that would have a
+		// migration skip the key, or let a write or a delete replace the link.
 		BeforeEach(func() {
 			Expect(os.Symlink(filepath.Join(dir, "gone.pem"), top)).To(Succeed())
-			Expect(os.WriteFile(legacy, []byte("old-key"), 0o600)).To(Succeed())
 		})
 
-		It("refuses to read either", func() {
+		It("refuses to read it", func() {
 			_, err := store.GetCAKey(ctx)
 			Expect(err).To(MatchError(storage.ErrCAKeyLinkBroken))
 			Expect(err).NotTo(MatchError(fs.ErrNotExist), "callers read ErrNotExist as no key")
@@ -292,45 +190,20 @@ var _ = Describe("Filesystem CA key location", func() {
 			Expect(err).To(MatchError(storage.ErrCAKeyLinkBroken))
 		})
 
-		It("refuses a private/ca_key.pem link that leads nowhere too", func() {
-			Expect(os.Remove(top)).To(Succeed())
-			Expect(os.Remove(legacy)).To(Succeed())
-			Expect(os.Symlink(filepath.Join(dir, "gone.pem"), legacy)).To(Succeed())
-			_, err := store.GetCAKey(ctx)
-			Expect(err).To(MatchError(storage.ErrCAKeyLinkBroken))
-			_, err = store.HasCAKey(ctx)
-			Expect(err).To(MatchError(storage.ErrCAKeyLinkBroken))
-		})
-
-		It("names the link, not private/ca_key.pem, as the key's location", func() {
+		It("names the link as the key's location", func() {
 			// What diagnostics report, and the file a fix belongs in.
 			Expect(store.CAKeyPath()).To(Equal(top))
 		})
 
-		It("refuses to write, and leaves private/ca_key.pem alone", func() {
+		It("refuses to write, and leaves the link in place", func() {
 			Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(MatchError(storage.ErrCAKeyLinkBroken))
-			Expect(os.ReadFile(legacy)).To(Equal([]byte("old-key")))
+			Expect(os.Readlink(top)).To(Equal(filepath.Join(dir, "gone.pem")))
 		})
 
-		It("refuses to delete, and leaves private/ca_key.pem alone", func() {
+		It("refuses to delete, and leaves the link in place", func() {
 			Expect(store.Backend().Delete(ctx, storage.KeyCAKey)).To(MatchError(storage.ErrCAKeyLinkBroken))
-			Expect(os.ReadFile(legacy)).To(Equal([]byte("old-key")))
+			Expect(os.Readlink(top)).To(Equal(filepath.Join(dir, "gone.pem")))
 		})
-	})
-
-	It("refuses when it cannot tell whether private/ca_key.pem is there", func() {
-		// Not knowing is not "absent": resolving to the top-level path would
-		// give a fresh key's location to a cadir that may already have one.
-		skipAsRoot("root searches a directory whatever its mode")
-		Expect(os.WriteFile(legacy, []byte("old-key"), 0o600)).To(Succeed())
-		privDir := filepath.Dir(legacy)
-		Expect(os.Chmod(privDir, 0o600)).To(Succeed())
-		DeferCleanup(os.Chmod, privDir, os.FileMode(0o750))
-
-		_, err := store.GetCAKey(ctx)
-		Expect(err).To(MatchError(fs.ErrPermission))
-		Expect(store.SaveCAKey(ctx, []byte("new-key"))).To(MatchError(fs.ErrPermission))
-		Expect(top).NotTo(BeAnExistingFile())
 	})
 
 	Describe("CheckKeyPermissions", func() {
@@ -369,12 +242,12 @@ var _ = Describe("Filesystem CA key location", func() {
 			Expect(wrapped.CheckKeyPermissions()).To(BeEmpty())
 		})
 
-		It("reports a key kept in private/ once, not twice", func() {
-			Expect(os.WriteFile(legacy, []byte("key"), 0o644)).To(Succeed())
-			Expect(os.Chmod(legacy, 0o644)).To(Succeed())
+		It("reports a ca_key.pem in private/ as it does any key there, once", func() {
+			Expect(os.WriteFile(stray, []byte("key"), 0o644)).To(Succeed())
+			Expect(os.Chmod(stray, 0o644)).To(Succeed())
 
 			Expect(store.CheckKeyPermissions()).To(ConsistOf(
-				storage.KeyPermWarning{Path: legacy, Mode: 0o644}))
+				storage.KeyPermWarning{Path: stray, Mode: 0o644}))
 		})
 	})
 })

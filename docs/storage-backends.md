@@ -297,9 +297,8 @@ Where it does bite, you have three options:
    only where the group is the CA's own. It is no help on a backend whose other
    files a later uid cannot reach anyway: the filesystem backend is one, and
    [the SQLite backend](#sqlite-backend) says what that one needs. On the
-   filesystem backend `private/` also holds the inventory's integrity key and,
-   in a cadir that keeps it there, the CA key (`private/ca_key.pem`), which
-   group write would let the group replace or remove.
+   filesystem backend `private/` also holds the inventory's integrity key,
+   which group write would let the group replace or remove.
 3. **For the offline command only, use `--key-out`.** It writes the key to the
    file you name and writes none into `private/`. `/generate` has no
    equivalent: it always keeps a copy.
@@ -336,11 +335,7 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ```
 
 > **`ca_key.pem` is where OpenVox Server keeps its CA key**, so a cadir either
-> implementation has used has the key where the other looks. If the key is in
-> `private/ca_key.pem` instead, openvox-ca reads and writes it there. If both
-> files exist with different contents, openvox-ca refuses to start and names
-> both: either could be the key this CA signs with, and only you can say which.
-> Remove the other one.
+> implementation has used has the key where the other looks.
 >
 > **`superseded.json` is absent until the first supersession.** It appears only
 > where [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession)
@@ -380,8 +375,7 @@ already on disk is left as you have it — but it does check its key material at
 startup. That is `ca_key.pem`, every file under `private/` — the per-subject
 `*_key.pem` keys and the inventory-integrity key alike, because that directory
 holds secrets by construction — and a `ca_key_passphrase_file` you point it at.
-A cadir that keeps its CA key in `private/ca_key.pem` has it checked there. A
-file readable by every local account
+A file readable by every local account
 makes it **refuse to start**, naming the file and the `chmod` that fixes it; one
 readable only by its group is reported at `Info` and does not stop the CA.
 
@@ -459,10 +453,7 @@ four hex digits, and `/CN=<certname>`. It also reads the shorter
 `<serial> ... /<certname>` form, in the same file, and never rewrites a line
 except to drop an expired one during cleanup.
 
-That covers a cadir either OpenVox Server or openvox-ca created. A cadir that
-keeps its key in `private/ca_key.pem` is the exception: openvox-ca goes on
-reading and writing the key there, but OpenVox Server looks for it at the top of
-the cadir, so it cannot take that directory as it stands.
+That covers a cadir either OpenVox Server or openvox-ca created.
 
 - **To start openvox-ca on OpenVox Server's cadir**, stop OpenVox Server's CA
   and point `cadir` at the directory. There is no import step. The first start
@@ -1339,7 +1330,7 @@ the logical key `ca_key`:
 
 | Backend | Where the key is | How to remove it |
 | --- | --- | --- |
-| `filesystem` (default) | `ca_key.pem` under the cadir (or `private/ca_key.pem`, if that is where it is) | `rm` the file |
+| `filesystem` (default) | `ca_key.pem` under the cadir | `rm` the file |
 | `ca_key_file` overlay | the configured path | `rm` the file |
 | `sqlite`, `postgres`, `mysql` | table `puppet_ca_blobs`, column `blob_key`, value `ca_key` | `DELETE FROM puppet_ca_blobs WHERE blob_key = 'ca_key';` |
 | `etcd` | `<prefix>/ca/key` | `etcdctl del <prefix>/ca/key` |

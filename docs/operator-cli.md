@@ -670,9 +670,9 @@ your fleet trusts and no obvious sign of why.
 
 **It refuses the certname `ca`**, with or without `--key-out`, before opening
 the storage. Without `--key-out` the key would go to `private/ca_key.pem`, which
-on the filesystem backend is where some cadirs keep the CA key itself. `POST /generate/ca` and a managed certificate named
-`ca` are refused too, so that the name means one thing on every path that
-generates a key. Submitting a CSR for `ca` is still accepted.
+is easily taken for the CA key itself. `POST /generate/ca` and a managed
+certificate named `ca` are refused too, so that the name means one thing on
+every path that generates a key. Submitting a CSR for `ca` is still accepted.
 
 #### Where the private key goes
 

@@ -45,43 +45,30 @@ var _ = Describe("Init and where the cadir keeps the CA key", func() {
 		Expect(store.TouchInventory(ctx)).To(Succeed())
 	})
 
-	It("refuses to start when the two keys differ", func() {
-		// One is the key OpenVox Server signs with, the other the one in
-		// private/; nothing here can tell which the operator means, so starting
-		// at all would be a guess.
-		Expect(os.WriteFile(filepath.Join(dir, "ca_key.pem"), cachedKeyPEM, 0o600)).To(Succeed())
-		Expect(os.WriteFile(filepath.Join(dir, "private", "ca_key.pem"), []byte("some other key"), 0o600)).To(Succeed())
+	It("refuses to start on a cadir with the key only in private/, and changes nothing", func() {
+		// private/ca_key.pem is not where the CA key lives, so this is a CA
+		// certificate without its key. Bootstrapping would replace the
+		// certificate every issued certificate chains to, so Init refuses, and
+		// neither file moves.
+		stray := filepath.Join(dir, "private", "ca_key.pem")
+		Expect(os.WriteFile(stray, cachedKeyPEM, 0o600)).To(Succeed())
 
 		err := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test").Init(ctx)
-		Expect(err).To(MatchError(storage.ErrCAKeyConflict))
-	})
-
-	It("starts, signs and revokes on a cadir with the key only in private/, and leaves it there", func() {
-		// A cadir that keeps its key in private/. It keeps working where it
-		// is: nothing moves the key to the top of the cadir.
-		Expect(os.WriteFile(filepath.Join(dir, "private", "ca_key.pem"), cachedKeyPEM, 0o600)).To(Succeed())
-		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
-		Expect(myCA.Init(ctx)).To(Succeed())
-
-		csrPEM, _ := buildCSR("legacy-node")
-		_, err := myCA.SaveRequest(ctx, "legacy-node", csrPEM)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = myCA.Sign(ctx, "legacy-node")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(myCA.Revoke(ctx, "legacy-node")).To(Succeed())
+		Expect(err).To(MatchError(ContainSubstring("a CA certificate exists but its key is missing")))
 
 		Expect(filepath.Join(dir, "ca_key.pem")).NotTo(BeAnExistingFile())
-		Expect(os.ReadFile(filepath.Join(dir, "private", "ca_key.pem"))).To(Equal(cachedKeyPEM))
+		Expect(os.ReadFile(stray)).To(Equal(cachedKeyPEM))
+		Expect(store.GetCACert(ctx)).To(Equal(cachedCrtPEM))
 	})
 
-	It("starts when both hold the same key", func() {
+	It("starts on ca_key.pem and leaves a private/ca_key.pem beside it alone", func() {
 		Expect(os.WriteFile(filepath.Join(dir, "ca_key.pem"), cachedKeyPEM, 0o600)).To(Succeed())
-		Expect(os.WriteFile(filepath.Join(dir, "private", "ca_key.pem"), cachedKeyPEM, 0o600)).To(Succeed())
+		stray := filepath.Join(dir, "private", "ca_key.pem")
+		Expect(os.WriteFile(stray, []byte("some other key"), 0o600)).To(Succeed())
 
 		Expect(ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test").Init(ctx)).To(Succeed())
 
-		// Starting rearranges nothing: both copies are still there, unchanged.
 		Expect(os.ReadFile(filepath.Join(dir, "ca_key.pem"))).To(Equal(cachedKeyPEM))
-		Expect(os.ReadFile(filepath.Join(dir, "private", "ca_key.pem"))).To(Equal(cachedKeyPEM))
+		Expect(os.ReadFile(stray)).To(Equal([]byte("some other key")))
 	})
 })
