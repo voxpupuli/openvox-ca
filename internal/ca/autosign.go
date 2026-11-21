@@ -44,6 +44,24 @@ const defaultExecutableTimeout = 30 * time.Second
 // descendant lives. A run therefore takes at most the timeout plus this.
 const autosignWaitDelay = 2 * time.Second
 
+// autosignConcurrency caps how many autosign executables one CA runs at once.
+//
+// SaveRequest used to run the policy under c.mu, which serialised every run in
+// the process and stalled everything else with it (#664). Running the policy
+// outside c.mu removed that cap as well, and the endpoint that starts a run
+// needs no authentication: every in-flight CSR for a different certname would
+// start an executable of its own, bounded only by the per-address
+// csr_rate_limit, and put as many calls at once on whatever the policy
+// consults. Eight lets a fleet enrol in parallel against a policy that answers
+// within a second or so, while keeping the processes, and the load on an
+// inventory service, small. It is a constant until someone needs to tune it.
+const autosignConcurrency = 8
+
+// autosignSigningMargin is the time a request keeps back for the signature
+// that follows an approval, on top of the policy's longest run. See
+// acquireAutosignSlot.
+const autosignSigningMargin = 5 * time.Second
+
 type AutosignConfig struct {
 	Mode              string        // "true", "file", "executable" (or "off" implicitly)
 	FileOrPath        string        // Path to autosign.conf or executable
@@ -66,6 +84,58 @@ func CheckAutosign(cfg AutosignConfig, csr *x509.CertificateRequest, csrPEM []by
 		return checkAutosignExecutable(cfg, csr.Subject.CommonName, csrPEM)
 	default:
 		return false, nil
+	}
+}
+
+// autosignNeedsSlot reports whether running this CA's autosign policy takes
+// one of the autosignConcurrency slots: only an executable does, since the
+// other modes decide without starting a process.
+func (c *CA) autosignNeedsSlot() bool {
+	return c.AutosignConfig.Mode == "executable" && c.autosignSlots != nil
+}
+
+// acquireAutosignSlot takes one of autosignConcurrency slots for an autosign
+// run and returns the function that gives it back. When the policy needs no
+// slot it takes none and returns a no-op.
+//
+// A free slot is taken at once. Otherwise the wait ends early enough to leave
+// the run and the signature their time: the run's timeout, autosignWaitDelay
+// and autosignSigningMargin come off ctx's deadline. The wait, the run and the
+// signature share that deadline, and the CSR is saved once the slot is held,
+// so a request let in with too little left would be approved, fail to sign,
+// and leave its CSR pending, where the agent's next submission is refused as a
+// duplicate. Better that it gives up in the queue, having saved nothing.
+//
+// The caller must hold the subject lock and must NOT hold c.mu: a full set of
+// slots is a queue, and queueing under c.mu is the stall #664 removed. The
+// caller must defer the release, so a panic in the run cannot keep the slot
+// for good.
+func (c *CA) acquireAutosignSlot(ctx context.Context) (func(), error) {
+	if !c.autosignNeedsSlot() {
+		return func() {}, nil
+	}
+	release := func() { <-c.autosignSlots }
+	select {
+	case c.autosignSlots <- struct{}{}:
+		return release, nil
+	default:
+	}
+
+	waitCtx := ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout := c.AutosignConfig.ExecutableTimeout
+		if timeout == 0 {
+			timeout = defaultExecutableTimeout
+		}
+		var cancel context.CancelFunc
+		waitCtx, cancel = context.WithDeadline(ctx, deadline.Add(-(timeout + autosignWaitDelay + autosignSigningMargin)))
+		defer cancel()
+	}
+	select {
+	case c.autosignSlots <- struct{}{}:
+		return release, nil
+	case <-waitCtx.Done():
+		return nil, fmt.Errorf("waiting to run the autosign executable: %w", waitCtx.Err())
 	}
 }
 

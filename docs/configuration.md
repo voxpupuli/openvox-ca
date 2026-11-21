@@ -2566,6 +2566,23 @@ reports are writable by people you would trust to sign certificates.
 The allowlist file (a non-executable `--autosign-config` path) is not checked
 this way.
 
+### Concurrent autosign runs
+
+The executable runs once for each CSR submitted, and runs for different
+certnames overlap: each CA process runs up to 8 at once, so N replicas run up
+to N × 8. Make the executable safe to run concurrently, with no shared
+temporary file or unlocked counter, and expect whatever it consults, such as an
+inventory service, to see that many calls at once. Runs for the same certname
+never overlap. The limit of 8 is fixed.
+
+A CSR that arrives while all 8 are busy waits for one to finish, but only while
+its request still has time to run the executable and be signed. One that cannot
+be served in time is turned away before anything is saved: the agent gets a
+`500`, which ends its run, and submits again on its next one, and the CA logs a
+`WARN` saying no autosign slot came free. Waiting for a slot holds up nothing
+else the CA does. The allowlist and `autosign: true` start no process and never
+wait.
+
 ### Subject alternative names requested by a CSR
 
 `allow_subject_alt_names` decides whether a submitted CSR may ask for Subject
