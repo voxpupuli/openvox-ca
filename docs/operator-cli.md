@@ -192,7 +192,10 @@ openvox-ca-ctl revoke --serial 472C95FAA0DAE424BD7E911E26066010 --force
 # Revoke + delete cert and CSR, which is what lets the node submit a new CSR:
 # while a subject holds either, PUT /certificate_request refuses it with a 400
 # (unless allow_duplicate_certs is set). The delete happens even if the revocation
-# fails, so check the server log: a certificate that could not be revoked
+# fails, and clean still reports success, so watch
+# openvoxca_clean_failures_total{step} (the shipped mixin's
+# OpenVoxCACleanIncomplete), and read the server log's "Clean:" WARN lines for
+# the subject: a certificate that could not be revoked
 # stays a valid credential until it expires, and it is no longer in storage
 # to clean again. See docs/api.md for the state that causes it. To recover, fix
 # that state and revoke the certificate that was deleted but not revoked: the
@@ -202,9 +205,9 @@ openvox-ca-ctl revoke --serial 472C95FAA0DAE424BD7E911E26066010 --force
 # only when the revocation got as far as the CRL; otherwise take it from the
 # inventory (the 0x the filesystem inventory writes before it is accepted). See
 # docs/api.md for which is which. The deletes are best-effort too and still
-# report success: a "Clean: delete cert failed" or "Clean: delete CSR failed"
-# WARN means the subject still holds it and still refuses the node's CSR, so
-# run clean again once storage is healthy.
+# report success: step="delete_cert" or step="delete_csr" means the subject
+# still holds it and still refuses the node's CSR, so run clean again once
+# storage is healthy.
 openvox-ca-ctl clean --certname agent.example.com
 
 # Re-sign the CRL with a fresh validity window (preserves all revocations)
@@ -933,8 +936,8 @@ resolved, so it cannot see `--no-pp-cli-auth` passed as a server flag, and it
 can refuse when a shared config file sets it but the running server does not.
 
 Note also what is *not* recorded. The inventory line is the Puppet-compatible
-format — serial, dates, subject — with nothing about the grant, so the log
-message this command emits is the only record distinguishing an administrator
+format — serial, dates, subject — with nothing about the grant, so the audit
+record this command emits is the only record distinguishing an administrator
 credential from a node one. It is written by whoever ran the command, and it
 only lands somewhere durable if `logfile` is configured in a file this command
 can read **and that file already exists**. `generate` deliberately never creates
@@ -944,28 +947,31 @@ would fail to start. In the flagship case — minting before the first start —
 that means the record is terminal-only unless you create the file first with the
 server's runtime ownership, or capture stderr.
 
-The line to alert on is `Issued certificate carrying a Puppet authorisation
-extension`, with attributes `subject` and `grant`. The server writes the same
-line whenever it [renews](api.md#certificate-renewal) a certificate carrying a
-grant, with a third attribute, `renewal`: `same key` when the renewed
-certificate keeps the original's key (an auto-renewal, or a renewal CSR over
-that key), or `re-key` when a renewal CSR moved the grant onto a new key. `--force` emits a second one
-for the certificate it retired: `Revoked a certificate to make room for its
-replacement`, at `INFO`, with `subject` and `serial`.
+The record to alert on is the [audit record](configuration.md#audit-events)
+`event=certificate.auth_grant_issued`, with attributes `subject` and `grant`.
+There is no metric for it: this command runs offline, with no `/metrics`. The
+server writes the same record whenever it
+[renews](api.md#certificate-renewal) a certificate carrying a grant, with a
+third attribute, `renewal`: `same key` when the renewed certificate keeps the
+original's key (an auto-renewal, or a renewal CSR over that key), or `re-key`
+when a renewal CSR moved the grant onto a new key. `--force` emits a second
+record for the certificate it retired: `Revoked a certificate to make room for
+its replacement`, at `INFO`, with `subject` and `serial`. That one is an
+ordinary log record, with no `event`.
 
-Match on the message string and the attribute names, not on a copied line: the
-two sinks use different encodings. With no `logfile`, logging goes to stderr as
-logfmt —
+Match on `event` and the attribute names, not on the message or a copied line:
+the message may be reworded in any release, and the two sinks use different
+encodings. With no `logfile`, logging goes to stderr as logfmt —
 
 ```text
-level=WARN msg="Issued certificate carrying a Puppet authorisation extension" role=generate subject=openvox-admin grant="pp_cli_auth=true"
+level=WARN msg="Issued certificate carrying a Puppet authorisation extension" role=generate event=certificate.auth_grant_issued subject=openvox-admin grant="pp_cli_auth=true"
 ```
 
 — while a configured `logfile`, which is what reaches a log aggregator, gets
 JSON:
 
 ```json
-{"level":"WARN","msg":"Issued certificate carrying a Puppet authorisation extension","role":"generate","subject":"openvox-admin","grant":"pp_cli_auth=true"}
+{"level":"WARN","msg":"Issued certificate carrying a Puppet authorisation extension","role":"generate","event":"certificate.auth_grant_issued","subject":"openvox-admin","grant":"pp_cli_auth=true"}
 ```
 
 Both are worth a rule wherever these logs are aggregated; see

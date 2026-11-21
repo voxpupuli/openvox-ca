@@ -828,6 +828,11 @@ var _ = Describe("openvox-ca generate", func() {
 			// The server's logfile is shared, so the record has to say it came
 			// from an offline mint rather than from the running server.
 			Expect(entry).To(HaveKeyWithValue("role", "generate"))
+			// The audit event, which is what docs/operator-cli.md tells
+			// operators to alert on: the offline mint has no /metrics, so the
+			// record is the only signal. A literal, because from 1.0.0 it is
+			// public API.
+			Expect(entry).To(HaveKeyWithValue("event", "certificate.auth_grant_issued"))
 		})
 
 		It("does not create a missing logfile, and mints anyway", func() {

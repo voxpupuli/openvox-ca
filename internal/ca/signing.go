@@ -41,6 +41,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/voxpupuli/openvox-ca/internal/audit"
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
@@ -296,6 +297,14 @@ func (c *CA) checkDuplicateLocked(ctx context.Context, subject string) error {
 		}
 		slog.Info("Accepting a duplicate certificate request (allow_duplicate_certs)", attrs...)
 		return nil
+	}
+	switch state {
+	case DuplicateRequested:
+		c.duplicateRefusals.requested.Add(1)
+	case DuplicateSigned:
+		c.duplicateRefusals.signed.Add(1)
+	case DuplicateRevoked:
+		c.duplicateRefusals.revoked.Add(1)
 	}
 	return &DuplicateCertError{Subject: subject, State: state}
 }
@@ -1063,9 +1072,9 @@ func (c *CA) reissueLeafLocked(ctx context.Context, subject string, original *x5
 	}
 
 	// Record every authorisation grant this renewal carried, with
-	// the line GenerateWithOptions writes for a fresh one, so an operator
-	// alerting on it sees an administrator credential renewed as well as one
-	// minted. It matters most on a re-key, which puts the grant on a key this
+	// the audit record GenerateWithOptions writes for a fresh one
+	// (audit.CertificateAuthGrantIssued), so an operator alerting on it sees
+	// an administrator credential renewed as well as one minted. It matters most on a re-key, which puts the grant on a key this
 	// CA has never seen; the renewal attribute says which happened. Logged
 	// straight after issueLeafLocked, as GenerateWithOptions does, so nothing
 	// later can return early and lose it.
@@ -1077,6 +1086,7 @@ func (c *CA) reissueLeafLocked(ctx context.Context, subject string, original *x5
 	grants := AuthExtensionMap(carried)
 	for _, name := range slices.Sorted(maps.Keys(grants)) {
 		slog.Warn("Issued certificate carrying a Puppet authorisation extension",
+			audit.Event(audit.CertificateAuthGrantIssued),
 			"subject", subject, "grant", name+"="+grants[name], "renewal", renewal)
 	}
 	return certPEM, nil
@@ -1086,8 +1096,8 @@ func (c *CA) reissueLeafLocked(ctx context.Context, subject string, original *x5
 // for subject. It is the "puppet cert clean" equivalent: the subject must have at
 // least a cert or CSR on disk, otherwise ErrNotFound is returned.
 //
-// Errors from individual operations (revoke, delete) are best-effort and logged
-// but do not prevent the others from running.
+// Errors from individual operations (revoke, delete) are best-effort, logged
+// and counted (CleanFailures), but do not prevent the others from running.
 var ErrNotFound = fmt.Errorf("certificate or CSR not found")
 
 func (c *CA) Clean(ctx context.Context, subject string) error {
@@ -1136,12 +1146,16 @@ func (c *CA) Clean(ctx context.Context, subject string) error {
 			// as "never issued", which hasCert has just disproved, and which is
 			// why that sentinel is worded for the inventory rather than for an
 			// issuance history. docs/metrics.md names this path as uncounted on
-			// the lock arm.
+			// the lock arm. All of that is about openvoxca_crl_update_failures_total;
+			// every failure of this step, both of those arms included, counts in
+			// openvoxca_clean_failures_total{step="revoke"}, which asks only
+			// whether the clean left an unrevoked certificate behind.
 			if err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
 				c.mu.Lock()
 				defer c.mu.Unlock()
 				return c.revokeLocked(ctx, subject, &unknownCause)
 			}); err != nil {
+				c.cleanFailures.revoke.Add(1)
 				// Deliberately not fatal: clean's job is to remove the
 				// certificate. But say what that leaves behind — the
 				// certificate is gone from storage while still unrevoked, so
@@ -1154,12 +1168,14 @@ func (c *CA) Clean(ctx context.Context, subject string) error {
 					"credential until it expires", "subject", subject, "error", err)
 			}
 			if err := c.Storage.DeleteCert(ctx, subject); err != nil {
+				c.cleanFailures.deleteCert.Add(1)
 				slog.Warn("Clean: delete cert failed", "subject", subject, "error", err)
 			}
 		}
 
 		if hasCSR {
 			if err := c.Storage.DeleteCSR(ctx, subject); err != nil {
+				c.cleanFailures.deleteCSR.Add(1)
 				slog.Warn("Clean: delete CSR failed", "subject", subject, "error", err)
 			}
 		}

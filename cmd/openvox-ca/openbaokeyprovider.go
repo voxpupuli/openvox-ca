@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/signer/openbao"
 )
@@ -56,4 +57,17 @@ func newOpenBaoKeyProvider(ctx context.Context, cfg *serverConfig) (*openbao.Tok
 
 	provider := openbao.NewKeyProvider(tm, openBaoCfg.EffectiveTransitMount(), openBaoCfg.KeyName)
 	return tm, provider, nil
+}
+
+// keyProviderCollectors returns what p reports about its own session for the
+// metrics exporter: an OpenBao provider's openvoxca_openbao_authenticated, and
+// nothing for a nil provider (a local PEM key, or the frontend, which reaches
+// the key only through the signer). Whichever process holds the provider
+// registers these: the single-process server on its own exporter, the isolated
+// signer on the registry its Metrics RPC answers from.
+func keyProviderCollectors(p ca.KeyProvider) []prometheus.Collector {
+	if c, ok := p.(prometheus.Collector); ok {
+		return []prometheus.Collector{c}
+	}
+	return nil
 }

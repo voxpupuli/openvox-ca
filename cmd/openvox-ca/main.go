@@ -817,6 +817,29 @@ func newOCSPRateLimitedCounter(reg prometheus.Registerer) prometheus.Counter {
 	return c
 }
 
+// newDestructiveOperationsCounter registers openvoxca_destructive_operations_total
+// on reg and returns the hook api.Server.OnDestructiveOperation reports to.
+// Every operation is published at zero from the start, because an increase()
+// over a series that does not exist yet never fires.
+func newDestructiveOperationsCounter(reg prometheus.Registerer) func(operation string, subjects int) {
+	c := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: constants.MetricsNamespace,
+		Name:      "destructive_operations_total",
+		Help: "Total subjects revoked or cleaned through the API, by operation: revoke (by " +
+			"subject or by serial), clean, or bulk-clean, which counts each subject it removed. " +
+			"Counted on success only. A burst means many credentials taken out of service at " +
+			"once, which is either a compromised administrator credential or an operational " +
+			"mistake; the 'High rate of destructive operations detected' warning names the client.",
+	}, []string{"operation"})
+	for _, op := range api.DestructiveOperations {
+		c.WithLabelValues(op)
+	}
+	reg.MustRegister(c)
+	return func(operation string, subjects int) {
+		c.WithLabelValues(operation).Add(float64(subjects))
+	}
+}
+
 // serialNumberFormat parses cfg's serial_number_format, naming the key in the
 // error an operator sees.
 func serialNumberFormat(cfg *serverConfig) (api.SerialNumberFormat, error) {
@@ -1639,9 +1662,12 @@ func newRootCmd() *cobra.Command {
 			// --- Prometheus exporter ---
 			// The exporter owns a private registry holding the Go/process
 			// collectors, the CA/CRL/leaf certificate collector, and the HTTP
-			// request metrics; openvoxca_csr_rate_limited_total is added to it
-			// below, and openvoxca_ocsp_rate_limited_total while the responder is
-			// served. When enabled, the API handler is instrumented so
+			// request metrics; openvoxca_csr_rate_limited_total and
+			// openvoxca_destructive_operations_total are added to it below,
+			// openvoxca_ocsp_rate_limited_total while the responder is served,
+			// and openvoxca_openbao_authenticated where this process holds an
+			// OpenBao key provider (single-process; the signer reports it
+			// otherwise). When enabled, the API handler is instrumented so
 			// openvoxca_http_* counts requests to the Puppet API, while /metrics is
 			// served on a separate listener (see metricsServer below).
 			var exporter *metrics.Exporter
@@ -1650,6 +1676,10 @@ func newRootCmd() *cobra.Command {
 				if role == roleFrontend {
 					addSiblingTelemetry(exporter, os.Getenv, remoteSigner)
 				}
+				// Nil, so nothing, on the frontend: the signer holds the
+				// provider there and reports it over its RPC.
+				exporter.Registry().MustRegister(keyProviderCollectors(myCA.KeyProvider)...)
+				srv.OnDestructiveOperation = newDestructiveOperationsCounter(exporter.Registry())
 				srv.OnCSRRateLimited = newCSRRateLimitedCounter(exporter.Registry()).Inc
 				if cfg.EnableOCSP {
 					srv.OnOCSPRateLimited = newOCSPRateLimitedCounter(exporter.Registry()).Inc
@@ -2122,7 +2152,7 @@ func runSignerMode(ctx context.Context, cfg *serverConfig, absCADir string,
 	defer func() { _ = rt.Close() }()
 
 	slog.Info("CA initialized, serving signing requests")
-	return signer.Serve(key)
+	return signer.Serve(key, keyProviderCollectors(rt.KeyProvider)...)
 }
 
 // initSignerKey runs CA initialisation and returns the key the signer serves,

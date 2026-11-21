@@ -2041,6 +2041,11 @@ var _ = Describe("CA Clean when part of it fails", func() {
 		// that never reached it, asserted at zero elsewhere in this file.
 		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1),
 			"a CRL that could not be written must be counted")
+		// And counted as a clean that left something behind, which is the
+		// signal docs/api.md now points operators at instead of the warning.
+		Expect(myCA.CleanFailures()).To(Equal(map[string]uint64{
+			ca.CleanStepRevoke: 1, ca.CleanStepDeleteCert: 0, ca.CleanStepDeleteCSR: 0,
+		}), "openvoxca_clean_failures_total{step=\"revoke\"} must count the failed revocation")
 
 		// Both views operators are pointed at: the in-process CRL admission
 		// reads, and the published CRL the guidance says to confirm the serial
@@ -2077,6 +2082,9 @@ var _ = Describe("CA Clean when part of it fails", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revoked).To(BeTrue(),
 			"the revoke half succeeded; the failed delete does not undo it")
+		Expect(myCA.CleanFailures()).To(Equal(map[string]uint64{
+			ca.CleanStepRevoke: 0, ca.CleanStepDeleteCert: 1, ca.CleanStepDeleteCSR: 0,
+		}), "openvoxca_clean_failures_total{step=\"delete_cert\"} must count the failed delete, and only it")
 	})
 
 	It("reports success when the pending CSR cannot be deleted either", func() {
@@ -2095,7 +2103,32 @@ var _ = Describe("CA Clean when part of it fails", func() {
 			"Clean swallows the CSR delete failure too")
 		Expect(store.HasCSR(ctx, "pending-node")).To(BeTrue(),
 			"the request is still pending despite the 204")
+		Expect(myCA.CleanFailures()).To(Equal(map[string]uint64{
+			ca.CleanStepRevoke: 0, ca.CleanStepDeleteCert: 0, ca.CleanStepDeleteCSR: 1,
+		}), "openvoxca_clean_failures_total{step=\"delete_csr\"} must count the failed delete, and only it")
 	})
+
+	// The floor under the three above: without it, a counter that moved on
+	// every clean would satisfy each of them. Two subjects, because signing
+	// removes the CSR it signed: doomed-node reaches revoke and delete_cert,
+	// and only a subject still holding a pending request reaches delete_csr.
+	DescribeTable("counts no failed step when every step succeeds",
+		func(subject string, prepare func()) {
+			prepare()
+			Expect(myCA.Clean(ctx, subject)).To(Succeed())
+			Expect(myCA.CleanFailures()).To(Equal(map[string]uint64{
+				ca.CleanStepRevoke: 0, ca.CleanStepDeleteCert: 0, ca.CleanStepDeleteCSR: 0,
+			}))
+		},
+		Entry("for a signed subject", "doomed-node", func() {}),
+		Entry("for a subject holding only a pending request", "pending-node", func() {
+			csrPEM, err := testutil.GenerateCSR("pending-node")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = myCA.SaveRequest(ctx, "pending-node", csrPEM)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(store.HasCSR(ctx, "pending-node")).To(BeTrue())
+		}),
+	)
 })
 
 // pubKeyPutFailBackend wraps a real filesystem backend and fails only the CA
