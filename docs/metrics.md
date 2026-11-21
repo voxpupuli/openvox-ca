@@ -28,8 +28,9 @@ signer process has no network exposure).
 
 > **Security:** the certificate metrics expose node hostnames (certificate
 > subjects) as label values. That includes
-> `openvoxca_managed_certificate_configured`, whose subjects come from
-> configuration — so it names a component the CA is *meant* to issue for even
+> `openvoxca_managed_certificate_configured` and
+> `openvoxca_managed_certificate_reconcile_failing`, whose subjects come from
+> configuration — so they name a component the CA is *meant* to issue for even
 > before any certificate exists. Bind the exporter to loopback or a trusted
 > management network — e.g. `127.0.0.1:9140` scraped via a node exporter sidecar,
 > or a dedicated interface protected by a network policy — rather than a public
@@ -183,8 +184,9 @@ expiry alert to firing on its own.
 everything else, including `openvoxca_ca_ready`, the three
 `openvoxca_ca_certificate_*` series, `openvoxca_crl_cached_number`, every
 `*_failures_total` counter, the signing-bound and OCSP-index gauges,
-`openvoxca_managed_certificate_configured`, and the three `openvoxca_collector_*`
-series themselves.
+`openvoxca_managed_certificate_configured`,
+`openvoxca_managed_certificate_reconcile_failing`, and the three
+`openvoxca_collector_*` series themselves.
 
 A rule that combines a held series with a live one sees mixed freshness during
 an outage, which is why the lists above go series by series. Two consequences
@@ -743,23 +745,26 @@ while a gather runs can appear in that one scrape.
 
 Only present when [`managed_certs`](configuration.md#managed-certificates) or
 [`serving_cert`](configuration.md#the-cas-own-serving-certificate) is configured.
-One series per entry, whatever store it uses, published from the configuration
-rather than from anything that has happened.
+Two series per entry, whatever store it uses: one published from the
+configuration rather than from anything that has happened, and one saying how
+the entry's latest reconcile went.
 
 The CA's own serving certificate is one such entry, labelled with the CA's own
 certname, because it renews on the same loop through the same mechanism. So a
 deployment that configures no component certificates at all still publishes one
-series, and `OpenVoxCAManagedCertificateNeverIssued` covers it.
+series of each, and the alerts below cover it.
 
 | Metric | Labels | Description |
 | --- | --- | --- |
 | `openvoxca_managed_certificate_configured` | `subject` | Constant `1`, one per configured entry. |
+| `openvoxca_managed_certificate_reconcile_failing` | `subject` | `1` while this process's latest attempt to reconcile the entry failed, `0` otherwise, including before the first attempt. Per-process: every replica reconciles every entry. |
 
-**A constant is the point.** The reconcile loop's outcomes are otherwise
-ordinary certificate facts: a managed certificate is a certificate with an
-inventory row, so once one exists the leaf series above cover its expiry and
-the shipped expiry alerts cover it with no new series at all. The outcome that
-reasoning cannot reach is an entry that has *never* issued — a store that never
+**A constant is the point.** Once a managed certificate exists it is an
+ordinary certificate fact: a certificate with an inventory row, so the leaf
+series above cover its expiry and the shipped expiry alerts cover it. That
+reasoning misses two outcomes. One is a reissue that keeps failing, which
+`openvoxca_managed_certificate_reconcile_failing` reports (see below). The
+other is an entry that has *never* issued — a store that never
 accepted a write — because there is no series for a certificate that does not
 exist, and no PromQL comparison matches an absence.
 
@@ -800,28 +805,6 @@ found to be wrong without it:
   collapses every serial for the subject, so a signed certificate beside a
   revoked predecessor still satisfies the entry.
 
-**What this still does not cover.** An entry that has issued before, whose
-reissue then keeps failing, is not silent because of this rule: the CA restores
-the predecessor after a failed store write, so a signed certificate remains and
-the component keeps working. Something is logged on every pass and the ordinary
-expiry alerts take over as that predecessor ages — but there is no series that
-says "this entry's last reconcile failed", so between those two there is a
-window where only the logs show it.
-
-What gets logged changes after the first failure, so the log line to grep for
-changes with it. The first failure is free and logs the failure itself. From the
-second, the CA withholds the entry's passes — 15m, then 30m, doubling to a cap
-of 24h, cleared outright by any successful write — and each withheld pass logs
-at `WARN` with the subject, the issue reason and `retry_in`. So a persistently
-failing entry produces withholding notices rather than repeated failures, and
-`retry_in` is what tells an operator when to look again. The backoff exists
-because every failed attempt revokes the serial it had just signed: without it a
-refused store cost one revoked serial per interval, and each stays on the CRL
-until its certificate's `NotAfter` — five years for an entry with no `ttl`. Closing that needs a per-entry
-reconcile-failure series, of the shape
-`openvoxca_k8s_export_last_error_timestamp_seconds` takes for the
-exporter; openvox-ca has none yet.
-
 `max without (serial, state)` rather than `on (subject)`: it collapses the
 leaf series' per-certificate labels while keeping every target label the
 deployment attached, so the two sides match per scrape target instead of across
@@ -833,6 +816,56 @@ managed certificate may live in a Kubernetes Secret or in local files, and the
 CA's own serving certificate is a third case with different failure
 semantics again — a series shaped around Secrets would be one those could not
 use.
+
+**A reissue that keeps failing is the other series' job.** An entry that has
+issued before, whose reissue then keeps failing, is not silent because of the
+rule above: the CA restores the predecessor after a failed store write, so a
+signed certificate remains and the component keeps working, and the expiry
+alerts take over only as that predecessor ages.
+`openvoxca_managed_certificate_reconcile_failing` covers the time in between.
+It reads `1` from the first failed pass — a store that could not be read or
+written, a subject lock that could not be taken, a certificate that could not
+be signed — until a pass finds the certificate current or issues and stores a
+new one.
+
+It is a gauge of the latest outcome rather than a count of failures because of
+what happens after the first one. That failure is free and the next pass
+retries. From the second, the CA withholds the entry's passes — 15m, then 30m,
+doubling to a cap of 24h, cleared outright by any successful write — so a
+counter would rise once and then sit flat for up to a day while the entry was
+still broken. A withheld pass leaves the gauge at `1`. The backoff exists
+because every failed attempt revokes the serial it had just signed: without it
+a refused store cost one revoked serial per interval, and each stays on the CRL
+until its certificate's `NotAfter` — five years for an entry with no `ttl`.
+
+```promql
+openvoxca_managed_certificate_reconcile_failing == 1
+```
+
+The mixin ships this as `OpenVoxCAManagedCertificateReissueFailing`, a warning
+with a `for` of `managedCertReissueFailingFor` (30 minutes). That is two passes
+at the default `managed_cert_interval_sec` of 15 minutes, so the failure the next
+pass retries and clears does not fire it; raise it if you lengthen the
+interval. It fires for an entry that has never issued as well, beside
+`OpenVoxCAManagedCertificateNeverIssued`, which still covers the one case this
+series cannot see: a reconcile loop that never runs at all.
+
+Unlike that rule it is not qualified on `openvoxca_collector_scrape_success`,
+deliberately. Every pass takes its subject's lock in the CA's own storage, so an
+outage of that storage that outlasts the dwell fails every entry and fires this
+once per entry, the CA's own serving certificate included, beside
+`OpenVoxCAScrapeFailing`. That is true — no entry can renew while it lasts — but
+the cause is then the CA's storage, not each entry's store.
+
+The logs say why. The first failure logs the failure itself; each withheld pass
+logs at `WARN` with the subject, the issue reason and `retry_in`, which is when
+the CA will next try.
+
+Fixing the store does not clear the alert by itself. Only a pass that runs can
+clear the gauge, and nothing notices the fix until the next attempt, which
+`retry_in` names and which can be up to a day away. Restarting the CA retries
+at once: the backoff is held in memory per process, like the gauge, and the
+reconcile loop runs immediately at startup.
 
 **Displacement is not a gap here, though it reads like one.** When a managed
 issuance replaces a certificate the CA already held for that name, the
@@ -1023,8 +1056,10 @@ rolled back, one removed — plus a file that has never been read at all),
 unusable or stale (`OpenVoxCAClientCRLUnusable`, `OpenVoxCAClientCRLRefusals` and
 `OpenVoxCAClientCRLStale`, and only where `client_ca` is configured), and
 Kubernetes export failures, file export targets that have gone stale
-(`OpenVoxCAFileExportStale`), and managed certificates that were never issued —
-all with configurable thresholds. It does **not**
+(`OpenVoxCAFileExportStale`), and managed certificates that were never issued
+or whose reissue keeps failing
+(`openvoxca_managed_certificate_reconcile_failing`) — all with configurable
+thresholds. It does **not**
 alert on the fleet-relative `openvoxca_ocsp_index_serials` comparison — that one
 is left to the operator, since it needs a `by (job)` aggregation to avoid
 fanning in across unrelated CAs and the condition it catches is not fail-open.

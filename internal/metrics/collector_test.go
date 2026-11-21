@@ -976,6 +976,49 @@ var _ = Describe("Collector", func() {
 				map[string]string{"subject": "never-issued.example.com"})).To(BeNil())
 		})
 
+		// Whether each entry's latest pass failed: the series
+		// OpenVoxCAManagedCertificateReissueFailing reads (#679). Its
+		// transitions are pinned in internal/ca; what this pins is that every
+		// configured entry has a series, at 0 until a pass has failed.
+		It("publishes whether each configured entry's latest pass failed", func() {
+			unreadable := func(context.Context) ([]byte, []byte, error) {
+				return nil, nil, errors.New("store unavailable")
+			}
+			refuse := func(context.Context, []byte, []byte) error { return errors.New("read-only") }
+			myCA.ManagedCerts = []ca.ManagedCert{
+				{
+					Spec: ca.CertSpec{
+						Subject:     "broken.example.com",
+						DNSNames:    []string{"broken.example.com"},
+						TTL:         90 * 24 * time.Hour,
+						RenewBefore: 30 * 24 * time.Hour,
+					},
+					Load: unreadable, Save: refuse,
+				},
+				{Spec: ca.CertSpec{Subject: "untried.example.com"}, Load: unreadable, Save: refuse},
+			}
+			failing := func(g gathered, subject string) float64 {
+				GinkgoHelper()
+				m := g.findByLabels("openvoxca_managed_certificate_reconcile_failing",
+					map[string]string{"subject": subject})
+				Expect(m).NotTo(BeNil(), "every configured entry must have a series")
+				return gaugeValue(m)
+			}
+
+			g := gather(metrics.NewCollector(myCA))
+			Expect(failing(g, "broken.example.com")).To(Equal(0.0), "0 before any pass")
+			Expect(failing(g, "untried.example.com")).To(Equal(0.0))
+
+			_, err := myCA.ReconcileManagedCert(ctx, myCA.ManagedCerts[0])
+			Expect(err).To(MatchError(ContainSubstring("store unavailable")))
+
+			g = gather(metrics.NewCollector(myCA))
+			Expect(failing(g, "broken.example.com")).To(Equal(1.0),
+				"an entry whose latest pass failed must read 1")
+			Expect(failing(g, "untried.example.com")).To(Equal(0.0),
+				"one entry's failure must not be reported against another")
+		})
+
 		// The placement, not merely the emission. The series is published from
 		// configuration and reads no storage, so a failed gather must not take
 		// it with it: absence has to keep meaning exactly one thing, that no
@@ -1008,6 +1051,11 @@ var _ = Describe("Collector", func() {
 			Expect(configured).NotTo(BeNil(),
 				"the configured series must survive a failed gather, or its absence means two things")
 			Expect(gaugeValue(configured)).To(Equal(1.0))
+			// So must the failing series: a storage outage is a likely cause of
+			// the failures it reports.
+			Expect(g.findByLabels("openvoxca_managed_certificate_reconcile_failing",
+				map[string]string{"subject": "never-issued.example.com"})).NotTo(BeNil(),
+				"the reconcile-failing series must survive a failed gather")
 		})
 	})
 

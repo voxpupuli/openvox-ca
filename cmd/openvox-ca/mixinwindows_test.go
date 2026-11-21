@@ -148,6 +148,8 @@ var _ = Describe("the mixin's windows against the server's defaults", func() {
 			"supersedeFor", func() time.Duration { return cfg.supersededCertSweepInterval() }),
 		Entry("OpenVoxCAManagedCertificateNeverIssued, against managed_cert_interval_sec",
 			"managedCertNeverIssuedFor", func() time.Duration { return cfg.managedCertInterval() }),
+		Entry("OpenVoxCAManagedCertificateReissueFailing, against managed_cert_interval_sec",
+			"managedCertReissueFailingFor", func() time.Duration { return cfg.managedCertInterval() }),
 	)
 
 	It("pages for a lagging replica only after the sync warning that explains it", func() {

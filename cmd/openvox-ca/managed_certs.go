@@ -28,17 +28,16 @@ import (
 // runManagedCertReconciler reconciles the CA's managed certificates on a timer
 // until ctx is cancelled.
 //
-// # Observability, and what is deliberately absent
+// # Observability
 //
-// This loop publishes no metric of its own, and that is a decision rather than
-// an oversight. Every reconcile outcome an operator can currently reach is
-// either a log line here or an ordinary certificate fact: a managed certificate
-// is a certificate at cert/<subject> with an inventory row, so once one exists
-// openvoxca_leaf_certificate_not_after_timestamp_seconds covers its expiry and
-// the shipped expiry alerts cover it with no new series.
+// Most of what this loop does needs no series of its own: a managed
+// certificate is a certificate at cert/<subject> with an inventory row, so once
+// one exists openvoxca_leaf_certificate_not_after_timestamp_seconds covers its
+// expiry and the shipped expiry alerts cover it. The CA publishes two series
+// for the outcomes that reasoning does not reach, both below.
 //
-// The outcome that reasoning does not reach: an entry that has never issued at
-// all -- a store that never accepts a write. There is no series for a
+// The first outcome that reasoning does not reach: an entry that has never
+// issued at all -- a store that never accepts a write. There is no series for a
 // certificate that does not exist, so no PromQL comparison can match its
 // absence; the Kubernetes exporter has the same hole and closes it with a
 // dedicated "not running" rule. The managed mechanism needs the equivalent, and
@@ -47,27 +46,23 @@ import (
 // value rather than an absence. OpenVoxCAManagedCertificateNeverIssued in
 // mixin/alerts.libsonnet is the rule.
 //
-// It is not the only gap, and the other one is left open deliberately: an entry
-// that has issued before, whose reissue then keeps failing. That one is not
-// silent for want of a series. A failed store write revokes the certificate it
-// has just signed and puts the predecessor back, precisely because nothing ever
-// saw the new key -- so a signed series remains, the component keeps working,
-// and the never-issued rule is right to stay quiet. The expiry alerts take over
-// as that predecessor ages. What is missing between the failure and that point
-// is any series saying "this entry's last reconcile failed". Closing it needs
-// one this mechanism does not publish: a per-entry reconcile-failure counter,
-// which is the shape the exporter's
-// openvoxca_k8s_export_last_error_timestamp_seconds takes. That is worth doing
-// and is not in #243; in the meantime the failure is in the logs, once and then
-// as withholding notices carrying retry_in, which is what docs/metrics.md tells
-// an operator to grep for.
+// The second: an entry that has issued before, whose reissue then keeps
+// failing. A failed store write revokes the certificate it has just
+// signed and puts the predecessor back, precisely because nothing ever saw the
+// new key -- so a signed series remains, the component keeps working, and the
+// never-issued rule is right to stay quiet. The expiry alerts take over as that
+// predecessor ages. Between the failure and that point the CA publishes
+// openvoxca_managed_certificate_reconcile_failing, 1 while the entry's latest
+// pass failed, and OpenVoxCAManagedCertificateReissueFailing is the rule (#679).
+// A gauge rather than a counter because the store-write backoff spaces a
+// failing entry's attempts up to a day apart; see ca.ManagedReconcileFailing.
 //
 // openvoxca_managed_certificate_configured is deliberately general -- one label,
 // the subject, and nothing about the store -- so that the CA's own serving
 // certificate (#326) can use it for a store with quite different failure
 // semantics.
 //
-// Displacement is NOT a second such outcome, though it reads like one. When a
+// Displacement is NOT a third such outcome, though it reads like one. When a
 // managed issuance replaces a certificate the CA already held for that name,
 // the subject keeps its expiry series without interruption -- the new
 // certificate is at cert/<subject> and in the inventory like any other, so

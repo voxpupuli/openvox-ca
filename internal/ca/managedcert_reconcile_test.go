@@ -1085,6 +1085,131 @@ var _ = Describe("Reconciling a managed certificate", func() {
 		Expect(store.HasCert(ctx, subject)).To(BeFalse(), "nothing may be signed on this path")
 	})
 
+	// The series OpenVoxCAManagedCertificateReissueFailing reads (#679). It
+	// has to say "still failing" for an entry whose predecessor is still in
+	// service and whose passes the backoff is withholding, which is the one
+	// state nothing else reports until the expiry alerts take over.
+	Describe("reporting whether the latest pass failed", func() {
+		BeforeEach(func() {
+			myCA.ManagedCerts = []ManagedCert{entry}
+		})
+
+		failing := func() bool {
+			GinkgoHelper()
+			states := myCA.ManagedReconcileFailing()
+			Expect(states).To(HaveKey(subject), "every configured entry must be reported")
+			return states[subject]
+		}
+
+		It("reads false for a configured entry not yet attempted", func() {
+			Expect(myCA.ManagedReconcileFailing()).To(Equal(map[string]bool{subject: false}))
+		})
+
+		It("holds through a refused write and its withheld passes, and clears on the write that succeeds", func() {
+			// On the clock the backoff stamps, as its own specs above do: a
+			// pass run ahead of it is not one the backoff withholds.
+			fake.saveErr = fmt.Errorf("read-only store")
+			_, err := reconcile()
+			Expect(err).To(HaveOccurred())
+			Expect(failing()).To(BeTrue(), "a refused write must report the entry as failing")
+			_, err = reconcile()
+			Expect(err).To(HaveOccurred())
+
+			// Withheld from here: no error, nothing attempted, and the entry
+			// is no healthier for it.
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeFalse())
+			Expect(failing()).To(BeTrue(),
+				"a pass the backoff withholds must not read as one that succeeded")
+
+			fake.mu.Lock()
+			fake.saveErr = nil
+			fake.mu.Unlock()
+			issued, err = reconcileAt(managedSaveBackoffBase + time.Minute)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+			Expect(failing()).To(BeFalse(), "the write that succeeds must clear it")
+		})
+
+		It("reports a store it cannot read, and clears on a pass that finds the certificate current", func() {
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+
+			fake.loadErr = fmt.Errorf("backend unavailable")
+			_, err = reconcile()
+			Expect(err).To(HaveOccurred())
+			Expect(failing()).To(BeTrue())
+
+			fake.mu.Lock()
+			fake.loadErr = nil
+			fake.mu.Unlock()
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeFalse(), "precondition: the certificate was current, so nothing was issued")
+			Expect(failing()).To(BeFalse(),
+				"a pass that finds the certificate current is a healthy entry")
+		})
+
+		It("holds for an entry whose predecessor stays in service, and clears on the write that succeeds", func() {
+			// The case the series exists for: the entry has a certificate,
+			// a reissue is due, and the store refuses it. Adding a name makes
+			// the reissue due now, on the clock the backoff stamps, so the
+			// withheld pass below really is withheld.
+			_, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			predecessor := fake.stored()
+
+			entry.Spec.DNSNames = append(entry.Spec.DNSNames, "managed-extra")
+			myCA.ManagedCerts = []ManagedCert{entry}
+			fake.mu.Lock()
+			fake.saveErr = fmt.Errorf("read-only store")
+			fake.mu.Unlock()
+
+			for range 2 {
+				_, err = reconcile()
+				Expect(err).To(HaveOccurred())
+				Expect(failing()).To(BeTrue(), "a refused reissue must report the entry as failing")
+			}
+			issued, err := reconcile()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeFalse(), "precondition: this pass was withheld")
+			Expect(failing()).To(BeTrue(),
+				"a pass the backoff withholds must not read as one that succeeded")
+			Expect(fake.stored().SerialNumber).To(Equal(predecessor.SerialNumber),
+				"precondition: the predecessor is still the certificate in service")
+
+			fake.mu.Lock()
+			fake.saveErr = nil
+			fake.mu.Unlock()
+			issued, err = reconcileAt(managedSaveBackoffBase + time.Minute)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(issued).To(BeTrue())
+			Expect(failing()).To(BeFalse(), "the write that succeeds must clear it")
+		})
+
+		It("reports a pass refused at the subject lock", func() {
+			refusing := &namedLockRefusingBackend{Backend: store.Backend(), refuse: subjectLockName(subject)}
+			myCA.Storage = storage.NewWithBackend(refusing, filepath.Join(storeDir, "private"))
+
+			_, err := reconcile()
+			Expect(err).To(HaveOccurred())
+			Expect(refusing.refused).To(BeNumerically(">", 0),
+				"the fixture must actually have refused the subject lock")
+			Expect(failing()).To(BeTrue())
+		})
+
+		It("reports an entry refused before the lock is taken", func() {
+			// No store, so the pass fails on every attempt without reaching
+			// the lock; the series must not need the lock to say so.
+			bare := ManagedCert{Spec: spec}
+			myCA.ManagedCerts = []ManagedCert{bare}
+			_, err := myCA.reconcileManagedCert(ctx, bare, time.Now().UTC())
+			Expect(err).To(HaveOccurred())
+			Expect(failing()).To(BeTrue())
+		})
+	})
+
 	Describe("when the store write fails after signing", func() {
 		var predecessor *x509.Certificate
 
