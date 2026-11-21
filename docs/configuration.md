@@ -213,7 +213,7 @@ revoke_on_auto_renew: true      # false matches OpenVox Server's Clojure CA (no 
 # revokes it once the overlap window elapses, so both verify in the meantime and
 # relying parties can pick up the replacement without a gap. The window is a
 # deliberate weakening and it is on by default — read "Delayed supersession"
-# below, and set 0 for the earlier behaviour of revoking inside the call.
+# below, and set 0 to revoke the predecessor inside the renewal call instead.
 superseded_cert_revoke_after_sec: -1   # overlap window; 0 = revoke inside the renewal; -1/unset = 24h
 superseded_cert_sweep_interval_sec: 0  # how often the sweep runs; 0 = built-in default (15m)
 
@@ -429,8 +429,13 @@ first; see [running a container](container-images.md#running). What follows is
 for a release tarball, a container whose baked configuration you have replaced,
 or a packaged CA whose certificate you are replacing by hand.
 
-`generate` needs a running server, so the first serving certificate is issued
-against this CA started temporarily on loopback with TLS switched off. **Stop
+`openvox-ca-ctl generate` needs a running server, so the procedure below issues
+the first serving certificate against this CA started temporarily on loopback
+with TLS switched off. Once the store holds a CA (from `openvox-ca-ctl setup`,
+or one earlier start), the offline `openvox-ca generate` issues it with no server
+running instead; it refuses on a store that holds no CA. A serving certificate
+takes `--dns` and never `--pp-cli-auth`; see [`generate`: minting a certificate
+offline](operator-cli.md#generate-minting-a-certificate-offline). **Stop
 the service first if one is running.** That is not just courtesy on
 `filesystem` and `sqlite`: those permit exactly one instance. The store lock
 will normally refuse the second process rather than let it corrupt anything, so
@@ -906,13 +911,6 @@ left the CA bundle, so its published CRL can no longer be attributed to anyone
 `openvoxca_crl_chain_last_read_timestamp_seconds`, reads `0` where the file is
 configured but has never been opened.
 
-> **Rolling upgrades.** A replica running a build from before chain preservation
-> re-signs the CRL as a single block and silently drops the chain, so one old
-> replica handling one revocation undoes it for everyone. Make sure every
-> replica is running a build with chain preservation *before* configuring
-> `crl_chain_file`. Preservation is a no-op on a single-CRL deployment, so that
-> ordering costs nothing.
-
 ## Serving OCSP
 
 The OCSP responder, `POST /ocsp` and `GET /ocsp/{request}` (also under
@@ -1051,12 +1049,11 @@ does not hold is answered `unknown` — before the CRL is consulted at all — s
 the index decides whether the responder will speak about a certificate, and the
 CRL decides what it says.
 
-Like the CRL cache, that index was loaded once at startup and afterwards only
-recorded this process's own issuances. On the shared backends that meant a
-replica answered `unknown` for every certificate one of its peers had signed,
-indefinitely: the certificate is valid, the inventory row is in shared storage,
-and only a restart made the replica see it. `ocsp_index_sync_interval_sec`
-closes that. Each replica re-reads the inventory on the interval and adds what
+Like the CRL cache, that index is built at startup, and a process adds only its
+own issuances to it. On the shared backends a replica would therefore answer
+`unknown` for every certificate one of its peers signed until it restarted: the
+certificate is valid and the inventory row is in shared storage.
+`ocsp_index_sync_interval_sec` closes that. Each replica re-reads the inventory on the interval and adds what
 it does not already hold, so the interval is the worst-case window in which a
 newly issued certificate is reported as unrecognised elsewhere in the fleet.
 The default is five minutes — longer than the CRL sync's minute because the
@@ -1269,26 +1266,25 @@ stops presenting the old one. The default is set for the harder case.
 
 24 hours is chosen to comfortably exceed the interval on which a fleet notices a
 renewal, while staying short enough that a replaced credential is not a standing
-one. The same window is what the CA's own serving-certificate work settled on
-for the same question asked about a different subject. `managed_certs` now
-supplies one: an entry's `revoke_after` is this same window asked about a
-component certificate, and it defaults to this setting. See
-[managed certificates](#managed-certificates).
+one. A `managed_certs` entry's `revoke_after` is this same window asked about a
+component certificate, and it defaults to this setting. See [managed
+certificates](#managed-certificates).
 
 An operator's renewal through
 [`POST /renew/{subject}`](api.md#renewal-by-an-operator) uses this window too.
 That is the case it was set for: a certificate held by something that is not
 renewing it itself, and has to be told about the replacement.
 
-> **Upgrading.** This changes behaviour without any config change. Before this
-> setting existed, every renewal revoked its predecessor before returning; now
-> the predecessor stays valid for 24 hours by default. If you need the old
-> behaviour — because your threat model does not tolerate a replaced credential
-> outliving its replacement at all — set `superseded_cert_revoke_after_sec: 0`,
-> which is an explicit choice and not the same as leaving it unset. You will
-> also see a new `superseded.json` in the cadir, a
-> `Starting superseded-certificate revocation sweep` line in the logs at
-> startup, and `openvoxca_supersede_pending` rising and falling.
+If your threat model does not tolerate a replaced credential outliving its
+replacement at all, set `superseded_cert_revoke_after_sec: 0`: a renewal then
+revokes its predecessor before returning. That is an explicit choice and not the
+same as leaving it unset. Two other settings can still leave a predecessor
+valid: `revoke_on_auto_renew: false` keeps a same-key renewal's predecessor until
+it expires (see the table below), and a `managed_certs` entry's own
+`revoke_after` sets the window for that certificate in place of this one. While a
+window is open, the predecessor is on the pending-supersession list
+(`superseded.json` in the cadir on the filesystem backend) and counted by
+`openvoxca_supersede_pending`.
 
 **The window is a deliberate weakening, and because it is the default it is one
 you inherit rather than choose.** For its whole length the replaced certificate
@@ -1303,7 +1299,7 @@ Two things bound that, and they are why the default is defensible:
   pending list as well as the CRL, so the credential the window keeps alive
   cannot mint a fresh full-lifetime successor and leave the window behind. That
   check is what makes the window bound the exposure rather than end it, and it
-  runs for every deployment because the window now does.
+  runs for every deployment because the window is on by default.
 - **Revoking the subject retires it.** `revoke --certname` reaches a recorded
   predecessor in the same call, so containment is not weakened by the window.
 
@@ -1342,7 +1338,7 @@ Some things worth knowing before you rely on it:
   than for one per entry. Under
   [`ca_key_provider: openbao`](openbao-transit.md) it is likewise one remote
   Transit round trip rather than one per entry. That matters most in the case
-  the sweep used to handle worst: a large backlog coming due at once, after a
+  a per-entry sweep would handle worst: a large backlog coming due at once, after a
   fleet-wide outage or a passphrase rotation. A pass that cannot amend the CRL
   fails as a whole — it leaves every entry it attempted on the list, raises
   `openvoxca_supersede_failures_total`, and the next pass retries them
@@ -1459,7 +1455,8 @@ refused at startup rather than discovered at issuance, and each name occupies
 the ordinary inventory slot for that subject. The certname `ca` is refused at
 startup as well, here and in `serving_cert`: no path that generates a private
 key accepts it, because on the filesystem backend `POST /generate/ca` would
-write that key over the CA's own in a cadir created by an earlier openvox-ca.
+write that key over the CA's own in a cadir that keeps it in
+`private/ca_key.pem`.
 Choose another certname.
 
 **Two managed certificates cannot share a certname**, and neither can a managed
@@ -2115,8 +2112,7 @@ a shared root, one issuing agent certificates and one issuing server
 certificates. Without it, those administrators cannot authenticate at all.
 
 **Nothing below applies unless `client_ca` is set.** With it absent there is one
-trust domain, it is ours, and admin is `puppet_server` plus `pp_cli_auth`
-exactly as it has always been.
+trust domain, it is ours, and admin is `puppet_server` plus `pp_cli_auth`.
 
 ```yaml
 client_ca:

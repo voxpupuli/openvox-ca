@@ -1205,14 +1205,6 @@ fetches your root's CRL — a CronJob, a config-management run, cert-manager —
 the `crl-chain-refresh` job picks the change up within
 `crl_chain_refresh_interval_sec` (an hour by default).
 
-**Turn it on in a separate `helm upgrade` from the one that bumps the chart.**
-A Deployment rolls rather than recreates, so for the length of a rollout you
-have old and new pods serving at once — and a replica running a build from
-before chain preservation re-signs the CRL as a single block and silently drops
-the chain, which one revocation in that window makes permanent for the whole
-fleet. Upgrade first, let the rollout finish, then set `config.crl_chain_file`.
-See [rolling upgrades](configuration.md#publishing-an-upstream-crl-chain).
-
 > **Never mount it with `subPath`.** A `subPath`-mounted ConfigMap or Secret
 > never receives updates: the file reads successfully forever and never changes,
 > so the whole feature becomes a silent no-op while every metric reports health.
@@ -1571,20 +1563,6 @@ Worth knowing before you upgrade:
   deployments (`persistence.enabled: false`) derive RollingUpdate and roll
   without one. To keep Recreate there, set `strategy: {type: Recreate}`
   explicitly.
-- **Upgrading a SQL-backed deployment that is on RollingUpdate, across the
-  advisory-lock change**, needs `strategy: {type: Recreate}` for that one
-  upgrade, or a scale to zero and back. The PostgreSQL/MySQL lock-key
-  derivation changed, so old and new pods do not exclude one another while
-  both are running — and because the derived RollingUpdate sets
-  `maxUnavailable: 0`, it surges the new pod alongside the old one even at
-  `replicaCount: 1`. One replica is not enough to avoid this. If you take the
-  `strategy` route, clear it again afterwards — remove the key from your
-  values file, or `--set strategy=null` — because
-  `--reset-then-reuse-values` reapplies your overrides on every later
-  upgrade, so a pin set once keeps costing you the Recreate outage the bullet
-  above says you had escaped. Scaling to zero and back leaves no such
-  residue. See the note in
-  [storage backends](storage-backends.md#sql-backends).
 - The pods carry a checksum of the rendered config, so a change to `config`
   restarts them even though the Deployment's pod template is otherwise
   unchanged. Set `configChecksumAnnotation: false` if you would rather manage

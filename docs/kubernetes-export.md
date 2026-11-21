@@ -126,9 +126,8 @@ checking less — see the note under
 for the test that establishes it. There is no `root` for CRLs, because a chain has no single anchor CRL —
 the root's own is simply one of its members.
 
-The default is `chain` so that upgrading changes nothing: before these fields
-existed, every target published the stored blobs verbatim, and that is what an
-unset scope still publishes. Narrowing is something you opt into, per target.
+The default is `chain`: an unset scope publishes the stored blobs verbatim.
+Narrowing is something you opt into, per target.
 
 Opt in where a consumer wants exactly one block — a trust bundle that should
 carry this CA alone, or a CRL a consumer expects to parse as a single list. The

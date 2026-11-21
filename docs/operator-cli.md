@@ -357,12 +357,15 @@ openvox-ca-ctl migrate \
 ```
 
 `setup`, `import` and `migrate` operate directly on storage, and each requires
-the server to be **stopped** on a backend that supports one running instance
-(`filesystem`, `sqlite`). Run one beside a live server and it is refused, naming
-the process holding the store — not left waiting for a lock it was never going
-to get. Because they reach storage directly they take the same locks a running
-server takes, so run them as the user the server runs as rather than under
-`sudo` (see the link below for why). See [running a second process against a
+the server to be **stopped**, on every backend. On a backend that supports one
+running instance (`filesystem`, `sqlite`), run one beside a live server and it is
+refused, naming the process holding the store — not left waiting for a lock it
+was never going to get. `setup` and `import` take a filesystem cadir only;
+`migrate` can also reach a backend with distributed locking, where nothing
+detects a running server, so stopping every replica first is up to you. Because
+they reach storage directly they take the same locks a running server takes,
+so run them as the user the server runs as rather than under `sudo` (see the
+link below for why). See [running a second process against a
 live store](storage-backends.md#running-a-second-process-against-a-live-store).
 See [storage backends](storage-backends.md#migrating-between-backends) for migration details.
 
@@ -599,8 +602,8 @@ command exists for the two cases the API cannot serve:
   construction (see [Auth-arc OID stripping](migrating-from-puppet-server.md#auth-arc-oid-stripping));
 - minting before a server exists. `openvox-ca-ctl generate` can only reach that
   by starting the CA temporarily on loopback with TLS disabled, where every
-  endpoint is unauthenticated — which is exactly the dance the migration guide
-  used to prescribe, and what this command exists to make unnecessary.
+  endpoint is unauthenticated — which is what this command exists to make
+  unnecessary.
   [The first credential on a new CA](#the-first-credential-on-a-new-ca) walks
   through that case: it is a deadlock rather than an inconvenience, and it is
   the one an operator meets first.
@@ -614,9 +617,9 @@ configuration rather than by flag. Check the value the pre-flight prints. As
 soon as you supply any `--dns`, the list is taken verbatim, whatever
 [`allow_subject_alt_names`](configuration.md#subject-alternative-names-requested-by-a-csr)
 is set to: that setting governs names a *submitted CSR* asks for, and these come
-from an operator on the CA host rather than from a request. A `generate` runbook
-that worked before the setting existed works unchanged with it off. So a serving certificate that must answer
-to both its own name and an alias has to list both:
+from an operator on the CA host rather than from a request. So a serving
+certificate that must answer to both its own name and an alias has to list
+both:
 
 ```bash
 openvox-ca generate --certname ca.example.com --ttl 8760h \
@@ -645,8 +648,7 @@ your fleet trusts and no obvious sign of why.
 
 **It refuses the certname `ca`**, with or without `--key-out`, before opening
 the storage. Without `--key-out` the key would go to `private/ca_key.pem`, which
-on the filesystem backend is where a cadir created by an earlier openvox-ca
-keeps the CA key itself. `POST /generate/ca` and a managed certificate named
+on the filesystem backend is where some cadirs keep the CA key itself. `POST /generate/ca` and a managed certificate named
 `ca` are refused too, so that the name means one thing on every path that
 generates a key. Submitting a CSR for `ca` is still accepted.
 
@@ -713,8 +715,8 @@ writers on different hosts can each decide a subject has no certificate and both
 issue one. Without an atomic inventory append — `filesystem` alone — the
 integrity record is recomputed from a snapshot, so an interleaved append leaves
 an HMAC covering a state that never existed, after which the server refuses to
-start. Recovery was a cutover: `migrate` rebuilds the integrity value on the
-destination, so it needs a second store, and it now refuses such a source unless
+start. One recovery is a cutover: `migrate` rebuilds the integrity value on the
+destination, so it needs a second store, and it refuses such a source unless
 given `--allow-unverified-source`. There is an in-place repair as
 well — see
 [`rebuild-inventory-hmac`](#rebuild-inventory-hmac-re-asserting-inventory-integrity),
@@ -969,8 +971,8 @@ JSON:
 Both are worth a rule wherever these logs are aggregated; see
 [Monitoring destructive operations](ca-key-security.md#monitoring-destructive-operations).
 
-**Who can do this.** The `openssl` recipe this replaces required the raw CA key
-file. This requires the ability to run the binary with the server's
+**Who can do this.** Signing with `openssl` by hand needs the raw CA key file.
+This command needs the ability to run the binary with the server's
 configuration — which under `ca_key_provider: openbao` means Transit sign
 permission plus write access to the cadir, rather than the key itself. That is a
 deliberate widening, and the reason the feature is possible at all, but it is
@@ -1137,10 +1139,8 @@ zero-length value is present, which a torn write produces. It is an ordinary
 mismatch and takes the `--yes-re-bless` path, not the "no baseline stored" path
 below.
 
-`scheme` is worth reading before anything else. A mismatch also fires when a
-store is served under a different integrity scheme than the value was written
-with, which is a different cause reached by the same repair — see [upgrading a
-pre-fix deployment](development/storage-internals.md#upgrading-a-pre-fix-ca_key_file--ca_cert_file--database-deployment).
+`scheme` names the integrity scheme this backend computes under, whole-blob
+HMAC or hash chain, which is the one the `computed:` line uses.
 
 What it cannot tell you is **which** entry diverged. The backends persist a
 single integrity head and no per-entry value, so nothing records what any
@@ -1224,8 +1224,8 @@ mismatch** the transcript above shows — that one is a usable key with a stored
 value the inventory no longer matches.
 
 If the store still holds an **undecomposed legacy inventory** — an etcd or Redis
-CA upgraded from a release before the inventory was decomposed into per-entry
-keys, which has not been started since — the command refuses outright. It reads
+store whose inventory is still a single blob, because no server has started on
+it to convert it into per-entry keys — the command refuses outright. It reads
 the decomposed rows, which do not exist yet, so it would report an empty
 inventory for a store holding a full one, and rebuilding would write an empty
 chain head over the whole-blob value that is the only thing able to validate the
@@ -1236,8 +1236,8 @@ the legacy blob still verifies, the server decomposes it and starts, after which
 this command applies normally. If it does not, the server refuses with an
 integrity error — decomposition checks the blob against its own stored value
 before committing — and that error names the stored legacy value to remove in
-order to acknowledge a lost baseline. This command cannot repair a
-pre-decomposition inventory either way, which is why it refuses rather than
+order to acknowledge a lost baseline. This command cannot repair an
+undecomposed inventory either way, which is why it refuses rather than
 reporting.
 
 If **no HMAC key is stored and no integrity value is either**, there is nothing

@@ -287,10 +287,6 @@ OpenVox Server's own (step 3) and after an import into a separate directory
 root, they leave files and lock files in the cadir that the service cannot use;
 see [file permissions](configuration.md#file-permissions).
 
-Earlier versions of this guide had to start the
-CA temporarily on loopback without TLS to mint this certificate through the API,
-then restart it with TLS; that is no longer necessary.
-
 Two details worth copying exactly. `--cadir` is required here because this guide
 configures everything by flag and never writes a config file — without it the
 command exits with `cadir is required`. And the certificate is **not** captured
@@ -468,11 +464,6 @@ reconciles what two processes would each hold in memory (see
 > alternative to re-import but the only ancestor-refresh mechanism there is: it
 > reads a PEM bundle and republishes it, touching neither the CA key nor the
 > import path.
->
-> **An older replica still flattens the chain.** A build from before this change
-> rewrites the stored blob as a single block, so one un-upgraded replica handling
-> one revocation drops the ancestors for everyone. Complete the rollout before
-> importing a chain.
 
 Re-import is also not signalled to consumers: the Kubernetes exporter republishes
 on CRL notifications, which the import path deliberately does not send. After a
@@ -581,7 +572,7 @@ an administrator of its own domain, and is still answered `403 certificate not
 eligible for renewal` — renewal reissues under our authority using the presented
 certificate's subject, which is only safe for names we assigned. With no
 `client_ca` configured there is one trust domain and the requirement is
-unreachable, exactly as before.
+unreachable.
 
 The third is a defence-in-depth invariant on the internal API rather than
 something a request can trip: the HTTP handler derives the subject from the
@@ -599,7 +590,7 @@ In the default topology every certificate an agent holds was issued by this CA,
 so nothing changes. A certificate issued by a *previous* CA whose material was
 replaced without re-issuing agent certificates cannot be renewed — but note
 that such a certificate already fails the middleware's own chain check, so it
-was locked out of every mTLS route before this change too, not just renewal.
+is locked out of every mTLS route anyway, not just renewal.
 Those agents must re-enrol.
 
 **There is no opt-out**, and none is planned: the gate is what stops this CA
@@ -758,8 +749,8 @@ restarting every replica.
 
 #### Certificates you already minted with openssl
 
-Earlier versions of this guide told you to sign admin certificates directly with
-the CA key. Those certificates have no inventory row, which means
+Admin certificates signed directly with the CA key, with `openssl` or anything
+else outside the CA, have no inventory row, which means
 `openvox-ca-ctl revoke --certname` cannot find them and `--force` cannot replace
 them: they were never in the CA's storage. They are nonetheless valid,
 CA-signed, admin-granting credentials until they expire.

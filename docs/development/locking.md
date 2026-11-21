@@ -496,11 +496,12 @@ written as two.
   rather than a parked goroutine, which is what a stack dump will show. Since
   `MigrateService` applies no deadline it waits forever, announcing itself once.
   Migrating a store onto itself is unsupported.
-  That is the behaviour of `MigrateService` called directly. `openvox-ca-ctl
-  migrate` no longer reaches it: since #275 the command takes the store-wide
-  instance lock on both ends first, so a store pointed at itself is refused
-  immediately rather than deadlocking, and so is either end held by a running
-  server.
+  That is the behaviour of `MigrateService` called directly. On filesystem and
+  SQLite, `openvox-ca-ctl migrate` does not reach it: since #275 the command
+  takes the store-wide instance lock on both ends first, so a store pointed at
+  itself is refused immediately rather than deadlocking, and so is either end
+  held by a running server. On a backend with distributed locking that lock
+  enforces nothing, so the command does reach it and deadlocks as above.
 
 ## Read paths take no distributed locks — by design
 

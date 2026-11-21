@@ -290,12 +290,10 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > the CRL, and the certificate they leave behind is still reachable by subject
 > until a replacement is issued.
 >
-> Counted since the CRL lock gained its own accounting: a write path that could
-> not take the lock at all, on the five writers that go through
-> `withCRLLockCounted` — revoke by subject, revoke by serial, reissue, refresh
-> and cleanup. The closure never runs in that case, so nothing beneath it could
-> count anything, and the error used to reach a log line only. The
-> `crl_chain_file` refresh counts a lock it could not take on this same counter
+> It also counts a write path that could not take the CRL lock at all, on the
+> five writers that go through `withCRLLockCounted` — revoke by subject, revoke
+> by serial, reissue, refresh and cleanup. The closure never runs in that case,
+> so nothing beneath it could count anything. The `crl_chain_file` refresh counts a lock it could not take on this same counter
 > itself rather than through the helper (a failure there is not the file's
 > fault, so it does not touch `openvoxca_crl_chain_refresh_failures_total`). The
 > revoke step inside `Clean` and `GenerateWithOptions`, the retire step inside
@@ -309,10 +307,8 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > for. A contended lock during `Clean`'s best-effort revoke is not a revocation
 > that did not happen — the operation the caller asked for succeeded — whereas
 > `openvox-ca-ctl revoke --serial` failing on the lock is exactly that, and it is
-> the only way to retire a superseded certificate. Revoke by serial was left out
-> of the counted set when the rest were converted, and a review caught it; the
-> enumeration above is now every writer, with nothing falling into an unnamed
-> remainder.
+> the only way to retire a superseded certificate. The enumeration above is
+> every writer, with nothing falling into an unnamed remainder.
 >
 > Two of those writers are managed certificates', and they move only on a
 > deployment that configures `managed_certs` or `serving_cert` — the CA's own
@@ -389,13 +385,9 @@ fix. On an import-only deployment, read
 current one, or configure [`crl_chain_file`](configuration.md#publishing-an-upstream-crl-chain)
 so it stays current by itself".
 
-> **No series tracks the chain's length either, so watch the log during a rolling
-> upgrade.** A replica running a build from before chain preservation re-signs the
-> CRL by writing one block, dropping every ancestor — and nothing detects it,
-> because the next re-sign on an upgraded replica then reads one block and writes
-> one block while `openvoxca_crl_number` keeps climbing. Upgrade every replica
-> before importing a chain, and keep the imported bundle so it can be re-imported
-> if this does happen. A re-sign that *can* see a difference says so, at `WARN`:
+> **No series tracks the chain's length either, so watch the log.** Keep the
+> imported bundle, so that a chain which loses its ancestors can be re-imported.
+> A re-sign that sees the stored chain change length says so, at `WARN`:
 >
 > ```text
 > level=WARN msg="Stored CRL chain length changed while re-signing" role=frontend blocks_read=2 blocks_written=1
@@ -528,8 +520,9 @@ mismatch, and `Inventory verification failed` for a failed read.
 
 Present on every CA, and live on any CA that renews certificates, since
 [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession)
-defaults to 24 hours. Only where it is set to `0` is nothing ever recorded — a
-renewal then revokes its predecessor inside the call, and a failure there is a
+defaults to 24 hours. Only where it is set to `0`, and no `managed_certs` entry
+sets a non-zero `revoke_after` of its own, is nothing ever recorded — a renewal
+then revokes its predecessor inside the call, and a failure there is a
 CRL failure counted above instead — so there the gauge sits at zero and the
 counter stays flat.
 
@@ -585,8 +578,8 @@ sweep is not completing — check the failure counter.
 > re-sign covers the whole pass, so every certificate that pass attempted stays
 > on the list and is retried together. A pending gauge that does not fall while
 > this counter rises is a sweep failing outright rather than one falling behind
-> — the sweep no longer paces itself, so there is no longer a backlog it
-> declines to attempt.
+> — the sweep does not pace itself, so there is no backlog it declines to
+> attempt.
 
 ### Client trust domains
 
@@ -718,7 +711,7 @@ refused store cost one revoked serial per interval, and each stays on the CRL
 until its certificate's `NotAfter` — five years for an entry with no `ttl`. Closing that needs a per-entry
 reconcile-failure series, of the shape
 `openvoxca_k8s_export_last_error_timestamp_seconds` takes for the
-exporter; it is not in this release.
+exporter; openvox-ca has none yet.
 
 `max without (serial, state)` rather than `on (subject)`: it collapses the
 leaf series' per-certificate labels while keeping every target label the
