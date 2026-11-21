@@ -1927,8 +1927,9 @@ an existing deployment, narrowing `cadir` from `/var/lib/openvox-ca` to
 `/var/lib/openvox-ca/ca` points the CA at a directory that does not contain the
 CA tree, and nothing notices: finding no CA there, it bootstraps a new one, and
 every agent that trusts the old CA stops trusting it. With `ca_cert_file` and
-`ca_key_file` set it keeps its key but starts from an empty inventory and serial
-counter. Two ways round it:
+`ca_key_file` set it keeps its key but starts from an empty inventory and an
+empty CRL, so every certificate revoked under the old `cadir`, administrator
+credentials included, authenticates again. Two ways round it:
 
 - **Move the tree.** Stop the CA, `mv` the contents of the old `cadir` into the
   new one, then change the setting. Nothing rewrites paths inside the inventory,

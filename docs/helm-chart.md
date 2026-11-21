@@ -90,9 +90,12 @@ openvox-ca has a large configuration surface, and the chart deliberately does
 - **`config` always wins**, with three exceptions. The two are deep-merged with
   your `config` on top — except `port`, `cadir` and `metrics_listen`, which also
   shape a Kubernetes object (the container port and Service, the volume mount,
-  the exporter's port and any ServiceMonitor). Overriding one of those in `config`
-  alone would move the server and leave the object behind, so the chart refuses
-  the install and names the value to set instead.
+  the exporter's port and any ServiceMonitor). An override of one of those that
+  would move the server and leave the object behind is refused at install, with
+  the value to set named instead: a `port` other than `listen.port`, a `cadir`
+  outside `persistence.mountPath` (a directory under it is fine), or a
+  `metrics_listen` without `metrics.enabled` or on a port other than
+  `metrics.port`.
   This is why `verbosity` is written into the config file rather than passed as
   `--verbosity`: a flag would outrank the file unconditionally, leaving
   `config.verbosity` silently ineffective. The only argument the chart passes is
@@ -1057,7 +1060,9 @@ on a fresh volume. A subdirectory works too if something creates it first.
 `config.cadir` points the CA at a directory that does not hold the CA tree, and
 nothing notices: finding no CA there, it bootstraps a new one, and every agent
 that trusts the old CA stops trusting it. With `ca.existingSecret` it keeps its
-key but starts from an empty inventory and serial counter. Either stop the CA
+key but starts from an empty inventory and an empty CRL, so every certificate
+revoked under the old `cadir`, administrator credentials included,
+authenticates again. Either stop the CA
 and move the tree into the new `cadir` on the volume before changing the
 setting, or leave `cadir` alone and put the pair in another directory under
 `persistence.mountPath` that something creates — rule 3 still applies to it. The

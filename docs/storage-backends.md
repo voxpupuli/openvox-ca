@@ -317,11 +317,15 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ├── ca_key.pem              CA private key (see note)          0600
 ├── ca_pub.pem              CA public key
 ├── ca_crl.pem              Certificate Revocation List (see note)
-├── inventory.txt           Issued certificate log, in OpenVox Server's format
-├── serial                  Next serial number
+├── inventory.txt           Issued certificate log, in
+│                           OpenVox Server's format            0600
+├── .inventory.hmac         Inventory integrity value          0600
+├── serial                  Kept for OpenVox Server's layout;
+│                           unread, since serials are random
 ├── superseded.json         Certificates awaiting delayed
 │                           revocation (see note)              0600
 ├── private/
+│   ├── .inventory_hmac_key inventory integrity key            0600
 │   └── <subject>_key.pem   server-generated private keys     0600
 ├── requests/
 │   └── <subject>.pem       pending CSRs
@@ -353,7 +357,8 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 > changes; only the number of PEM blocks inside it does. See
 > [storage internals](development/storage-internals.md).
 
-(The directory also holds small internal integrity files; leave them in place.)
+(`.inventory.hmac` and `private/.inventory_hmac_key` are integrity data; leave
+them in place.)
 File permissions are fixed: `0600` for `ca_key.pem`, `inventory.txt`, the
 integrity files and `superseded.json`, and for anything under `private/`;
 `0660` for the lock files under `locks/`, and `0770` for `locks/` itself;

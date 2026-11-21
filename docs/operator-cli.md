@@ -887,8 +887,8 @@ appears in the inventory.
 
 `--force` revokes the existing certificate and issues a replacement. The old
 serial goes on the CRL, but **a running server honours it until that server
-reloads the CRL**, which can be a substantial fraction of `crl_validity_days` away.
-Restart it if that matters. If the name is the CA's own hostname, the command
+reloads the CRL**, which it does within `crl_sync_interval_sec` (60 seconds by
+default). If the name is the CA's own hostname, the command
 says so: you may be revoking the certificate the server is currently serving.
 
 `--force` revokes the serial of the certificate in storage, which is not
