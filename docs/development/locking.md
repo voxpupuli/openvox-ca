@@ -144,13 +144,13 @@ service operators restart and kill. Consequences worth knowing:
   prevents that. Group write on the files lets the group rewrite the
   store-instance holder record too, so `StoreLockedError` says when the record
   it reports could have come from the group. Lock files can be swept while
-  nothing is using the
-  store; while anything is, sweeping them silently defeats the exclusion.
+  nothing is using the store; while anything is, sweeping them silently
+  defeats the exclusion.
 - **The directory grows with the fleet.** One file per distinct lock name means
-  `bootstrap`, `crl` — and one per subject, since `subject:<name>` is a lock
-  name. It is roughly an inode per node the CA has ever locked, it never
-  shrinks (`Clean` retires a node's certificate, not its lock file), and it
-  rides along in any `tar <cadir>/` backup.
+  `bootstrap`, `crl`, `hmac-key` — and one per subject, since `subject:<name>`
+  is a lock name. It is roughly an inode per node the CA has ever locked, it
+  never shrinks (`Clean` retires a node's certificate, not its lock file), and
+  it rides along in any `tar <cadir>/` backup.
 - **The lock identity is the path, not the inode.** Two processes exclude each
   other only if they resolve the same lock directory. The path is made
   absolute, so differently spelled configuration for one store still agrees,
@@ -358,15 +358,16 @@ usually win the lock back. See [Known gaps](#known-gaps).
 `StorageService` guards each family of logical keys with its own process-local
 mutex so a compound operation (read blob → transform → write blob) can't
 interleave with another goroutine's within the process. Three are
-`sync.RWMutex`; `serialMu` is a plain `sync.Mutex`, since the serial counter
-has no read-only fast path:
+`sync.RWMutex`; `serialMu` is a plain `sync.Mutex`, since `serial` has no read
+path worth sharing — seed and import write it only when it is absent, and
+nothing in the server reads it:
 
 | Mutex | Guards | Why compound |
 | --- | --- | --- |
 | `inventoryMu` | `inventory` + `inventory_hmac` | An append must scan for duplicate serials and advance the integrity head as one unit |
 | `crlMu` | `crl` | Plain read/write pairs |
 | `fileMu` | `ca_cert`, `ca_pubkey`, `ca_key`, `csr/<subject>`, `cert/<subject>`, per-subject private keys | One mutex spans all subjects; simple and sufficient at current scale |
-| `serialMu` | `serial` | Plain read/write pairs |
+| `serialMu` | `serial` | Not compound: written only when absent, and never read |
 
 One shared-state key is absent from this table for a reason worth stating:
 `hmac_key` is guarded a tier *up*, not here. Its initialisation
@@ -591,8 +592,9 @@ written separately.
   `bootstrap` → `crl` on the import path — and it is deliberately **absent from
   `allowedLockNesting`** rather than missing from it: that table keys pairs by
   lock *name* and not by (store, name), so a path holding `bootstrap` over two
-  different stores is outside its scope by construction. This prose is where the
-  pair is recorded, and the table must not gain it. `MigrateService` holds
+  different stores is outside its scope by construction. This prose and the
+  ordering block above are where the pair is recorded, and the table must not
+  gain it. `MigrateService` holds
   `bootstrap` on the destination across `RebuildInventoryHMAC`, which reaches
   `EnsureHMACKey`; if the copied `hmac_key` is the wrong length, that takes
   `hmac-key` inside it. An *absent* key does not: `RebuildInventoryHMAC`
@@ -973,11 +975,12 @@ state when the document was last updated and is not guaranteed exhaustive.
   across its signature** — deliberately, see Tier 3 — so an authentication-path
   `IsRevokedSerial` can still queue behind a signer round trip; it is just an
   issuance's rather than a responder's. Do not assume that wait is short:
-  under `ca_key_provider: openbao` it is bounded by roughly *twice* the
-  configured login timeout, not once — `openbao.Signer.Sign` records why, the
-  403 path's `Reauth` taking a mutex that does not honour a context — and under
-  the isolated signer `RemoteSigner.Sign` issues a `net/rpc` call carrying no
-  deadline at all, so it is not bounded. An unnonced OCSP request can likewise
+  under `ca_key_provider: openbao` it is bounded by roughly *twice* the OpenBao
+  client's fixed 10-second login timeout, not once — `openbao.Signer.Sign`
+  records why, the 403 path's `Reauth` taking a mutex that does not honour a
+  context — and under the isolated signer `RemoteSigner.Sign` abandons its wait
+  after `defaultRemoteSignTimeout` (two minutes), while the child may go on
+  signing. An unnonced OCSP request can likewise
   block on `c.mu.Lock()` for its optional cache write while an issuance holds
   the lock. Anyone diagnosing a stalled authentication
   path should still look at the signer.
@@ -1457,14 +1460,16 @@ itself instead. It wraps the backend in an observer that records every
 `(outer, inner)` pair the CA layer actually takes through
 `StorageService.WithLock`, and asserts the observed set against
 `allowedLockNesting` — the machine-readable form of the **Lock ordering**
-section above. An inversion fails because the reversed pair is absent from that
-table; a **new** nesting fails because the new pair is absent too, which is
-deliberate. A new pair of simultaneously-held lock names is protocol in the same
-sense rule 7 makes a new lock *name* protocol — rule 7 governs names, not pairs,
-so the pair obligation is its own rule ("A new nesting is protocol too") in
-**Rules for new or changed code** above — and it should cost a line in
-`allowedLockNesting` and a line in the **Lock ordering** section above, added
-together. The failure message names the offending pair.
+section above, except the `bootstrap` → `hmac-key` pair, which that table keys
+out of scope by construction (see that section). An inversion fails because the
+reversed pair is absent from that table; a **new** nesting fails because the
+new pair is absent too, which is deliberate. A new pair of simultaneously-held
+lock names is protocol in the same sense rule 7 makes a new lock *name*
+protocol — rule 7 governs names, not pairs, so the pair obligation is its own
+rule ("A new nesting is protocol too") in **Rules for new or changed code**
+above — and it should cost a line in `allowedLockNesting` and a line in the
+**Lock ordering** section above, added together. The failure message names the
+offending pair.
 
 Four things that file pins which nothing else does:
 

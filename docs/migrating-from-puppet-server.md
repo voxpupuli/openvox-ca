@@ -220,8 +220,8 @@ the shipped mixin alerts on it.
 
 Re-import is also not signalled to consumers: the Kubernetes exporter republishes
 on CRL notifications, which the import path deliberately does not send. After a
-live ancestor refresh, run `openvox-ca-ctl reissue-crl` or restart to republish
-the exported copies.
+re-import, start the CA, or run `openvox-ca-ctl reissue-crl` once it is running,
+to republish the exported copies.
 
 ## Step 6: Disable the built-in CA
 
@@ -471,8 +471,8 @@ reconciles what two processes would each hold in memory (see
 
 Re-import is also not signalled to consumers: the Kubernetes exporter republishes
 on CRL notifications, which the import path deliberately does not send. After a
-live ancestor refresh, run `openvox-ca-ctl reissue-crl` or restart to republish
-the exported copies.
+re-import, start the CA, or run `openvox-ca-ctl reissue-crl` once it is running,
+to republish the exported copies.
 
 ## Directory layout mapping
 
@@ -570,14 +570,14 @@ holds, so on a replica that has not yet synced a revoked certificate gets past
 the middleware and is refused here instead — `403 access denied` either way.
 That is deliberate, and it is why revoking cannot be outrun by renewing.
 
-The issuer requirement is reachable once a `client_ca` entry is configured: the
-middleware then trusts a second issuer for authentication, while renewal stays
-scoped to this CA's own namespace. A foreign certificate authenticates, may be
-an administrator of its own domain, and is still answered `403 certificate not
-eligible for renewal` — renewal reissues under our authority using the presented
-certificate's subject, which is only safe for names we assigned. With no
-`client_ca` configured there is one trust domain and the requirement is
-unreachable.
+The issuer requirement is a defence in depth that no shipped configuration
+reaches. With a `client_ca` entry the middleware trusts a second issuer for
+authentication, but renewal stays scoped to this CA's own namespace: a foreign
+certificate authenticates, may be an administrator of its own domain, and is
+refused renewal by the middleware with `403 access denied`, logged as
+`Auth: rejecting a foreign client certificate for an own-CA operation` —
+renewal reissues under our authority using the presented certificate's subject,
+which is only safe for names we assigned.
 
 The third is a defence-in-depth invariant on the internal API rather than
 something a request can trip: the HTTP handler derives the subject from the
@@ -600,10 +600,10 @@ Those agents must re-enrol.
 
 **There is no opt-out**, and none is planned: the gate is what stops this CA
 reissuing under its own authority for a name it never assigned, so re-enrolment
-is the resolution. When the CA's own refusal is reached — which takes a second
-trusted issuer, as above — it logs `Renewal rejected: certificate not eligible`,
-or `Auto-renewal rejected: certificate not eligible` for the empty-body form,
-each with the `subject` and the reason in `error`.
+is the resolution. The CA's own issuer refusal, which no shipped configuration
+reaches (see above), would log `Renewal rejected: certificate not eligible`, or
+`Auto-renewal rejected: certificate not eligible` for the empty-body form, each
+with the `subject` and the reason in `error`.
 
 ## CLI command mapping
 
