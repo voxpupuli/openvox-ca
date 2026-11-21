@@ -649,10 +649,9 @@ var _ = Describe("Export scopes", func() {
 		return sec.Data
 	}
 
-	It("defaults to chain, publishing what the target published before scopes existed", func() {
-		// The upgrade property, and the reason the default is not "self": before
-		// these settings existed every target got the stored blob verbatim. A
-		// narrow default would have silently dropped every intermediate from a
+	It("defaults to chain, publishing the stored blob verbatim", func() {
+		// The reason the default is not "self": a target that names no scope
+		// gets the stored blob verbatim. A narrow default would have silently dropped every intermediate from a
 		// consumer's trust bundle and every ancestor block from a CRL blob --
 		// the material crl_chain_file exists to distribute -- with no
 		// configuration change to notice and no error to catch, since a

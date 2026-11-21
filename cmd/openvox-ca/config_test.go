@@ -590,8 +590,8 @@ var _ = Describe("expired-cert cleanup resolvers", func() {
 			"an env value of 0 must override a positive file value and close the window")
 
 		// And it must close it against the *default* too, not only against a
-		// file value — that is now the case an operator restoring the previous
-		// behaviour on upgrade actually hits.
+		// file value: an operator who wants immediate revocation and sets
+		// nothing else hits exactly this case.
 		clearServerEnv()
 		setEnv("OPENVOX_CA_SUPERSEDED_CERT_REVOKE_AFTER_SEC", "0")
 		cfg, err = loadServerConfig("")

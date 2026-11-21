@@ -120,12 +120,11 @@ type Target struct {
 	// certificate — every CA that issued its own root — self, chain and root are
 	// byte-identical anyway.
 	//
-	// Both default to "chain", which is what every target published before these
-	// settings existed: the stored blob verbatim. Defaulting to "self" instead
-	// would have narrowed every already-deployed target on upgrade with no
-	// configuration change -- a consumer's trust bundle losing its
-	// intermediates, and a CRL blob losing every ancestor block, which is the
-	// material crl_chain_file exists to distribute. Narrowing is therefore
+	// Both default to "chain": the stored blob verbatim. A "self" default would
+	// narrow a target silently, with no configuration choosing it -- a
+	// consumer's trust bundle losing its intermediates, and a CRL blob losing
+	// every ancestor block, which is the material crl_chain_file exists to
+	// distribute. Narrowing is therefore
 	// something an operator opts into per target, and it matches what the HTTP
 	// endpoints serve: GET /certificate/ca and the CRL endpoint always return
 	// the full chain.

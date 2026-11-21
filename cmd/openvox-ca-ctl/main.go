@@ -151,9 +151,9 @@ func newTLSConfig(notices io.Writer) (*tls.Config, error) {
 		// SECURITY: Half a key pair cannot authenticate. Say so now rather
 		// than presenting no client certificate and leaving the operator to
 		// diagnose a server-side mTLS rejection. Name the half that arrived
-		// and every source it could have come from: after an upgrade the
-		// operator most often typed neither flag, and the value came from
-		// ctl.yaml or the environment.
+		// and every source it could have come from: the operator has often
+		// typed neither flag, and the value came from ctl.yaml or the
+		// environment.
 		return nil, fmt.Errorf("--client-cert %s given without --client-key "+
 			"(also settable as client_cert/client_key in the config file, or "+
 			"OPENVOX_CA_CTL_CLIENT_CERT/OPENVOX_CA_CTL_CLIENT_KEY); both are required for mTLS",
