@@ -46,9 +46,9 @@ var _ = Describe("Init and where the cadir keeps the CA key", func() {
 	})
 
 	It("refuses to start when the two keys differ", func() {
-		// One is the key OpenVox Server signs with, the other the one this CA
-		// signed with before it moved; nothing here can tell which the
-		// operator means, so starting at all would be a guess.
+		// One is the key OpenVox Server signs with, the other the one in
+		// private/; nothing here can tell which the operator means, so starting
+		// at all would be a guess.
 		Expect(os.WriteFile(filepath.Join(dir, "ca_key.pem"), cachedKeyPEM, 0o600)).To(Succeed())
 		Expect(os.WriteFile(filepath.Join(dir, "private", "ca_key.pem"), []byte("some other key"), 0o600)).To(Succeed())
 
@@ -57,7 +57,7 @@ var _ = Describe("Init and where the cadir keeps the CA key", func() {
 	})
 
 	It("starts, signs and revokes on a cadir with the key only in private/, and leaves it there", func() {
-		// A cadir an earlier openvox-ca created. It keeps working where it
+		// A cadir that keeps its key in private/. It keeps working where it
 		// is: nothing moves the key to the top of the cadir.
 		Expect(os.WriteFile(filepath.Join(dir, "private", "ca_key.pem"), cachedKeyPEM, 0o600)).To(Succeed())
 		myCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")

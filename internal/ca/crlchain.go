@@ -247,11 +247,11 @@ func (c *CA) crlChainLocked(ctx context.Context, ourCRL *x509.RevocationList, st
 	// derives from block 0, so a chain going 2 -> 1 moves crl_number upward and
 	// looks healthy on every dashboard.
 	//
-	// Loss caused by a replica running an older build during a rolling upgrade is
-	// invisible even here: that replica writes a single block, and the next
-	// re-sign on an upgraded replica reads one block and writes one block, with
-	// nothing to compare against. docs/metrics.md names that blind spot and the
-	// order to upgrade in; this line covers only what is observable in-process.
+	// Loss caused by a writer that does not preserve the chain at all is
+	// invisible even here: it writes a single block, and the next re-sign reads
+	// one block and writes one block, with nothing to compare against. No build
+	// since v1.0.0-alpha1 writes that way; this line covers only what is
+	// observable in-process.
 	if before, after := len(stored), len(chain); after != before {
 		slog.Warn("Stored CRL chain length changed while re-signing",
 			"blocks_read", before, "blocks_written", after)
@@ -374,7 +374,7 @@ func newerCRL(a, b *x509.RevocationList) bool {
 // One function because three readers need the same answer and reached it three
 // different ways. Import selected the newest; the cache loader and the re-sign
 // read took block 0 unless it was *foreign*. A stale block 0 of our own passes an
-// ownership check, so on a blob holding two of ours -- which the released build's
+// ownership check, so on a blob holding two of ours -- which a pre-alpha build's
 // import stored verbatim -- the cache answered revocation from a list missing
 // every serial revoked since, and the next re-sign advanced from the stale number
 // and destroyed the newer block.

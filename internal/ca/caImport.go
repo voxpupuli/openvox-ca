@@ -586,10 +586,10 @@ func sameCRLOrder(a, b []*x509.RevocationList) bool {
 //
 // Newest, not first, and by the same newerCRL comparison orderCRLChain applies to
 // an incoming bundle -- the two answer the same question about different inputs,
-// and a stored blob can hold more than one block of ours. The released build's
-// import validated block 0 and then wrote the operator's bundle verbatim, so
-// `--crl-chain stale.pem current.pem root.pem` is a stored shape this code has to
-// read after an upgrade.
+// and a stored blob can hold more than one block of ours. Builds of main before
+// v1.0.0-alpha1 validated block 0 on import and then wrote the operator's bundle
+// verbatim, so `--crl-chain stale.pem current.pem root.pem` is a stored shape
+// this code has to read.
 //
 // Taking the first match there resolved to the stale copy, and an ancestors-only
 // refresh -- the documented way to refresh ancestors -- then promoted it to block

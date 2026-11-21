@@ -52,12 +52,13 @@ import (
 // that one after the fact; this one states the invariant it violated.
 // recordSuperseded is what makes the stored form canonical. Its two callers
 // disagree: AutoRenew passes serialHexStr of the presented certificate, already
-// canonical, while Renew passes LatestSerialForSubject, which returns inventory
-// text verbatim — and a migrated or older inventory carries zero-padded
-// serials. Only a white-box call can feed it a genuinely non-canonical value:
-// a spec driving Renew against a fresh store cannot, because that store's
-// inventory is already canonical, which is precisely how a spec written that
-// way passes whether or not the canonicalisation exists.
+// canonical, while Renew passes LatestSerialForSubject, whose form depends on
+// the backend: a structured backend returns the row's text as stored, which
+// nothing guarantees is canonical. Only a white-box call can feed it a
+// genuinely non-canonical value: a spec driving Renew against a fresh store
+// cannot, because that store's inventory is already canonical, which is
+// precisely how a spec written that way passes whether or not the
+// canonicalisation exists.
 var _ = Describe("recordSuperseded", func() {
 	var (
 		ctx   context.Context
@@ -93,7 +94,7 @@ var _ = Describe("recordSuperseded", func() {
 					"that comparison is the only thing stopping a superseded credential "+
 					"renewing itself")
 		},
-		Entry("zero-padded, as a migrated inventory carries", "000ABC", "ABC"),
+		Entry("zero-padded, as a stored row can hold", "000ABC", "ABC"),
 		Entry("lowercase", "abc", "ABC"),
 		Entry("lowercase and padded", "000abc", "ABC"),
 		Entry("already canonical", "ABC", "ABC"),
@@ -503,13 +504,14 @@ var _ = Describe("drainDueLocked", func() {
 		}
 	})
 
-	// Inventory serials are not canonical — a store migrated from Puppet
-	// carries zero-padded ones — so the same certificate can reach the batch
-	// under two spellings. Compared raw they look like two revocations, and the
-	// batch appends both in one go, where the per-entry loop could not: its
-	// second call re-read a CRL its first had already amended. Growing the CRL
-	// without bound is what revokeSerialLocked's duplicate check exists to
-	// prevent, and this is the batch's version of it.
+	// recordSuperseded stores canonically, but the drain does not trust a list
+	// it may not have written (a hand edit, or a future appender), so the same
+	// certificate can reach the batch under two spellings. Compared raw they
+	// look like two revocations, and the batch appends both in one go, where
+	// the per-entry loop could not: its second call re-read a CRL its first had
+	// already amended. Growing the CRL without bound is what
+	// revokeSerialLocked's duplicate check exists to prevent, and this is the
+	// batch's version of it.
 	It("appends one CRL entry for two spellings of the same serial", func() {
 		canonical := entry(0)
 		padded := canonical

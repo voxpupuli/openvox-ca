@@ -44,8 +44,9 @@ func skipAsRoot(why string) {
 
 // The filesystem backend keeps the CA key where OpenVox Server does, at the top
 // of the cadir, so a cadir handed back to OpenVox Server has it where it looks.
-// A cadir that has it only in private/, where this backend kept it before, is
-// read and written there; neither layout is rearranged by starting on it.
+// A cadir that has it only in private/, where builds of main before
+// v1.0.0-alpha1 kept it, is read and written there; neither layout is
+// rearranged by starting on it.
 var _ = Describe("Filesystem CA key location", func() {
 	var (
 		ctx    = context.Background()

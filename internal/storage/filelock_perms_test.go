@@ -146,12 +146,13 @@ var _ = Describe("Same-host lock file modes", func() {
 		Entry("owner-only under 0077", 0o077, false),
 	)
 
-	// A store an earlier version created has its lock directory at 0750 and
-	// its lock files at 0600. The uid that made them must keep locking exactly
-	// as before, and nothing here may widen them: this package never changes
-	// the mode of a file it did not just create, so a store that wants group
-	// access to existing locks has to be given it by the operator.
-	DescribeTable("keeps using owner-only locks an earlier version left, without widening them",
+	// A store whose lock directory is 0750 and lock files 0600, as a build from
+	// before #493 made them, or an operator by hand. The uid that made them must
+	// keep locking exactly as before, and nothing here may widen them: this
+	// package never changes the mode of a file it did not just create, so a
+	// store that wants group access to existing locks has to be given it by the
+	// operator.
+	DescribeTable("keeps using owner-only locks it finds, without widening them",
 		func(acquire func(*FilesystemBackend), name string) {
 			cadir := GinkgoT().TempDir()
 			locks := filepath.Join(cadir, fsLockDir)

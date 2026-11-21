@@ -700,11 +700,11 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			os.FileMode(0o600), os.FileMode(0o600), os.FileMode(0o700)),
 	)
 
-	// The upgrade boundary the resolution created. A process on a version that
-	// locked beside the DSN spelling and one on this version do not exclude each
-	// other, and nothing here can prevent that -- the other process is the one
-	// holding the wrong lock. What it can do is say so where an operator will
-	// read it.
+	// A process that locks beside the DSN's spelling, as builds of main before
+	// v1.0.0-alpha1 did, and one that locks beside the resolved path do not
+	// exclude each other, and nothing here can prevent that -- the other process
+	// is the one holding the wrong lock. What it can do is say so where an
+	// operator will read it.
 	Describe("a lock directory stranded beside the DSN's own spelling", func() {
 		captureWarnings := func() *bytes.Buffer {
 			GinkgoHelper()
@@ -717,10 +717,10 @@ var _ = Describe("SQLiteFilePermissions", func() {
 
 		// The spelling this check could not see. SQLiteFilePath decodes %HH in
 		// the relative file: form now, so the directory it derives is
-		// ".ca b.db.locks" while the version that left one behind created
+		// ".ca b.db.locks" while a pre-alpha build that left one behind created
 		// ".ca%20b.db.locks". Asking only about the decoded name looked for a
-		// directory the old version never made and ignored the one it did,
-		// which is the stranded directory the warning exists for.
+		// directory that build never made and ignored the one it did, which is
+		// the stranded directory the warning exists for.
 		//
 		// Relative, and that is the whole point of the shape: url.Parse puts an
 		// absolute file: path in u.Path already decoded, which the parser before
@@ -732,11 +732,11 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			dir := GinkgoT().TempDir()
 			GinkgoT().Chdir(dir)
 
-			// The driver and this package both open "ca b.db"; an older version
+			// The driver and this package both open "ca b.db"; a pre-alpha build
 			// derived its lock directory from the undecoded text.
 			Expect(os.WriteFile(filepath.Join(dir, "ca b.db"), nil, 0o600)).To(Succeed())
 			Expect(os.Mkdir(filepath.Join(dir, ".ca%20b.db.locks"), 0o700)).To(Succeed(),
-				"what an earlier version left behind")
+				"what a pre-alpha build left behind")
 
 			buf := captureWarnings()
 			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:ca%20b.db"})
@@ -745,16 +745,24 @@ var _ = Describe("SQLiteFilePermissions", func() {
 
 			Expect(buf.String()).To(ContainSubstring(".ca%20b.db.locks"),
 				"the directory beside the escaped spelling must be named")
+			// No symlink is involved on this branch, so neither the diagnosis
+			// nor the advice may describe one.
+			Expect(buf.String()).To(ContainSubstring("resolved, decoded database path"),
+				"a diagnosis that holds without a symlink")
+			Expect(buf.String()).NotTo(ContainSubstring("symlink"),
+				"nothing here reached the database through a link")
+			Expect(buf.String()).To(ContainSubstring("stop it, then remove the stranded directory"),
+				"what the operator has to do about it")
 		})
 
-		It("warns when one exists and this version locks elsewhere", func() {
+		It("warns when one exists and the lock directory in use is elsewhere", func() {
 			realDB := filepath.Join(GinkgoT().TempDir(), "real.db")
 			linkDir := GinkgoT().TempDir()
 			link := filepath.Join(linkDir, "link.db")
 			Expect(os.WriteFile(realDB, nil, 0o600)).To(Succeed(), "seed the database")
 			Expect(os.Symlink(realDB, link)).To(Succeed(), "reach it through a link")
 			legacy := filepath.Join(linkDir, ".link.db.locks")
-			Expect(os.Mkdir(legacy, 0o700)).To(Succeed(), "what an earlier version left behind")
+			Expect(os.Mkdir(legacy, 0o700)).To(Succeed(), "what a pre-alpha build left behind")
 
 			buf := captureWarnings()
 			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + link})
@@ -766,21 +774,21 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			// behaviour had regressed, and none of them would fail if the
 			// record named the wrong directory in the right words. What matters
 			// is which directory is named and that the mtime is carried -- the
-			// doc gives the mtime as what separates a live holder from an
-			// upgrade's leftovers, so omitting it sends the operator to stat a
-			// path this already stat'd.
+			// doc gives the mtime as what points at a live holder, so omitting
+			// it sends the operator to stat a path this already stat'd.
 			Expect(buf.String()).To(ContainSubstring("stranded="+legacy),
 				"the attribute naming the directory left behind")
 			inUse, ok := lockDirOf("file:" + link)
-			Expect(ok).To(BeTrue(), "the directory this version locks in")
+			Expect(ok).To(BeTrue(), "the directory this code locks in")
 			Expect(buf.String()).To(ContainSubstring("in_use="+inUse),
-				"and the one this version actually locks in")
+				"and the one this code actually locks in")
 			Expect(buf.String()).To(MatchRegexp(`stranded_modified=\S`),
 				"carrying the mtime, not an empty attribute")
 
 			// One pin for the advice, because an operator-facing remedy that
-			// silently disappears is its own regression.
-			Expect(buf.String()).To(ContainSubstring("upgrade openvox-ca and openvox-ca-ctl together"),
+			// silently disappears is its own regression. Rewording how to find
+			// the holder is not, so the clauses are not pinned one by one.
+			Expect(buf.String()).To(ContainSubstring("stop it, then remove the stranded directory"),
 				"what the operator has to do about it")
 		})
 
@@ -801,7 +809,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			Expect(os.WriteFile(dbPath, nil, 0o600)).To(Succeed(), "seed the database")
 			inUse, ok := lockDirOf("file:" + dbPath)
 			Expect(ok).To(BeTrue(), "lock directory")
-			Expect(os.Mkdir(inUse, 0o700)).To(Succeed(), "the one this version uses")
+			Expect(os.Mkdir(inUse, 0o700)).To(Succeed(), "the one this code uses")
 
 			viaAlias := filepath.Join(alias, "ca.db")
 			Expect(filepath.Join(alias, ".ca.db.locks")).NotTo(Equal(inUse),
@@ -824,7 +832,7 @@ var _ = Describe("SQLiteFilePermissions", func() {
 			Expect(os.WriteFile(dbPath, nil, 0o600)).To(Succeed(), "seed the database")
 			dir, ok := lockDirOf("file:" + dbPath)
 			Expect(ok).To(BeTrue(), "lock directory")
-			Expect(os.Mkdir(dir, 0o700)).To(Succeed(), "the one this version uses")
+			Expect(os.Mkdir(dir, 0o700)).To(Succeed(), "the one this code uses")
 
 			buf := captureWarnings()
 			b, err := NewSQLBackend(SQLConfig{Dialect: SQLitePure, DSN: "file:" + dbPath})

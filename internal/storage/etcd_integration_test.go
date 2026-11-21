@@ -1551,6 +1551,17 @@ var _ = Describe("EtcdLegacyInventoryDecompose", func() {
 		err = b.EnsureReady(ctx)
 		Expect(err).To(HaveOccurred(), "conflicting states must not be silently resolved")
 		Expect(err.Error()).To(ContainSubstring("do not match"), "the error must explain the conflict")
+		Expect(err.Error()).To(ContainSubstring("stop every replica still writing the legacy format"),
+			"the remedy must not be to delete either side")
+		Expect(err.Error()).To(ContainSubstring("reconcile them under the key prefix by hand"),
+			"the remedy that keeps every record")
+		// A remedy that offered a snapshot restore could pass the pins above;
+		// these two fail it: the first says why a snapshot does not help, and
+		// the second that none is offered.
+		Expect(err.Error()).To(ContainSubstring("lacks those issuances"),
+			"why a snapshot does not help")
+		Expect(err.Error()).NotTo(ContainSubstring("restore from a snapshot"),
+			"a restore loses the issuances the refusal protects")
 
 		// Neither side may have been destroyed by the refusal.
 		blobResp, err := cli.Get(ctx, prefix+"/inventory/data")

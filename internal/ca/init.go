@@ -695,8 +695,8 @@ func (c *CA) loadCRLCache(ctx context.Context) error {
 	// serial revoked since the export -- so a certificate this CA revoked
 	// authenticates, silently, which is the exact failure the foreign-block-0
 	// search exists to prevent. Gating the search on the foreign case left the
-	// stale case uncovered, and the stale case is the one an upgrade produces:
-	// the released build's import wrote the operator's bundle verbatim.
+	// stale case uncovered, and the stale case is one a store can hold: builds
+	// of main before v1.0.0-alpha1 imported the operator's bundle verbatim.
 	// Captured before the selection replaces crl. The remedy warning below has to
 	// describe the blob as *stored*, not as repaired: on [foreign, ours] the
 	// selection makes crl ours, so testing it afterwards suppressed the one line

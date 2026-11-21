@@ -116,14 +116,14 @@ func (c *CA) refuseIfSuperseded(ctx context.Context, presentedCert *x509.Certifi
 			subject, ErrCertSuperseded)
 	}
 	for _, e := range entries {
-		// Normalised rather than compared raw, even though recordSuperseded now
+		// Normalised rather than compared raw, even though recordSuperseded
 		// canonicalises on write. Belt and braces on purpose: this is an
 		// authorisation decision, the two sides are produced by different code,
-		// and a list written by an earlier build of this branch — or by any
-		// future caller that appends without going through recordSuperseded —
-		// would otherwise silently fail to match. An entry whose serial will not
-		// parse cannot be the presented certificate's, since that one came from
-		// a *big.Int; skip it and let the sweep discard it.
+		// and a list not written through recordSuperseded (a hand edit, or a
+		// future caller that appends without it) would otherwise silently fail
+		// to match. An entry whose serial will not parse cannot be the
+		// presented certificate's, since that one came from a *big.Int; skip it
+		// and let the sweep discard it.
 		stored, err := storage.NormaliseSerial(e.Serial)
 		if err != nil {
 			continue
@@ -227,10 +227,10 @@ func (c *CA) recordSuperseded(ctx context.Context, subject, serial string, after
 	}
 	// Stored canonical, not as handed in. The two callers disagree about form:
 	// AutoRenew passes serialHexStr of the presented certificate, already
-	// canonical, while Renew passes LatestSerialForSubject, which returns
-	// inventory text *verbatim* — and an inventory written by an older version,
-	// or migrated from Puppet Server, carries zero-padded sequential serials
-	// (see storage.NormaliseSerial and the comment above SubjectForSerial).
+	// canonical, while Renew passes LatestSerialForSubject, whose form depends
+	// on the backend: a structured backend returns the row's text as stored,
+	// which nothing guarantees is canonical (see storage.NormaliseSerial and
+	// the comment above SubjectForSerial).
 	//
 	// refuseIfSuperseded compares this against serialHexStr of a presented
 	// certificate. Storing "000A" where the gate computes "A" would make that
@@ -567,15 +567,16 @@ type drainOutcome struct {
 //
 // Canonicalisation is storage.NormaliseSerial, the same validator
 // recordSuperseded writes the list through, rather than a bare big.Int parse.
-// Inventory serials are not canonical — a store migrated from Puppet carries
-// zero-padded ones — so "000ABC" and "ABC" are one certificate, and comparing
-// them raw is how a duplicate slips into a batch that appends its entries in
-// one go. NormaliseSerial is also stricter than the parse it replaces, in the
-// two directions that make the pending list and the CRL agree: it accepts a
-// serial with surrounding whitespace, which recordSuperseded already stores
-// canonically and which the old check discarded outright, and it rejects a
-// negative one, which the old check handed on as revocable although no
-// certificate can carry it.
+// recordSuperseded stores canonically, but the list is read back from storage
+// and nothing else guards its form: one not written through it (a hand edit, or
+// a future caller that appends directly) can carry "000ABC" beside "ABC", which
+// are one certificate, and comparing them raw is how a duplicate slips into a
+// batch that appends its entries in one go. NormaliseSerial is also stricter
+// than the parse it replaces, in the two directions that make the pending list
+// and the CRL agree: it accepts a serial with surrounding whitespace, which
+// recordSuperseded already stores canonically and which the old check discarded
+// outright, and it rejects a negative one, which the old check handed on as
+// revocable although no certificate can carry it.
 //
 // # Failure granularity
 //

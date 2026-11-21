@@ -419,13 +419,12 @@ var _ = Describe("Delayed supersession", func() {
 		// The gate compares the presented certificate's serial against the
 		// stored one. The presented side is always canonical (serialHexStr of a
 		// *big.Int); the stored side used to be whatever the caller passed, and
-		// on the CSR re-key path that is LatestSerialForSubject, which returns
-		// inventory text verbatim. An inventory written by an older version, or
-		// migrated from Puppet Server, carries zero-padded sequential serials —
-		// so the gate compared "A" against "000A", missed, and let the
-		// superseded credential renew itself. Exactly the escalation it exists
-		// to prevent, on the worse path, and silent: the sweep parses before
-		// comparing so it still revoked correctly.
+		// on the CSR re-key path that is LatestSerialForSubject, which could
+		// return a zero-padded serial -- so the gate compared "A" against
+		// "000A", missed, and let the superseded credential renew itself.
+		// Exactly the escalation it exists to prevent, on the worse path, and
+		// silent: the sweep parses before comparing so it still revoked
+		// correctly.
 		It("refuses a certificate recorded with a zero-padded serial", func() {
 			original := issue("node-pad")
 			padded := "000" + hexSerial(original.SerialNumber)

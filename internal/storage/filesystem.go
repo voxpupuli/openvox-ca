@@ -66,8 +66,9 @@ var fsLayout = map[string]string{
 
 // fsCAKeyPath is where OpenVox Server keeps its CA key, and so where this
 // backend keeps it: a cadir handed back to OpenVox Server has to have the key
-// where it looks. fsLegacyCAKeyPath is where this backend kept it before, and a
-// cadir with the key only there goes on using it there. See caKeyLocation.
+// where it looks. fsLegacyCAKeyPath is where builds of main before v1.0.0-alpha1
+// kept it, and a cadir with the key only there goes on using it there. See
+// caKeyLocation.
 const (
 	fsCAKeyPath       = "ca_key.pem"
 	fsLegacyCAKeyPath = "private/ca_key.pem"
@@ -87,9 +88,9 @@ var ErrCAKeyLinkBroken = errors.New("the CA key file is a link that leads nowher
 
 // FilesystemBackend stores blobs as files under a single base directory.
 // It is the default Backend implementation. It keeps OpenVox Server's own CA
-// directory layout and inventory line format, and reads a cadir an earlier
-// version of openvox-ca wrote (the key in private/, canonical inventory lines)
-// in place, without rearranging it.
+// directory layout and inventory line format, and reads a cadir that keeps the
+// key in private/ and has canonical inventory lines in place, without
+// rearranging it.
 type FilesystemBackend struct {
 	baseDir  string
 	appendMu sync.Mutex // serialises AppendLine across the backend
@@ -162,10 +163,10 @@ func (b *FilesystemBackend) CAKeyFile() string {
 }
 
 // caKeyLocation resolves where the CA key is: ca_key.pem, OpenVox Server's
-// location, unless only private/ca_key.pem exists, which is where a cadir this
-// backend created before it moved keeps it. The key is read and written where it
-// is found rather than moved, so neither kind of cadir is rearranged by starting
-// on it, and a fresh one gets OpenVox Server's layout.
+// location, unless only private/ca_key.pem exists, which is where a cadir
+// written by a build of main before v1.0.0-alpha1 keeps it. The key is read and
+// written where it is found rather than moved, so neither kind of cadir is
+// rearranged by starting on it, and a fresh one gets OpenVox Server's layout.
 //
 // SECURITY: it decides from the files' existence alone and never reads either.
 // Exists, ModTime, Path and CAKeyFile resolve through it, and those are reached
