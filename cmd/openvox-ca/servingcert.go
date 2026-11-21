@@ -685,8 +685,9 @@ func provisionServingCert(ctx context.Context, myCA *ca.CA, s *servingCert) erro
 
 	// Bounded, and bounded around one entry rather than the configured set.
 	// This runs before the listener binds, inside the window a Kubernetes
-	// startupProbe and systemd's TimeoutStartSec are both measuring, and both
-	// were derived for CA.Init alone.
+	// startupProbe and systemd's TimeoutStartSec are both measuring. The
+	// probe's default was derived for CA.Init alone; the unit's figure counts
+	// this pass (see packaging/systemd/openvox-ca.service).
 	//
 	// The number of certificates a deployment configures no longer enters that
 	// window. It used to: reconciling the whole set charged startup one budget

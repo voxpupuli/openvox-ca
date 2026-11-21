@@ -586,7 +586,8 @@ etcd_tls_key_file:  /etc/openvox-ca/etcd-client-key.pem
   backfilled automatically on the next server start. Note the first start
   after a migration therefore performs a per-certificate projection backfill
   before serving, after the conversion where there is one; on a large fleet
-  expect it to take a while (progress is logged).
+  expect it to take a while (progress is logged), and see [how long startup
+  may wait](#how-long-startup-may-wait).
 - **Bulk inventory rewrites are batched.** Imports and prunes larger than one
   etcd transaction are split into multiple transactions; batch sizes stay
   well under etcd's default `--max-txn-ops` (128), so no cluster tuning is
@@ -750,7 +751,8 @@ redis_tls_key_file:  /etc/openvox-ca/redis-client-key.pem
   backfilled automatically on the next server start. Note the first start
   after a migration therefore performs a per-certificate projection backfill
   before serving, after the conversion where there is one; on a large fleet
-  expect it to take a while (progress is logged).
+  expect it to take a while (progress is logged), and see [how long startup
+  may wait](#how-long-startup-may-wait).
 - **Bulk inventory rewrites are bounded.** Redis executes a Lua script
   atomically, blocking every other client for its duration, so an inventory
   conversion is split into scripts of 512 records and a single
@@ -1101,6 +1103,56 @@ one column:
 ```sql
 ALTER TABLE puppet_ca_inventory ADD COLUMN fingerprints TEXT;
 ```
+
+### How long startup may wait
+
+`sql_migration_timeout_sec` (600 seconds by default) bounds a whole schema
+migration run, including any wait for another replica that holds the
+migration lock. It is a ceiling on a run that has stuck, not an expected
+wait: a start whose schema is already current spends milliseconds of it.
+When it expires, the CA stops with an error naming the migration and this
+setting.
+
+That error is only useful if it arrives before whatever supervises the start
+gives up, so the budgets are ordered, innermost first:
+
+| Ceiling | Default | Bounds |
+| --- | --- | --- |
+| `sql_migration_timeout_sec` | 600s | one migration run, its lock wait included |
+| the frontend's wait for the signer | 660s | the signer's whole initialisation: `sql_migration_timeout_sec` plus 60s, and never less than 180s |
+| `TimeoutStartSec` in the [shipped systemd unit](systemd.md) | 900s | the whole start, up to the listener accepting |
+
+The rows are not added up: each binds only when the step it bounds has
+stopped, so each needs to outlast only the row above it. If you raise
+`sql_migration_timeout_sec`, the frontend's wait rises with it, and you need
+to raise `TimeoutStartSec` by the same amount in a drop-in. Otherwise systemd
+kills the CA before either can report.
+
+Lowering it shortens the frontend's wait as well, but not below 180 seconds.
+A healthy replica on a cold start against a shared store can wait out two of
+another replica's locks, a minute each, before it generates the CA key, and
+the floor keeps a low migration budget from cutting that start off. The
+filesystem backend refuses the setting, as it refuses every `sql_` key; it
+runs no migration and no backfill, and its wait stays at 660 seconds.
+
+The Helm chart's `startupProbe` allows 60 seconds by default, much less than
+any of these. That window has to cover a migration too, so raise its
+`failureThreshold` past `sql_migration_timeout_sec` for the first start of a
+release that adds a migration on a large inventory. A migration cut off
+part-way is retried from the start on the next one.
+
+One step inside the signer's initialisation has no ceiling of its own: the
+index backfill on the first start after [migrating between
+backends](#migrating-between-backends), or after adding a digest to
+[`status_fingerprint_algorithms`](configuration.md#status-fingerprints), which
+reads and writes every stored certificate. It runs on every backend with a
+certificate index, SQL, [etcd](#etcd-backend) and [Redis](#redis--valkey-backend)
+(the filesystem backend has none), and has to finish inside the frontend's
+wait. On a fleet large enough that it might not, raise
+`sql_migration_timeout_sec` (and `TimeoutStartSec`) for that start. Despite its
+name the setting is accepted on etcd and Redis for this reason: there it bounds
+no migration, and only sizes the frontend's wait. The rows the backfill has
+written are kept, so a backfill that is cut off continues on the next start.
 
 ### Keeping the database password private
 

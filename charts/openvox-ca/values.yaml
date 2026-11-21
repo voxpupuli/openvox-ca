@@ -591,9 +591,22 @@ readinessProbe:
 # Raise failureThreshold yourself if you run several replicas against a fresh
 # shared store, where both locks can actually be contended. The steady-state
 # start takes neither. For comparison, packaging/systemd/openvox-ca.service
-# gives Init 300s through TimeoutStartSec, and cmd/openvox-ca/launcher_test.go
-# holds that to 3 x LockTimeout — raised from two when serving_cert added the
-# third term below; the chart is deliberately not held to the same floor.
+# gives the start 900s through TimeoutStartSec, and cmd/openvox-ca/launcher_test.go
+# holds that above 3 x LockTimeout — raised from two when serving_cert added the
+# third term below — and above the migration ceiling described next; the chart
+# is deliberately not held to either.
+#
+# A SQL backend adds a ceiling of its own: the schema migration run, its lock
+# wait included, is bounded at config.sql_migration_timeout_sec (600s by
+# default), and the frontend waits up to that plus 60s, and never less than
+# 180s, for the signer to finish initialising. A healthy start spends milliseconds of it: the schema is
+# already current. But a probe window shorter than that ceiling means a stuck
+# migration is killed by the kubelet before it can report what stuck, and a
+# migration that legitimately runs longer than the window -- the first start
+# of a release that adds one, on a large inventory -- is cut off and restarted
+# for as long as the pod keeps failing. Raise failureThreshold past
+# config.sql_migration_timeout_sec for the first start of an upgrade on a large
+# fleet, or whenever you need to see a stuck migration's own error.
 #
 # config.serving_cert adds a third term the ruling above did not weigh,
 # because it did not exist then: the CA issues its own serving certificate
@@ -605,10 +618,11 @@ readinessProbe:
 # start spends none of it -- the stores are read and found current in
 # milliseconds -- but a slow or unreachable Secret store can spend the lot.
 # Raise failureThreshold when self-provisioning against a remote key provider
-# or a Secret store. The 60s this default allows does not cover the worst case
-# packaging/systemd/openvox-ca.service quantifies at 210s of bounded waits
-# plus key generation, and the CA's default RSA-4096 key is generated inside
-# that window on a first start.
+# or a Secret store. The 60s this default allows does not cover a contended
+# cold start: three LockTimeout waits (hmac-key and bootstrap in Init, then
+# this pass) and the 30s store read, 210s between them, plus key generation,
+# and the CA's default RSA-4096 key is generated inside that window on a first
+# start. Each of those is a ceiling a healthy start does not reach.
 #
 # Init also repairs the certificate index, and on a large fleet two starts make
 # that slow: the first after a backend migration, and the first after adding a

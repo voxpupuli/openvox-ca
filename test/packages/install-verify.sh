@@ -45,8 +45,9 @@ FORMAT=$1
 DIST=$2
 ENGINE=${CONTAINER_ENGINE:-docker}
 
-# The boot wait bounds each probe with timeout(1), which older macOS releases
-# lack; Homebrew's coreutils installs it, also as gtimeout.
+# The boot wait and every command run in a container are bounded with
+# timeout(1), which older macOS releases lack; Homebrew's coreutils installs
+# it, also as gtimeout.
 if ! TIMEOUT=$(command -v timeout || command -v gtimeout); then
     printf 'Bail out! no timeout command on PATH: install coreutils (Homebrew also names it gtimeout)\n'
     exit 1
@@ -64,8 +65,8 @@ pass() {
 
 # fail DESCRIPTION [DIAGNOSTIC] reports a failure, its diagnostic (already
 # TAP-commented), and on a scenario's first failure the units' journal. At the
-# first failure rather than at the scenario's end: a unit that times out
-# starting blocks each later step for its TimeoutStartSec, and a few of those
+# first failure rather than at the scenario's end: a unit that wedges starting
+# blocks each later step until in_c's bound gives up on it, and a few of those
 # outlast the CI job, which would then be killed before the end ever printed it.
 fail() {
     T=$((T + 1))
@@ -190,8 +191,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# in_c SCRIPT runs SCRIPT with sh inside the current container, for at most
+# IN_C_TIMEOUT seconds. The bound is the harness's own, not the units': a
+# blocking systemctl start waits for the unit's TimeoutStartSec, which is 900s
+# and would let one wedged start spend most of the CI job's twenty minutes
+# before fail() could print the journal. 300s is ample for every step here,
+# key generation and a package's own start included, and is the figure the
+# harness was first built around. Exit 124 says the bound fired.
+#
+# No -i: nothing here feeds the container stdin, and under timeout(1), which
+# puts its child in a background process group, an attached terminal stdin
+# would stop docker exec on SIGTTIN in a run from a shell.
+IN_C_TIMEOUT=300
 in_c() {
-    "$ENGINE" exec -i "$C" sh -c "$1"
+    "$TIMEOUT" "$IN_C_TIMEOUT" "$ENGINE" exec "$C" sh -c "$1"
 }
 
 # start SCENARIO HOSTNAME boots a fresh container and makes it current.

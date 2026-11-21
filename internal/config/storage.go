@@ -81,7 +81,12 @@ type StorageConfig struct {
 	// SQLMigrationTimeoutSec bounds a whole schema-migration run, not one
 	// statement. Zero uses ten minutes. Raise it when an index build over a
 	// large inventory needs longer: a run cut short is what leaves a schema
-	// half-migrated.
+	// half-migrated. It also sizes the frontend's wait for the signer (this
+	// plus LockTimeout, and never less than three LockTimeouts), on every
+	// backend that accepts it -- all but the filesystem one, which refuses every
+	// sql_ key -- because a migration runs inside that wait; on etcd and Redis
+	// that is its only effect, and the way to give a long certificate-index
+	// backfill more time.
 	SQLMigrationTimeoutSec int    `yaml:"sql_migration_timeout_sec"`
 	SQLMaxOpenConns        int    `yaml:"sql_max_open_conns"`
 	SQLMaxIdleConns        int    `yaml:"sql_max_idle_conns"`

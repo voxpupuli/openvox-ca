@@ -56,6 +56,13 @@ domain-separation labels per direction. A process that somehow obtained a leaked
 socketpair descriptor can impersonate neither side, and a child whose fd 4 is not
 the launcher's pipe refuses to start rather than proceeding unauthenticated.
 
+The signer sends its first handshake message only once it has initialised the
+CA, so the frontend's wait for it covers the signer's whole start. That wait is
+bounded at `sql_migration_timeout_sec` plus 60 seconds, 11 minutes by default
+and never less than 3; when it expires the frontend logs `Gave up waiting for
+the signer process` and exits, and the signer's own log lines say where it
+stopped. See [how long startup may wait](storage-backends.md#how-long-startup-may-wait).
+
 **The signer makes only the kinds of signature the CA makes.** A request must
 name SHA-256, SHA-384 or SHA-512 and carry a digest of that hash's length;
 anything else is refused, and the signer logs a warning,

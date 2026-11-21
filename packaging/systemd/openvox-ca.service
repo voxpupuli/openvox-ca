@@ -54,51 +54,52 @@ WatchdogSec=90s
 Restart=on-failure
 RestartSec=5s
 
-# Bootstrapping a CA generates a key pair, which can take a while on a slow or
-# entropy-starved machine; the status text says what it is waiting on. Before
-# that, Init may spend two internal/ca LockTimeout budgets in sequence waiting
-# on another replica — hmac-key on a cold start, then bootstrap — so this must
-# clear those with room for the key generation on top. A CA using
-# serving_cert spends up to one further LockTimeout issuing its own serving
-# certificate before the listener binds, so the lock-wait term is three rather
-# than two -- plus the store read that follows the pass, which is outside its
-# budget by design.
+# A ceiling on a start that has stopped making progress, not an expected wait:
+# a healthy start reaches the listener in milliseconds, or as soon as the CA
+# key is generated on a first one. What this figure has to get right is its
+# place in an ordering. Every step of startup carries its own ceiling, and that
+# step's error names what stuck -- but it is only ever seen if the step's
+# ceiling expires before this one does, because systemd's kill says nothing
+# about why. Innermost first:
 #
-# Worst case, quantified rather than left open, because an operator installing
-# this file is entitled to know whether it covers them:
+#   one lock wait in Init, or serving_cert's pass      60s   (LockTimeout)
+#   a schema migration run, its lock wait included    600s   (sql_migration_timeout_sec)
+#   the frontend's wait for the signer to initialise  660s   (the migration's, plus 60s)
+#   TimeoutStartSec                                   900s
 #
-#   Init, hmac-key on a cold start        60s   (LockTimeout)
-#   Init, bootstrap                       60s   (LockTimeout)
-#   serving_cert's pre-bind reconcile     60s   (LockTimeout)
-#   the store read that decides startup   30s   (certstore's Secret API
-#                                               timeout; a file store is
-#                                               effectively instant)
-#   ----------------------------------------
-#   bounded total                        210s
+# Each is a ceiling, and the rows are not a sum: each binds only when its own
+# step has stopped, so each has to outlast only what it contains. The
+# frontend's wait contains the signer's whole Init, so a stuck migration fails
+# in the signer at 600s and names itself, and a signer stuck anywhere else is
+# reported by the frontend at 660s. After the handshake the frontend's own Init
+# can wait up to the migration's ceiling for the migration lock, if a peer
+# replica holds it, and serving_cert's pass and the store read after it (up to
+# 30s for a Secret store) come last; each is shorter than the frontend's wait.
+# The 240s above that wait are headroom for a healthy step that ran slowly
+# before the one that stuck -- generating the CA key, say.
 #
-# leaving 90s of the 300s for key generation, which is the one term with no
-# bound of its own. That headroom was 180s before serving_cert existed, so the
-# feature halves it.
+# Raising sql_migration_timeout_sec raises the frontend's wait with it, so
+# raise this by the same amount in a drop-in, or this kill pre-empts both.
+# That is the inversion this figure used to ship with: at 300s it sat inside
+# the migration's 600s, so a stuck migration was killed without a word, and a
+# migration legitimately longer than five minutes was cut off part-way and
+# restarted from the beginning five seconds later, every time.
 #
-# Note which key that is. ca_key_algo defaults to RSA and ca_key_size to 4096,
-# so generating a 4096-bit key inside that 90s is the DEFAULT path, not an
-# exotic one -- on an entropy-starved host it is the term most likely to trip
-# TimeoutStartSec, and the first figure to raise. An earlier revision of this
-# comment called RSA-4096 the edge case and named RSA-2048 as a default; both
-# were wrong, and the mistake made the normal configuration sound like the
-# safe one.
+# Contention is the other case this has to clear, and it is legitimate
+# waiting rather than a stall. On a cold start against a shared backend a
+# replica can wait out a peer's hmac-key lock, then its bootstrap lock, then
+# with serving_cert one more for its own serving certificate -- three
+# LockTimeouts -- and that is exactly when a CA key has to be generated too.
+# ca_key_algo defaults to RSA and ca_key_size to 4096, so a 4096-bit key is
+# the DEFAULT path, not an exotic one, and on an entropy-starved host it is
+# the step with no ceiling of its own.
 #
-# Every lock term assumes an actual contending replica; a single-instance start
-# spends none of them and reaches the listener in milliseconds.
-#
-# cmd/openvox-ca/launcher_test.go asserts that floor. charts/openvox-ca does
-# NOT give Init the same budget: its startupProbe allows failureThreshold 30 x
-# periodSeconds 2 = 60s, which does not cover even the 210s of bounded terms
-# above. That is deliberate and documented in the chart's own values.yaml,
-# which tells an operator to raise failureThreshold when self-provisioning
-# against a remote key provider or a slow store -- but it is 60s, not 300s,
-# and an earlier revision of this line said otherwise.
-TimeoutStartSec=300s
+# cmd/openvox-ca/launcher_test.go asserts both orderings. charts/openvox-ca
+# does NOT give the start the same budget: its startupProbe allows
+# failureThreshold 30 x periodSeconds 2 = 60s, no longer than a single lock
+# wait. That is deliberate and documented in the chart's own values.yaml,
+# which tells an operator when to raise failureThreshold.
+TimeoutStartSec=900s
 
 # Values provisioning recorded on EL: the certificate name and the admin
 # allow-list (OPENVOX_CA_PUPPET_SERVER), which outranks puppet_server in
