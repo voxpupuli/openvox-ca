@@ -844,7 +844,14 @@ func (s *Server) handleReissueCRL(w http.ResponseWriter, r *http.Request) {
 
 	crlPEM, err := s.CA.Storage.GetCRL(r.Context())
 	if err != nil {
-		http.Error(w, "CRL not found", http.StatusNotFound)
+		// The re-sign has already been written, so neither a 404 nor a 500
+		// would be true of it, whatever the read-back error: even a CRL gone
+		// by now was found and re-signed a moment ago. Only the read-back
+		// failed, so 503, with the cause in the log because it can name
+		// storage paths.
+		slog.Warn("PUT certificate_revocation_list/ca: the CRL was re-signed but could not be read back", "error", err)
+		http.Error(w, "the CRL was re-signed but could not be read back; see the server log",
+			http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
