@@ -2458,6 +2458,39 @@ csr_pem=$(cat)
 [[ "$subject" == web-* ]] && exit 0 || exit 1
 ```
 
+**What the executable is given.** Its only argument is the certname, and the
+CSR arrives in PEM form on standard input. Its environment is not the CA's: it
+gets a fixed `PATH` (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`),
+the CA's `HOME`, and `LANG` when the CA has one, and nothing else, so a script
+that needs settings or secrets of its own reads them from a file. That stops the
+CA's credentials being passed on by accident, to a tool that logs or forwards its
+environment. It is not a sandbox: the executable runs as the CA's own user, so
+it can read whatever the CA can, its configuration, its key files and the
+environment of the CA's own processes included. Trust it as you trust the CA
+key. It runs in the CA's working directory, and whatever it writes to standard
+output or standard error is discarded. It has 30 seconds: one still running
+after that is killed, the CSR stays pending for an operator, the agent gets a
+`500` that ends its run, and the CA logs the timeout at `ERROR`. Only the
+executable is killed, not processes it started, so a
+script should not leave children running
+([#660](https://github.com/voxpupuli/openvox-ca/issues/660)). From start to
+exit, whatever it reads, the CA holds its CA-wide lock, and everything that
+reads the CA's in-memory state waits for it
+([#664](https://github.com/voxpupuli/openvox-ca/issues/664)). That includes
+every request authenticated with a certificate this CA issued, every readiness
+probe and metrics scrape, `certificate_statuses`, and, with
+[`enable_ocsp`](#serving-ocsp) set, every OCSP request. Any CSR submission
+starts a run, and submitting one needs no authentication; the per-address
+[`csr_rate_limit`](#rate-limit) bounds how often a client can start one, not
+how long it holds the lock. So keep the script
+fast, and give anything whose duration an outside party can influence, such as a
+lookup keyed on the certname or a call to an external service, a short timeout
+of its own. Read standard input to the end first, as the example's
+`csr_pem=$(cat)` does: while a process the script started still holds standard
+input unread, the CA can wait on it with no limit, past the 30 seconds and with
+the CA-wide lock held, whether the script itself timed out or exited normally
+([#660](https://github.com/voxpupuli/openvox-ca/issues/660)).
+
 ### The autosign executable's path
 
 Whoever can replace the autosign executable decides which certificates the CA

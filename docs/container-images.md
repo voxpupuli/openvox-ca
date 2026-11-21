@@ -32,6 +32,19 @@ $ docker pull ghcr.io/voxpupuli/openvox-ca:latest-alpine   # Alpine
 `latest` names the most recent final release, so it first appears with 1.0.0.
 Until then, pull `edge`. The pre-releases so far predate the configuration
 the examples below rely on, so their own documentation applies to them.
+`edge` moves with every merge to `main`, so pin it by digest
+(`ghcr.io/voxpupuli/openvox-ca@sha256:…`, which `docker image inspect --format
+'{{index .RepoDigests 0}}'` prints after a pull) and read the commits on `main`
+before moving the pin: each image's `org.opencontainers.image.revision` label
+names the commit it was built from. Verify the digest before you pin it.
+`edge` is built from `main`, not a tag, so its certificate identity ends
+`@refs/heads/main` rather than matching the release pattern below:
+
+```console
+$ cosign verify ghcr.io/voxpupuli/openvox-ca@sha256:… \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --certificate-identity https://github.com/voxpupuli/openvox-ca/.github/workflows/container-images.yml@refs/heads/main
+```
 
 ## Available tags
 
@@ -43,7 +56,8 @@ the examples below rely on, so their own documentation applies to them.
 | `main` / `main-distroless` / `main-alpine` | Same as `edge`; the head of `main` |
 
 Pin to a specific semver tag (e.g. `1.2.3`) for reproducible deployments;
-`edge` tracks unreleased changes and can break at any time.
+`edge` tracks unreleased changes and can break at any time, so before 1.0.0 pin
+it by digest instead.
 
 ## Verifying an image
 

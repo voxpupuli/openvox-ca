@@ -97,7 +97,22 @@ every release:
 $ docker pull ghcr.io/voxpupuli/openvox-ca:latest
 ```
 
-`latest` first appears with the 1.0.0 release; until then, pull `edge`.
+`latest` first appears with the 1.0.0 release; until then, pull `edge`. `edge`
+moves with every merge to `main`, and before 1.0.0 a merge can break things, so
+pin the digest you tested rather than the tag, and read what changed on `main`
+before you move it (each image's `org.opencontainers.image.revision` label names
+the commit it was built from):
+
+```console
+$ docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/voxpupuli/openvox-ca:edge
+ghcr.io/voxpupuli/openvox-ca@sha256:…
+```
+
+Read the digest straight after the pull, since the local tag moves with every
+later one, and verify it before you pin it. `edge` is signed from `main`, so its
+identity ends `@refs/heads/main` and the release pattern under [verifying what
+you downloaded](#verifying-what-you-downloaded) rejects it; [container
+images](docs/container-images.md#pulling) has the command for `edge`.
 
 Every tag comes in two variants: distroless (the unsuffixed tags, also
 published with a `-distroless` suffix) and Alpine (`-alpine`). See [container
@@ -308,10 +323,19 @@ Full build instructions (including the FIPS build) are in
 
 ## Quick start
 
+These commands keep everything they write, private keys included, under `tmp/`
+in the current directory, which the repository's `.gitignore` already excludes,
+so they run as an ordinary user. On a host with openvox-ca's package installed they
+do not: the server reads `/etc/openvox-ca/config.yaml` by default, which only
+root and the `puppet` group can read. A real deployment's CA directory is
+usually OpenVox Server's, `/etc/puppetlabs/puppet/ssl/ca`, which an ordinary
+user cannot write: see [running under systemd](docs/systemd.md) and the
+[migration guide](docs/migrating-from-puppet-server.md).
+
 ### Local demo: plain HTTP on loopback, auto-bootstrap CA
 
 ```bash
-./bin/openvox-ca --cadir /etc/puppetlabs/puppet/ssl/ca --host 127.0.0.1 --hostname puppet.example.com
+./bin/openvox-ca --cadir "$PWD/tmp/ca-demo" --host 127.0.0.1 --hostname puppet.example.com
 ```
 
 On first run the server bootstraps a new CA under `--cadir` and begins serving
@@ -328,9 +352,9 @@ saying so at every start.
 
 ```bash
 ./bin/openvox-ca \
-  --cadir /etc/puppetlabs/puppet/ssl/ca \
-  --tls-cert /etc/puppetlabs/puppet/ssl/ca/signed/puppet.example.com.pem \
-  --tls-key  /etc/puppetlabs/puppet/ssl/ca/private/puppet.example.com_key.pem \
+  --cadir "$PWD/tmp/ca-demo" \
+  --tls-cert "$PWD/tmp/ca-demo/signed/puppet.example.com.pem" \
+  --tls-key  "$PWD/tmp/ca-demo/private/puppet.example.com_key.pem" \
   --puppet-server puppet.example.com
 ```
 
@@ -344,7 +368,7 @@ certificate:
 ```bash
 # Stop any CA already listening on 8140 first, or this one cannot bind.
 ./bin/openvox-ca --tls-cert= --tls-key= --insecure-allow-plain-http-generate \
-  --cadir /etc/puppetlabs/puppet/ssl/ca --host 127.0.0.1 --hostname puppet.example.com &
+  --cadir "$PWD/tmp/ca-demo" --host 127.0.0.1 --hostname puppet.example.com &
 PCA_PID=$!
 
 # Wait for it to serve: a cold cadir generates an RSA-4096 key first. Stop
@@ -363,7 +387,7 @@ wait_for_ca && ./bin/openvox-ca-ctl generate \
   --server-url http://127.0.0.1:8140 \
   --certname   puppet.example.com \
   --dns        puppet.example.com \
-  --out-dir    /etc/puppetlabs/puppet/ssl/ca/private
+  --out-dir    "$PWD/tmp/ca-demo/private"
 
 kill $PCA_PID; wait $PCA_PID 2>/dev/null
 ```
@@ -378,9 +402,9 @@ than advisable, and the `kill` above is part of the procedure, not tidying.
 without TLS; keep it to this one start.
 
 `--server-url` is needed because it defaults to HTTPS while that server speaks
-plain HTTP, and the empty `--tls-cert=`/`--tls-key=` keep the start from
-picking up a `tls_cert` in `/etc/openvox-ca/config.yaml` — which would name the
-file this step is about to create. `--out-dir` points at the directory the CA
+plain HTTP, and the empty `--tls-cert=`/`--tls-key=` keep this start in plain
+HTTP even if a `tls_cert` is configured elsewhere, such as in
+`/etc/openvox-ca/config.yaml`. `--out-dir` points at the directory the CA
 writes the key to anyway, so no second copy of it is left lying around; omit it
 and one lands in the current directory. The certificate is printed on stdout,
 and with the default filesystem backend the CA also writes both halves under
@@ -410,8 +434,8 @@ Against the local demo above:
 
 ```bash
 openssl req -new -newkey rsa:2048 -nodes -subj /CN=agent.example.com \
-  -keyout agent.example.com_key.pem -out agent.example.com_csr.pem
-curl -fsS -X PUT -H 'Content-Type: text/plain' --data-binary @agent.example.com_csr.pem \
+  -keyout tmp/agent.example.com_key.pem -out tmp/agent.example.com_csr.pem
+curl -fsS -X PUT -H 'Content-Type: text/plain' --data-binary @tmp/agent.example.com_csr.pem \
   http://127.0.0.1:8140/puppet-ca/v1/certificate_request/agent.example.com
 
 ./bin/openvox-ca-ctl list --server-url http://127.0.0.1:8140
@@ -431,14 +455,16 @@ above is one, because that server names it in `--puppet-server`:
 ```bash
 ./bin/openvox-ca-ctl list \
   --server-url  https://puppet.example.com:8140 \
-  --ca-cert     /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem \
-  --client-cert /etc/puppetlabs/puppet/ssl/ca/signed/puppet.example.com.pem \
-  --client-key  /etc/puppetlabs/puppet/ssl/ca/private/puppet.example.com_key.pem
+  --ca-cert     "$PWD/tmp/ca-demo/ca_crt.pem" \
+  --client-cert "$PWD/tmp/ca-demo/signed/puppet.example.com.pem" \
+  --client-key  "$PWD/tmp/ca-demo/private/puppet.example.com_key.pem"
 ```
 
 `sign` takes the same four flags. Submitting a request needs no client
-certificate: add `--cacert /etc/puppetlabs/puppet/ssl/ca/ca_crt.pem` to the
-`curl` command and change its URL. To stop repeating the flags, set them in
+certificate: add `--cacert "$PWD/tmp/ca-demo/ca_crt.pem"` to the
+`curl` command and change its URL. To stop repeating the flags, export
+`OPENVOX_CA_CTL_SERVER_URL`, `OPENVOX_CA_CTL_CA_CERT`, `OPENVOX_CA_CTL_CLIENT_CERT`
+and `OPENVOX_CA_CTL_CLIENT_KEY`; a deployment sets them in
 `/etc/openvox-ca/ctl.yaml` (see [configuration](docs/operator-cli.md#configuration)).
 The [operator CLI reference](docs/operator-cli.md) covers the other subcommands.
 
