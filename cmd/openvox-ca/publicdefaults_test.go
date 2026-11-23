@@ -133,10 +133,16 @@ var _ = Describe("the covered defaults, as literals", func() {
 
 	DescribeTable("intervals bounding revocation or tamper detection, which may only shorten",
 		func(what string, actual func() time.Duration, want time.Duration) {
-			Expect(actual()).To(BeNumerically("<=", want), what+breaking+" when lengthened")
-			// Exact as well, so that a shortening is a deliberate edit here
-			// too rather than a silent change to what the docs state.
-			Expect(actual()).To(Equal(want), what+" no longer matches the default the docs state")
+			// Exact, so that a shortening is a deliberate edit here too rather
+			// than a silent change to what the docs state; only a lengthening
+			// is breaking, and the message says which this is.
+			got := actual()
+			msg := what + " no longer matches the default the docs state: shortening it is not breaking, " +
+				"but change the docs and this literal with it"
+			if got > want {
+				msg = what + breaking + " when lengthened"
+			}
+			Expect(got).To(Equal(want), msg)
 		},
 		Entry("crl_sync_interval_sec", "crl_sync_interval_sec",
 			func() time.Duration { return cfg.crlSyncInterval() }, time.Minute),
