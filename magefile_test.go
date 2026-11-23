@@ -142,20 +142,12 @@ var _ = Describe("repoSlugFromURL", func() {
 })
 
 // Test.Mixin refuses to run while any mixin/tests*.yaml has no rendering, so a
-// promtool suite cannot sit outside the run with CI green. Both halves of that:
-// the check reports an orphan, and the shipped table covers the shipped files.
+// promtool suite cannot sit outside the run with CI green. The shipped files
+// are checked by that refusal itself, in CI's mixin job; this pins the helper.
 var _ = Describe("unwiredMixinSuites", func() {
 	It("reports a tests file no rendering runs", func() {
 		suites := []string{"mixin/tests.yaml", "mixin/tests-floor.yaml", "mixin/tests-orphan.yaml"}
 		Expect(unwiredMixinSuites(suites, mixinRenderings)).To(Equal([]string{"mixin/tests-orphan.yaml"}))
-	})
-
-	It("finds every shipped mixin tests file wired to a rendering", func() {
-		suites, err := filepath.Glob(filepath.Join("mixin", "tests*.yaml"))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(suites).To(ContainElement(filepath.Join("mixin", "tests-floor.yaml")),
-			"precondition: the glob sees the second suite")
-		Expect(unwiredMixinSuites(suites, mixinRenderings)).To(BeEmpty())
 	})
 })
 
