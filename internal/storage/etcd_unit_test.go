@@ -295,14 +295,6 @@ var _ = Describe("ParseInventoryRecords", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rejectDuplicateSerials(recs)).To(MatchError(ErrDuplicateSerial))
 	})
-
-	It("lists each duplicate serial once via duplicateSerials", func() {
-		recs, err := parseInventoryRecords([]byte(
-			"0001 nb na /a\n0002 nb na /b\n0001 nb na /c\n0001 nb na /d\n"))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(duplicateSerials(recs)).To(Equal([]string{"0001"}))
-		Expect(duplicateSerials(recs[:2])).To(BeEmpty())
-	})
 })
 
 // EtcdInventoryDecodeCorruptKeyspace pins the failure mode of the two decode
@@ -343,39 +335,5 @@ var _ = Describe("EtcdPruneBacklogGrowing", func() {
 		Expect(pruneBacklogGrowing(0, capacity)).To(BeFalse())
 		Expect(pruneBacklogGrowing(capacity, capacity)).To(BeFalse(), "a deferral one call can clear stays informational")
 		Expect(pruneBacklogGrowing(capacity+1, capacity)).To(BeTrue(), "a deferral beyond one call's capacity warns")
-	})
-})
-
-// EtcdLegacyPrefixCheck pins the discriminator the decomposition uses to tell
-// a resumable interrupted import (entries are the import-written prefix of
-// the blob) from an unsupported mixed-version state.
-var _ = Describe("EtcdLegacyPrefixCheck", func() {
-	recsOf := func(text string) []CertRecord {
-		recs, err := parseInventoryRecords([]byte(text))
-		Expect(err).NotTo(HaveOccurred())
-		return recs
-	}
-	entryOf := func(seq uint64, line string) indexedRecord {
-		e, ok := parseInventoryEntry(line)
-		Expect(ok).To(BeTrue())
-		return indexedRecord{seq: seq, rec: CertRecord{InventoryEntry: e, State: CertStateSigned}}
-	}
-
-	It("accepts an import-written prefix and rejects everything else", func() {
-		recs := recsOf("0001 nb na /a\n0002 nb na /b\n0003 nb na /c\n")
-		prefix := []indexedRecord{entryOf(1, "0001 nb na /a"), entryOf(2, "0002 nb na /b")}
-		Expect(recordsArePrefixOf(prefix, recs)).To(BeTrue())
-		Expect(recordsArePrefixOf(nil, recs)).To(BeTrue(), "no entries at all is the trivial prefix")
-
-		// Wrong contents, wrong sequence numbering, or more entries than the
-		// blob has lines all mean the entries did not come from importing
-		// this blob.
-		Expect(recordsArePrefixOf([]indexedRecord{entryOf(1, "0009 nb na /x")}, recs)).To(BeFalse())
-		Expect(recordsArePrefixOf([]indexedRecord{entryOf(5, "0001 nb na /a")}, recs)).To(BeFalse())
-		long := []indexedRecord{
-			entryOf(1, "0001 nb na /a"), entryOf(2, "0002 nb na /b"),
-			entryOf(3, "0003 nb na /c"), entryOf(4, "0004 nb na /d"),
-		}
-		Expect(recordsArePrefixOf(long, recs)).To(BeFalse())
 	})
 })

@@ -110,7 +110,7 @@ var _ = Describe("SQLReservedLockKeys", func() {
 		// adding it here too — rule 7 of docs/development/locking.md. The set
 		// is "singletons that can reach a SQL backend", which is why
 		// sql-schema-migrate (this package's own) is present and
-		// etcdDecomposeLockName (which only EtcdBackend takes) is not.
+		// instanceLockName (which never reaches a SQL advisory lock) is not.
 		Expect(reservedLockOrdinals).To(Equal(map[string]int64{
 			"bootstrap":          1,
 			"crl":                2,
@@ -310,8 +310,7 @@ var _ = Describe("SQLMySQLLockName", func() {
 // is a claim that the name cannot reach a SQL backend; if that stops being
 // true, move it into reservedLockOrdinals rather than leaving it here.
 var lockNameConstantExemptions = map[string]string{
-	"etcdDecomposeLockName": "is taken only by a method on the concrete *EtcdBackend, never routed through StorageService, so it cannot reach a SQL backend",
-	"instanceLockName":      "is taken only through fileLocks.acquireInstance, never through WithLock or any Locker; SQLBackend routes it to the flock sidecar beside the database file, and the backends that do have SQL advisory locks are exactly the ones AcquireInstanceLock exempts",
+	"instanceLockName": "is taken only through fileLocks.acquireInstance, never through WithLock or any Locker; SQLBackend routes it to the flock sidecar beside the database file, and the backends that do have SQL advisory locks are exactly the ones AcquireInstanceLock exempts",
 }
 
 var _ = Describe("SQLLockNameConstantsAreRegistered", func() {
@@ -394,11 +393,11 @@ var _ = Describe("SQLLockNameConstantsAreRegistered", func() {
 		Expect(found).To(HaveKey("migrateLockName"),
 			"source walk found no migrateLockName; the parse or the identifier filter is wrong, not the code")
 		// The exemption branch needs its own control, or a walk that stopped
-		// seeing etcd_inventory.go would exercise zero exemption checks and
+		// seeing instancelock.go would exercise zero exemption checks and
 		// still report success — the same vacuity the two lines above guard
 		// for the reserved branch.
-		Expect(found).To(HaveKey("etcdDecomposeLockName"),
-			"source walk found no etcdDecomposeLockName; the exemption branch below would then never execute")
+		Expect(found).To(HaveKey("instanceLockName"),
+			"source walk found no instanceLockName; the exemption branch below would then never execute")
 
 		for ident, value := range found {
 			if reason, exempt := lockNameConstantExemptions[ident]; exempt {

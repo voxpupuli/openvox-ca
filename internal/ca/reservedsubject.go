@@ -22,10 +22,10 @@ import "errors"
 // reservedKeySubject is the one subject this CA never generates a private key
 // for. A key the server keeps for subject S is written to
 // <cadir>/private/S_key.pem whatever the storage backend, so the key for "ca"
-// would land on private/ca_key.pem. On the filesystem backend that is the CA
-// key itself in a cadir that keeps it there, and the CA key's legacy location
-// in any other, where the backend then refuses to start on two different CA
-// keys (#495). No other backend reads that file.
+// would land on private/ca_key.pem: a leaf key under the CA key's own file
+// name, which an operator or a backup script could easily take for the CA key
+// (#495). Nothing reads it as the CA key, but the reservation costs one
+// certname, and lifting it later breaks nobody where adding it back would.
 const reservedKeySubject = "ca"
 
 // ErrReservedSubject is returned by every path that generates a private key
@@ -33,8 +33,8 @@ const reservedKeySubject = "ca"
 // certificates -- when the subject is "ca". The message is fixed text naming
 // nothing but the subject the caller chose, so it is safe to return verbatim.
 //
-// Only two of them can collide, and only on the filesystem backend: POST
-// /generate, and offline generate without --key-out. The others are refused as
+// Only two of them would write that file: POST /generate, and offline generate
+// without --key-out. The others are refused as
 // well, so that "ca" means one thing on every path that generates a key, and
 // the message therefore says why the name is reserved rather than what this
 // particular request would have done.
@@ -45,8 +45,8 @@ const reservedKeySubject = "ca"
 // fit a managed certificate, which never involves a CSR.
 var ErrReservedSubject = errors.New(`the subject "ca" is reserved: this CA generates ` +
 	`no private key for it, because the server's key file for "ca" would be ` +
-	`private/ca_key.pem, where the filesystem backend may keep the CA's ` +
-	`own key. Choose another certname`)
+	`private/ca_key.pem, which is easily mistaken for the CA's own key. ` +
+	`Choose another certname`)
 
 // CheckKeySubject refuses a subject this CA must not generate a private key
 // for. It does not repeat ValidateSubject: "ca" passes that check, and a

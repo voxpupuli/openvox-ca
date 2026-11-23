@@ -124,7 +124,7 @@ The split keeps the key out of the frontend's address space, so a bug that
 discloses the frontend's memory cannot leak it. It does not stand between the
 key and code running in the frontend. Both children run as the same user, and
 the frontend opens the same store as the signer, with the same credentials, to
-serve requests. The stored key (`private/ca_key.pem` on the filesystem backend,
+serve requests. The stored key (`ca_key.pem` on the filesystem backend,
 the `ca_key` blob on the others) is readable to it, and so is anything else that
 user can read: a passphrase file and the signer's environment.
 
@@ -212,7 +212,7 @@ behaviour".
 
 ## CA key encryption at rest
 
-By default, the CA private key is stored as unencrypted PEM at `<cadir>/ca_key.pem` (or `<cadir>/private/ca_key.pem`, if that is where an existing cadir keeps it).
+By default, the CA private key is stored as unencrypted PEM at `<cadir>/ca_key.pem`.
 Enable `--encrypt-ca-key` to encrypt the key at rest using AES-256-GCM with an Argon2id-derived key.
 
 That path is the filesystem backend's. On the other backends the key is a blob
@@ -299,8 +299,8 @@ store, so it never triggers one.
 To encrypt an existing key where it is, stop the CA and re-import its own
 certificate and key with `openvox-ca-ctl import --encrypt-ca-key`. `import`
 addresses a local directory, so this is the route on the `filesystem` backend.
-It writes the cadir's own key file (`ca_key.pem`, or `private/ca_key.pem` where
-that is where the key is) and does not read the server's configuration. Where
+It writes the cadir's own key file (`ca_key.pem`) and does not read the server's
+configuration. Where
 `ca_key_file` keeps the key somewhere else, `import` does not reach the key the
 server reads.
 
@@ -321,8 +321,6 @@ user](storage-backends.md#running-openvox-ca-ctl-as-the-service-user). The
 passphrase file has to be readable by that user too.
 
 ```bash
-# Paths for a cadir that keeps its key at <cadir>/ca_key.pem; use
-# private/ca_key.pem where that is where yours is.
 sudo -u puppet openvox-ca-ctl import --cadir /srv/openvox-ca \
   --cert-bundle /srv/openvox-ca/ca_crt.pem \
   --private-key /srv/openvox-ca/ca_key.pem \

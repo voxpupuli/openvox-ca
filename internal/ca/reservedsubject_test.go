@@ -31,9 +31,8 @@ import (
 )
 
 // The subject "ca" would have its generated key written to private/ca_key.pem,
-// which is the CA key itself in a cadir that keeps it there, and the CA key's
-// legacy location in any other (#495). Every path that generates a key refuses
-// it; submitting a CSR for it does not.
+// easily mistaken for the CA key (#495). Every path that generates a key
+// refuses it; submitting a CSR for it does not.
 var _ = Describe("Generating a key for the subject \"ca\"", func() {
 	var (
 		ctx   = context.Background()
@@ -57,42 +56,19 @@ var _ = Describe("Generating a key for the subject \"ca\"", func() {
 		return myCA
 	}
 
-	Context("when the cadir keeps the CA key in private/", func() {
-		var keyPath string
-
-		BeforeEach(func() {
-			keyPath = filepath.Join(dir, "private", "ca_key.pem")
-			Expect(os.WriteFile(keyPath, cachedKeyPEM, 0o600)).To(Succeed())
-		})
-
-		It("is refused, and leaves the CA key as it was", func() {
-			_, err := initCA().Generate(ctx, "ca", nil)
-
-			Expect(err).To(MatchError(ca.ErrReservedSubject))
-			Expect(os.ReadFile(keyPath)).To(Equal(cachedKeyPEM))
-		})
-	})
-
-	Context("when the cadir keeps the CA key where OpenVox Server does", func() {
-		BeforeEach(func() {
-			Expect(os.WriteFile(filepath.Join(dir, "ca_key.pem"), cachedKeyPEM, 0o600)).To(Succeed())
-		})
-
-		It("is refused, and writes no second CA key, so the CA still starts", func() {
-			_, err := initCA().Generate(ctx, "ca", nil)
-
-			Expect(err).To(MatchError(ca.ErrReservedSubject))
-			Expect(filepath.Join(dir, "private", "ca_key.pem")).NotTo(BeAnExistingFile())
-			Expect(ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test").Init(ctx)).To(Succeed())
-		})
-	})
-
 	Context("on an initialised CA", func() {
 		var myCA *ca.CA
 
 		BeforeEach(func() {
 			Expect(os.WriteFile(filepath.Join(dir, "ca_key.pem"), cachedKeyPEM, 0o600)).To(Succeed())
 			myCA = initCA()
+		})
+
+		It("is refused, and writes no private/ca_key.pem", func() {
+			_, err := myCA.Generate(ctx, "ca", nil)
+
+			Expect(err).To(MatchError(ca.ErrReservedSubject))
+			Expect(filepath.Join(dir, "private", "ca_key.pem")).NotTo(BeAnExistingFile())
 		})
 
 		It("is refused before a key is generated or anything issued, even when the caller keeps the key", func() {

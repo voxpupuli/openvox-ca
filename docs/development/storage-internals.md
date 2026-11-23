@@ -56,14 +56,13 @@ itself, which nothing else would write again.
     └── <sha256(name)>.lock         not a logical key   0660
 ```
 
-`ca_key` is the one key whose path is resolved rather than fixed. It is
-`ca_key.pem`, where OpenVox Server keeps it, unless only `private/ca_key.pem`
-exists, in which case that file is read and written in place. The location is
-decided from the files' existence alone (`caKeyLocation` in
-`internal/storage/filesystem.go`), so `Exists` and the startup permission check
-never read the key, which the frontend process must not hold. Both present with
-different contents is `ErrCAKeyConflict` from `Get`, `Put` and `Delete`, the
-operations that handle the key itself (`checkCAKeyConflict`).
+`ca_key` is `ca_key.pem`, where OpenVox Server keeps it. `Exists` and the
+startup permission check (`CAKeyFile` in `internal/storage/filesystem.go`)
+decide from the file's existence alone and never read the key, which the
+frontend process must not hold. A `ca_key.pem` that is a symlink leading nowhere
+is `ErrCAKeyLinkBroken` from `Get`, `Put`, `Delete` and `Exists`, never "no
+key": read as absent, it would have `migrate` skip the key and `Init` take the
+no-key branches.
 
 `locks/` is the exception to the mapping above: its files are not blobs and have
 no logical key, so `Get`/`Put`/`List`/`Migrate` never touch them. They are the
@@ -95,8 +94,8 @@ Stored values carry an 8-byte big-endian `time.UnixNano` mtime prefix so
 `If-Modified-Since` without a second round-trip.
 
 The certificate inventory is not stored at `inventory/data` — that key is only
-a presence marker (and where the legacy blob sits until the conversion empties
-it).
+a presence marker, with an empty payload. A payload there is an inventory blob
+from a build of main before v1.0.0-alpha1, which is refused at startup.
 The inventory itself is decomposed into one key per issued certificate under
 `inventory/entries/<seq>`, with `inventory/seq` acting as sequence allocator
 and mutation fence and `inventory/by-serial/<serial>` /
@@ -188,8 +187,8 @@ Stored values carry an 8-byte big-endian `time.UnixNano` mtime prefix so
 `ModTime` is answered from the same round-trip as the value.
 
 The certificate inventory is not stored at `inventory:data` — that key is only
-a presence marker (and where the legacy blob sits until the conversion empties
-it).
+a presence marker, with an empty payload. A payload there is an inventory blob
+from a build of main before v1.0.0-alpha1, which is refused at startup.
 The inventory itself is decomposed into one hash field per issued certificate
 in `inventory:entries`, with `inventory:seq` acting as sequence allocator and
 mutation fence and `inventory:by-serial` / `inventory:by-subject` as index

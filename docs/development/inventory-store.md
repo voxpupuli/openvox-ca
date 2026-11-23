@@ -214,15 +214,13 @@ latter regenerates a wrong-length key, which is itself one of the ways an
 inventory stops verifying, and a report must not perform the act it exists to
 describe.
 
-It also carries `LegacyUndecomposed`, which is set when a structured backend
-reports no rows while its blob key still holds parseable entries — an etcd or
-redis store whose inventory is still the legacy blob, because no server has
-started on it to decompose it. That
-state is reachable only from an offline caller, because decomposition runs from
-`EnsureReady` and the report is deliberately reached without it. The detection
-fails closed: a blob that cannot be read is an error rather than a "not legacy",
-since that answer is the one that would let a rebuild write an empty hash chain
-over the store's only baseline.
+The report also asks a backend that implements `UndecomposedInventoryRefuser`
+(etcd and Redis) to check its presence marker, and fails if it refuses. A store
+whose inventory is still a pre-alpha blob (see
+[the etcd decomposition](#the-etcd-decomposition)) has no rows, or only the
+partial set an interrupted v1.0.0-alpha1 conversion left, so the commands that
+report without starting the server fail as the server does rather than act on
+an inventory that is not the whole one. The check reads the marker alone.
 
 ### The certificate index (`CertIndex`)
 
@@ -336,10 +334,7 @@ Rules that keep the decomposed structure coherent:
   concurrent verifier never sees entries and head out of sync and a crash
   mid-prune leaves a valid, partially-pruned inventory rather than a spurious
   tamper alarm. *Import* batches carry no head at all — the head is left for
-  `RebuildInventoryHMAC` (migration) or dropped in the final commit (legacy
-  conversion) — which is exactly why the legacy blob stays authoritative
-  until the import's final commit and why the marker-guard/resume machinery
-  exists. Because a batched prune can partially complete, `PruneEntries`
+  `RebuildInventoryHMAC`, which a migration runs afterwards. Because a batched prune can partially complete, `PruneEntries`
   returns every entry actually removed — accumulated across batches and
   retries, even alongside an error — so `CleanupExpiredCerts` can always
   finish the CRL and blob cleanup for what was deleted (see the contract in
@@ -348,43 +343,26 @@ Rules that keep the decomposed structure coherent:
   resumed across the survivor tail), and one call removes at most a bounded
   number of batches so a huge backlog cannot blow the caller's lock budget —
   deferred matches stay present and consistent for later runs.
-- **Legacy blobs are decomposed in place.** `EnsureReady` detects a non-empty
-  legacy `inventory/data` blob, takes a distributed lock
-  (`inventory-decompose`), verifies the blob against its stored whole-blob
-  HMAC (the key is a backend blob, so it is available), imports the lines
-  into entry keys, and empties the marker only in the final commit.
-  Verification is fail-closed: a mismatch — or a stored HMAC that cannot be
-  verified because the key is missing or malformed — fails startup with
-  `ErrInventoryTampered`, exactly as any other integrity failure does;
-  the operator acknowledges a lost baseline by deleting the stored
-  `inventory/hmac` key. The verified HMAC is deleted in the same import — it
-  is not a chain head, so it cannot carry over — and the next verification
-  re-baselines from the imported entries; only the import window itself is
-  uncovered. A legacy store whose inventory is *empty* has no import to
-  drop the head as part of, so `EnsureReady` handles that case separately:
-  when zero entries exist and the stored head verifies as the whole-blob MAC
-  of an empty inventory, it is deleted so the first verification re-baselines
-  cleanly (any other head over zero entries is left for verification to
-  flag). Because the blob stays authoritative until the import's final
-  commit, an interrupted import is detected on the next start (the partial
-  entries are the import-written prefix of the blob) and redone from the
-  intact blob; entries that are *not* such a prefix mean that
-  something wrote both forms, which is refused with an explicit error rather
-  than guessed at. Duplicate serials in the legacy blob — possible, since
-  blob backends never had a cluster-wide uniqueness guarantee — are imported
-  verbatim with a warning; their by-serial keys carry an ambiguity sentinel
-  that keeps the serial reserved against reissue but makes certificate-index
-  writes for it explicit no-ops, since a one-to-one index cannot say which
-  bearer such a write is meant for. `Statuses` reports those records with
-  `CertStateUnknown` — driven by the sentinel itself, not a live duplicate
-  count — the statuses handler derives their real state from the signed CRL,
-  and the startup repair pass skips them (they can never converge). The
-  sentinel outlives partial prunes: a prune releases a by-serial key only
+- **A pre-alpha inventory blob is refused.** Builds of main from before
+  v1.0.0-alpha1 kept the inventory as one blob at `inventory/data`;
+  v1.0.0-alpha1 converted it to entry keys on first start and left the marker
+  empty, and nothing since writes a payload there. A non-empty payload fails
+  `EnsureReady`, every read of the `KeyInventory` key and the integrity report,
+  with an error that sends the operator to v1.0.0-alpha1 to convert it, rather
+  than read as an empty or partial inventory.
+- **Ambiguous serials are still read.** That conversion imported a blob's
+  duplicate serials verbatim — possible, since blob backends never had a
+  cluster-wide uniqueness guarantee — and gave their by-serial keys an
+  ambiguity sentinel. Nothing writes the sentinel any more, but a store
+  converted then keeps it: it keeps the serial reserved against reissue but
+  makes certificate-index writes for it explicit no-ops, since a one-to-one
+  index cannot say which bearer such a write is meant for. `Statuses` reports
+  those records with `CertStateUnknown` — driven by the sentinel itself, not a
+  live duplicate count — the statuses handler derives their real state from the
+  signed CRL, and the startup repair pass skips them (they can never converge).
+  The sentinel outlives partial prunes: a prune releases a by-serial key only
   when the last record bearing that serial is removed, so a lone surviving
-  bearer stays reserved and unknown until the serial is fully released. A
-  writer still appending to the blob mid-import is detected via the marker
-  guard and the import restarts, but the race only closes once nothing writes
-  the blob.
+  bearer stays reserved and unknown until the serial is fully released.
 - **Certificate-index writes stay off the chain.** `SetRevoked` /
   `ClearRevoked` / `SetProjection` rewrite a single entry key guarded on its
   own ModRevision (the mutable fields are not chain input), so index repair
@@ -450,31 +428,9 @@ Rules that keep the decomposed structure coherent:
   first) and an import is split into scripts of 512 records. Deferred prune
   matches stay present and consistent for later calls, and the server logs what
   it deferred.
-- **Legacy blobs are decomposed in place**, under the same
-  `inventory-decompose` lock etcd takes, with the same fail-closed rules:
-  `EnsureReady` verifies the legacy blob against its stored
-  whole-blob HMAC before trusting it (a mismatch, or a stored HMAC that cannot
-  be verified because the key is missing or malformed, fails startup with
-  `ErrInventoryTampered`; the operator acknowledges a lost baseline by deleting
-  the `inventory:hmac` key), imports the lines into hash fields, and empties
-  the marker only in the final script. The verified HMAC is deleted in the same
-  import — it is not a chain head — and the next verification re-baselines from
-  the imported entries; a legacy store whose inventory is *empty* has no
-  import to drop it as part of, so `EnsureReady` handles that separately, on
-  exactly the same terms as etcd. Because the blob stays authoritative until
-  the final script, an interrupted import is detected on the next start (the
-  partial entries are the import-written prefix of the blob) and redone from
-  the intact blob; entries that are *not* such a prefix mean that
-  something wrote both forms, which is refused rather than guessed at. A
-  replica still writing the blob mid-import is caught by a guard on
-  the marker's stored mtime prefix and length — every writer stamps a fresh
-  mtime, so an unchanged prefix means nothing has touched it — and the import
-  restarts from the new blob. Duplicate serials are imported verbatim with a
-  warning and carry the same ambiguity sentinel, with the same consequences:
-  the serial stays reserved against reissue, certificate-index writes for it
-  are explicit no-ops, `Statuses` reports its bearers as `CertStateUnknown` so
-  readers derive their state from the signed CRL, the repair pass skips them,
-  and a prune releases the sentinel only when the last bearer goes.
+- **A pre-alpha inventory blob is refused, and ambiguous serials are still
+  read**, on exactly the same terms as etcd, with `inventory:data` as the
+  marker.
 - **Certificate-index writes stay off the chain.** `SetRevoked` /
   `ClearRevoked` / `SetProjection` rewrite a single entry field, guarded on the
   stored value still being the one that was decoded (the mutable fields are not
@@ -525,8 +481,7 @@ Each phase is a separate commit.
    inventory table with the projection/state columns, define `CertIndex`,
    serve `certificate_statuses` from it, and add the startup repair pass.
 6. **etcd decomposition** (issue #138, a later extension). Implement
-   `InventoryStore` and `CertIndex` on the etcd backend with per-entry keys,
-   including the in-place legacy blob conversion described above.
+   `InventoryStore` and `CertIndex` on the etcd backend with per-entry keys.
 7. **Redis decomposition** (issue #139, a later extension). The same for the
    Redis/Valkey backend with per-entry hash fields, resolving the chain's one
    unavoidable read-compute-write optimistically because Lua cannot compute a
@@ -691,8 +646,7 @@ recorded so the control is not credited with more than it does.
    gets the `Info` line, and the value is re-baselined either way. The `Warn` is
    also expected once without any tampering — on the first start after adopting
    a cadir from OpenVox Server, after `openvox-ca-ctl import` (which writes a
-   CRL but no value), after migrating from a store that never had a value, and
-   after an etcd or Redis legacy inventory is decomposed (below).
+   CRL but no value), and after migrating from a store that never had a value.
 
    Which verifier gets there first matters. `verifyInventoryHMACLocked` — reached
    from `CA.Init`, `ReadInventory`, `SubjectForSerial` and the prune path — is

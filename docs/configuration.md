@@ -1518,10 +1518,9 @@ mean either unit.
 refused at startup rather than discovered at issuance, and each name occupies
 the ordinary inventory slot for that subject. The certname `ca` is refused at
 startup as well, here and in `serving_cert`: no path that generates a private
-key accepts it, because on the filesystem backend `POST /generate/ca` would
-write that key over the CA's own in a cadir that keeps it in
-`private/ca_key.pem`.
-Choose another certname.
+key accepts it, because the key `POST /generate/ca` writes would be
+`private/ca_key.pem`, easily taken for the CA's own key. Choose another
+certname.
 
 **Two managed certificates cannot share a certname**, and neither can a managed
 certificate and [`serving_cert`](#the-cas-own-serving-certificate): both are
@@ -2898,8 +2897,7 @@ in.
 ```text
 <cadir>/
   ca_crt.pem          CA certificate
-  ca_key.pem          CA private key (mode 0600; encrypted PEM when --encrypt-ca-key;
-                      private/ca_key.pem instead where an existing cadir keeps it there)
+  ca_key.pem          CA private key (mode 0600; encrypted PEM when --encrypt-ca-key)
   ca_pub.pem          CA public key
   ca_crl.pem          Certificate Revocation List
   inventory.txt       Signed certificate log (hex serial, dates, subject per line)

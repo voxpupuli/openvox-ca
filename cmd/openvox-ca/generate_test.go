@@ -238,8 +238,8 @@ var _ = Describe("openvox-ca generate", func() {
 	})
 
 	Describe("the subject \"ca\"", func() {
-		// Its key would be written to private/ca_key.pem, the CA key's
-		// legacy location (#495).
+		// Its key would be written to private/ca_key.pem, easily mistaken
+		// for the CA key (#495).
 		It("is refused, leaving the cadir untouched", func() {
 			bootstrapCAInDir(caDir, "puppet.example.com")
 			before := hashTree(caDir)
