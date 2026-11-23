@@ -35,3 +35,23 @@ func ExpireReauthThrottleForTest(tm *TokenManager) {
 // ErrTokenManagerClosedForTest exposes the error Reauth returns after Close,
 // so a spec can tell that refusal apart from any other way Reauth can fail.
 var ErrTokenManagerClosedForTest = errTokenManagerClosed
+
+// WakeForTest ends whichever wait tm's background loop is in, or the next one
+// it starts: the retry after a failed re-login, or the spacing between watcher
+// starts. Specs step the loop with it rather than waiting reauthRetryInterval
+// or minReauthInterval out in real time.
+func WakeForTest(tm *TokenManager) {
+	select {
+	case tm.wake <- struct{}{}:
+	default:
+	}
+}
+
+// QueueReloginForTest leaves a hand-over in tm's relogin channel, as a
+// request-path Reauth whose failed login the loop has not yet seen would.
+func QueueReloginForTest(tm *TokenManager) {
+	select {
+	case tm.relogin <- struct{}{}:
+	default:
+	}
+}

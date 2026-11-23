@@ -610,10 +610,11 @@ var _ = Describe("OpenBao token lifecycle", func() {
 				Expect(fake.loginCount()).To(Equal(4))
 				second := tm.Client().Token()
 
-				// The loop's next retry is reauthRetryInterval after its first.
-				// It must find the token replaced and start renewing it, not
-				// mint another.
-				Eventually(fake.renewedTokens).WithTimeout(10 * time.Second).Should(ContainElement(second))
+				// The loop's next retry, which WakeForTest brings forward from
+				// reauthRetryInterval, must find the token replaced and start
+				// renewing it, not mint another.
+				openbao.WakeForTest(tm)
+				Eventually(fake.renewedTokens).WithTimeout(2 * time.Second).Should(ContainElement(second))
 				Expect(fake.loginCount()).To(Equal(4), "the background loop logged in again after the request path had")
 				Expect(tm.Client().Token()).To(Equal(second))
 			})
@@ -747,8 +748,38 @@ var _ = Describe("OpenBao token lifecycle", func() {
 			Expect(gauge(tm)).To(Equal(0.0))
 
 			fake.acceptLoginsFromNow()
-			Eventually(func() float64 { return gauge(tm) }).WithTimeout(10*time.Second).Should(Equal(1.0),
-				"the background loop's next retry, reauthRetryInterval later, must recover it")
+			openbao.WakeForTest(tm)
+			Eventually(func() float64 { return gauge(tm) }).WithTimeout(2*time.Second).Should(Equal(1.0),
+				"the background loop's next retry must recover it")
+		})
+
+		// run() drops a hand-over left from before the watcher it is about to
+		// start: the loop has logged in since, so acting on it would end a
+		// healthy watcher and log in again for nothing.
+		It("does not end a fresh watcher over a hand-over the loop has already answered", func() {
+			tm := start(openbao.AuthAppRole)
+			signer := load(tm)
+			fake.refuseSignsWith(tm.Client().Token())
+
+			fake.refuseLoginsFromNow()
+			openbao.ExpireReauthThrottleForTest(tm)
+			_, err := signer.Sign(nil, digest, crypto.SHA256)
+			Expect(err).To(MatchError(ContainSubstring("invalid credentials")), "the re-login should have failed")
+			Eventually(fake.loginCount).WithTimeout(2*time.Second).Should(Equal(3),
+				"the background loop retries at once, is refused, and waits")
+
+			// A stale hand-over, about the watcher before the login below.
+			openbao.QueueReloginForTest(tm)
+			fake.acceptLoginsFromNow()
+			openbao.WakeForTest(tm)
+			Eventually(fake.loginCount).WithTimeout(2*time.Second).Should(Equal(4), "the retry logs in")
+
+			// Bring forward the spacing before the loop starts the new watcher.
+			openbao.WakeForTest(tm)
+			fresh := tm.Client().Token()
+			Eventually(fake.renewedTokens).WithTimeout(2 * time.Second).Should(ContainElement(fresh))
+			Consistently(fake.loginCount).WithTimeout(500*time.Millisecond).Should(Equal(4),
+				"the stale hand-over ended the fresh watcher and the loop logged in again")
 		})
 
 		It("reads 0 when the background loop cannot log in again", func() {

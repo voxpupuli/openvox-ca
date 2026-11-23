@@ -137,6 +137,13 @@ type TokenManager struct {
 	// read false long after OpenBao had recovered. Buffered 1: one pending
 	// hand-over is all the loop needs, and Reauth must never block on it.
 	relogin chan struct{}
+
+	// wake cuts short whichever wait the background loop is in: the retry
+	// interval, or the spacing between watcher starts. Only specs send on it
+	// (see export_test.go), so they can step the loop without waiting the
+	// intervals out in real time. Buffered 1, so a wake sent just before the
+	// loop starts to wait is not lost.
+	wake chan struct{}
 }
 
 // NewTokenManager builds an OpenBao client from cfg, performs the initial
@@ -167,6 +174,7 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 		cancel:       cancel,
 		doneCh:       make(chan struct{}),
 		relogin:      make(chan struct{}, 1),
+		wake:         make(chan struct{}, 1),
 	}
 
 	loginCtx, loginCancel := context.WithTimeout(tmCtx, tm.loginTimeout)
@@ -289,7 +297,7 @@ func (tm *TokenManager) run() {
 		// Reauth's own throttle bounds how often that can happen.
 		if !lastWatch.IsZero() {
 			if wait := minReauthInterval - time.Since(lastWatch); wait > 0 {
-				if !sleepOrDone(tm.ctx, wait) {
+				if !sleepOrDone(tm.ctx, wait, tm.wake) {
 					return
 				}
 			}
@@ -375,22 +383,25 @@ func (tm *TokenManager) run() {
 				slog.Debug("OpenBao re-authentication still failing, retrying",
 					"error", err, "attempt", attempts, "retry_in", reauthRetryInterval)
 			}
-			if !sleepOrDone(tm.ctx, reauthRetryInterval) {
+			if !sleepOrDone(tm.ctx, reauthRetryInterval, tm.wake) {
 				return
 			}
 		}
 	}
 }
 
-// sleepOrDone waits for d or until ctx is cancelled, reporting which
-// happened first (true = the timer fired, false = ctx was cancelled).
-func sleepOrDone(ctx context.Context, d time.Duration) bool {
+// sleepOrDone waits for d, a receive on wake, or ctx's cancellation,
+// reporting which happened first (true = the wait is over, false = ctx was
+// cancelled).
+func sleepOrDone(ctx context.Context, d time.Duration, wake <-chan struct{}) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
 		return false
 	case <-t.C:
+		return true
+	case <-wake:
 		return true
 	}
 }
