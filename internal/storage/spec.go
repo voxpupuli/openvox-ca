@@ -267,9 +267,7 @@ func NewServiceFromSpec(spec BackendSpec) (*StorageService, error) {
 			MaxOpenConns: spec.SQL.MaxOpenConns,
 			MaxIdleConns: spec.SQL.MaxIdleConns,
 		}
-		if spec.SQL.MigrationTimeoutSec > 0 {
-			cfg.MigrationTimeout = time.Duration(spec.SQL.MigrationTimeoutSec) * time.Second
-		}
+		cfg.MigrationTimeout = SQLMigrationTimeout(spec.SQL.MigrationTimeoutSec)
 		if spec.SQL.RequestTimeoutSec > 0 {
 			cfg.RequestTimeout = time.Duration(spec.SQL.RequestTimeoutSec) * time.Second
 		}

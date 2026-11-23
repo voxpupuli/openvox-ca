@@ -92,6 +92,11 @@ const (
 	// because a run cut short is exactly what leaves a schema half-migrated.
 	sqlMigrationTimeout = 10 * time.Minute
 
+	// DefaultSQLMigrationTimeout is sqlMigrationTimeout, exported for the
+	// startup budgets that contain a migration run and so have to outlast it,
+	// such as the frontend's wait for the signer.
+	DefaultSQLMigrationTimeout = sqlMigrationTimeout
+
 	// sqliteFilePermCreate is the mode the database is created with. Owner and
 	// group, no world: the umask narrows it further (0640 under the usual 0022,
 	// 0600 under 0077) and can never widen it, so the world bits that issue #351
@@ -175,6 +180,19 @@ type SQLConfig struct {
 	// to a single open connection (see NewSQLBackend).
 	MaxOpenConns int
 	MaxIdleConns int
+}
+
+// SQLMigrationTimeout is the migration budget a configured
+// sql_migration_timeout_sec gives: that many seconds, or
+// DefaultSQLMigrationTimeout when it is zero or negative. Exported so the
+// startup budgets that contain a migration run, such as the frontend's wait for
+// the signer, read the same figure the backend applies rather than re-deriving
+// the rule.
+func SQLMigrationTimeout(seconds int) time.Duration {
+	if seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return DefaultSQLMigrationTimeout
 }
 
 func (c *SQLConfig) applyDefaults() {

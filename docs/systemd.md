@@ -111,6 +111,12 @@ $ systemctl status openvox-ca
      Status: "Waiting for the signer process to initialise the CA"
 ```
 
+That wait is bounded. The frontend gives up after [`sql_migration_timeout_sec`](storage-backends.md#how-long-startup-may-wait) plus 60 seconds, 11 minutes by default and never less than 3, logs `Gave up waiting for the signer process`, and the service stops. The bound is longer than any single step inside the signer's initialisation, so a step that sticks normally fails first and reports itself in the signer's own lines; the frontend's message means the signer is still running but stopped without saying why. Either way, `journalctl -u openvox-ca | grep 'role=signer'` shows the last thing it did; in a [`log_file`](configuration.md#log-output), which is JSON, search for `"role":"signer"` instead. A healthy start never comes near the bound.
+
+The unit's `TimeoutStartSec=900s` is ordered above that bound, so the frontend's message, or the signer's own, arrives before systemd's kill. Raise both together: if you raise `sql_migration_timeout_sec`, raise `TimeoutStartSec` by the same amount in a drop-in. On the filesystem backend, which the packages configure, `sql_migration_timeout_sec` is refused, so the wait stays at 11 minutes; that backend runs no migration and no index backfill, so nothing in the signer's initialisation needs longer.
+
+A start that wedges holds whatever started it until one of those bounds fires, and the package manager is one of them: `apt install` starts the service, and an upgrade restarts it, so either can sit silent for up to 11 minutes, and on a first install the provisioning step before it for up to 15. `systemctl status openvox-ca openvox-ca-first-boot` from another shell shows what the start is waiting on. [How long startup may wait](storage-backends.md#how-long-startup-may-wait) explains the order.
+
 Once serving, the status summarises the listener, the CA certificate and the CRL:
 
 ```text

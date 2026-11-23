@@ -74,11 +74,13 @@ Group=puppet
 # outside it.
 ReadWritePaths=/etc/puppetlabs/puppet/ssl
 
-# Bootstrapping a CA generates a key pair, which can take a while on a slow or
-# entropy-starved machine. openvox-ca.service allows 300s for the same reason;
-# this unit does the work that would otherwise happen on the service's first
-# start, so it needs the same budget.
-TimeoutStartSec=300s
+# The same figure as openvox-ca.service, kept equal so the two cannot drift,
+# though not for the same reason. This unit provisions the filesystem backend
+# only and runs no launcher, so neither the schema migration's ceiling nor the
+# frontend's wait for the signer is inside it. What it does have is the CA's
+# key generation, an RSA-4096 key by default, which has no ceiling of its own
+# and is slow on an entropy-starved machine; 900s covers it with room to spare.
+TimeoutStartSec=900s
 
 # The same hardening the service runs under, and kept in step deliberately:
 # this unit handles the CA private key for as long as it takes to sign, so it

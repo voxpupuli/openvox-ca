@@ -48,6 +48,7 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/sdnotify"
 	"github.com/voxpupuli/openvox-ca/internal/signer"
+	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
 // pskChildEnv selects child mode when the test binary re-execs itself: the
@@ -66,6 +67,10 @@ const memLimitOutEnv = "OPENVOX_CA_TEST_MEMLIMIT_OUT"
 // environment they were handed to, one file per role. A file for the same
 // reason as memLimitOutEnv: the children's stdout is the launcher's own.
 const envDumpDirEnv = "OPENVOX_CA_TEST_ENV_DUMP_DIR"
+
+// handshakeTimeoutEnv carries the bound the frontend-bounded child gives
+// signer.DialConn, so the wedged-signer spec can make it short.
+const handshakeTimeoutEnv = "OPENVOX_CA_TEST_HANDSHAKE_TIMEOUT"
 
 // launcherStartedEnv is set by the launcher-env child before it calls
 // runLauncher, and refused by it if already set. The children inherit it, so a
@@ -98,7 +103,7 @@ func runPSKChild(role string) int {
 		}
 		return 0
 	case "frontend":
-		rs, err := signer.Dial(nil)
+		rs, err := signer.Dial(context.Background(), nil, 30*time.Second)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -115,6 +120,23 @@ func runPSKChild(role string) int {
 			return 1
 		}
 		fmt.Println("SIGN-OK")
+		return 0
+	case "frontend-bounded":
+		// The frontend's wait for the signer with the bound the server gives it,
+		// but short. Only the handshake: the spec behind it plays a signer that
+		// never answers, so there is nothing to sign with afterwards.
+		timeout, err := time.ParseDuration(os.Getenv(handshakeTimeoutEnv))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "frontend-bounded child:", err)
+			return 2
+		}
+		conn, err := signer.DialConn(context.Background(), timeout)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		_ = conn.Close()
+		fmt.Println("HANDSHAKE-OK")
 		return 0
 	case "report-memlimit":
 		// debug.SetMemoryLimit(-1) reports the limit without changing it, so
@@ -315,6 +337,46 @@ var _ = Describe("launcher fd contract", func() {
 		// branches and the read timeout -- so on its own it cannot say which guard
 		// fired, which is the whole claim of the comment above.
 		Expect(out.String()).To(ContainSubstring("fd 4 is not a pipe"))
+	})
+
+	// verifies that the frontend's wait for the signer is bounded across the
+	// exec boundary, on the descriptor the launcher really passes. The signer
+	// here is the spec itself: it holds the other end of the socketpair, alive,
+	// and never writes -- a signer wedged in Init. Unbounded, the child blocks
+	// on its first read until the context below kills it.
+	//
+	// Across exec rather than only over net.Pipe because that is where the
+	// PSK read's first bound failed: a deadline that worked in-process and
+	// could not arm on the inherited descriptor. This conn is a socket rather
+	// than a pipe, which is why a deadline is right for it, and this spec is
+	// what says so.
+	It("bounds the frontend's wait on a signer that never answers", func() {
+		signerSock, frontendSock, err := signer.Socketpair()
+		Expect(err).NotTo(HaveOccurred(), "creating socketpair")
+		DeferCleanup(func() { _ = signerSock.Close(); _ = frontendSock.Close() })
+
+		frontendPipe, err := pskPipe(hex.EncodeToString(make([]byte, 32)))
+		Expect(err).NotTo(HaveOccurred(), "creating frontend PSK pipe")
+		DeferCleanup(func() { _ = frontendPipe.Close() })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		DeferCleanup(cancel)
+
+		var out bytes.Buffer
+		cmd := pskChildCmd(ctx, "frontend-bounded", []*os.File{frontendSock, frontendPipe}, &out)
+		cmd.Env = append(cmd.Env, handshakeTimeoutEnv+"=500ms")
+		Expect(cmd.Start()).To(Succeed(), "starting frontend child")
+		DeferCleanup(func() { killAndReap(cmd) })
+		frontendSock.Close()
+		frontendPipe.Close()
+
+		started := time.Now()
+		err = cmd.Wait()
+		Expect(err).To(HaveOccurred(), "the child should give up rather than connect; output: %s", out.String())
+		Expect(out.String()).To(ContainSubstring("did not answer the handshake in time"),
+			"the child should report the bound, not be killed by the spec's context")
+		Expect(time.Since(started)).To(BeNumerically("<", 20*time.Second),
+			"the child should give up at its own bound, well before the spec's")
 	})
 })
 
@@ -1129,12 +1191,14 @@ var _ = Describe("The shipped systemd unit", func() {
 		//
 		// This floor is what the unit's own comment cites, so the two have to
 		// say the same thing: it gained its third term with the serving
-		// certificate. It bounds the lock waits only -- whether TimeoutStartSec
-		// clears the whole pre-listen path is a separate question, since that
-		// path installs budgets not derived from LockTimeout at all. The one
-		// the unit counts, the Secret store read after the serving pass, is
-		// certstore's unexported 30s API timeout; copying the number here
-		// would drift from it as silently as a bare multiplier does.
+		// certificate. It bounds the lock waits only, which are legitimate
+		// waiting under contention. The ceilings that are not derived from
+		// LockTimeout -- the migration run's above all -- are ordered by the
+		// spec below, which asks a different question: not whether a slow
+		// start fits, but whether a stuck one gets to say what stuck. The
+		// Secret store read after the serving pass is certstore's unexported
+		// 30s API timeout; copying the number here would drift from it as
+		// silently as a bare multiplier does.
 		//
 		// Summed from named terms rather than written as 3*LockTimeout, so a
 		// failure says which budgets the floor is made of, and a new term is a
@@ -1156,5 +1220,69 @@ var _ = Describe("The shipped systemd unit", func() {
 		Expect(start).To(BeNumerically(">", floor),
 			"TimeoutStartSec must outlast %s, with room for key generation",
 			strings.Join(named, " + "))
+	})
+
+	It("outlasts every ceiling it contains, so a stuck step can say what stuck", func() {
+		// The ordering #345 found inverted: a 600s migration ceiling inside a
+		// 300s TimeoutStartSec can never fire, so a stuck migration was killed
+		// by systemd with nothing to say why, and a legitimately long one was
+		// cut off part-way and restarted for ever.
+		//
+		// Not a sum. Each ceiling binds only when its own step has stopped, and
+		// a step before it that was healthy took milliseconds, so what this has
+		// to outlast is each ceiling on its own: every one on the start's path,
+		// named here so a new one is a line rather than a re-derivation. The
+		// migration run sits inside the signer's Init, and can follow the
+		// handshake too, in the frontend's own Init, when a peer holds the lock.
+		// The frontend's wait contains the signer's whole Init. Taken from the
+		// default configuration, which is what the unit ships for; the unit's
+		// comment tells an operator raising the migration budget to raise this
+		// with it.
+		//
+		// The serving_cert pass is followed by a Secret store read bounded at
+		// certstore's unexported 30s, outside the pass's budget; the margin
+		// asserted below covers it without copying the number.
+		start, err := time.ParseDuration(unit["TimeoutStartSec"])
+		Expect(err).NotTo(HaveOccurred())
+
+		wait := signerHandshakeTimeout(&serverConfig{})
+		Expect(wait).To(BeNumerically(">", storage.DefaultSQLMigrationTimeout),
+			"the frontend's wait for the signer (%s) must outlast the migration run (%s) inside it",
+			wait, storage.DefaultSQLMigrationTimeout)
+
+		ceilings := []struct {
+			name   string
+			budget time.Duration
+		}{
+			{"a lock wait in Init", ca.LockTimeout},
+			{"serving_cert's pre-bind pass", ca.LockTimeout},
+			{"a schema migration run, in either process", storage.DefaultSQLMigrationTimeout},
+			{"the frontend's wait for the signer", wait},
+		}
+		for _, c := range ceilings {
+			// One lock wait's margin above each, for a healthy step that ran
+			// slowly before the one that stuck, and for the store read after
+			// the serving pass.
+			Expect(start).To(BeNumerically(">", c.budget+ca.LockTimeout),
+				"TimeoutStartSec must outlast %s (%s), with a lock wait's margin, or systemd's kill pre-empts its error",
+				c.name, c.budget)
+		}
+	})
+
+	It("gives the provisioning oneshot the same start budget", func() {
+		// openvox-ca-first-boot.service provisions the filesystem backend only
+		// and runs no launcher, so the ordering above does not bind it; what it
+		// does need time for is generating the CA key, which has no ceiling of
+		// its own. It keeps the service's figure so the two units cannot drift,
+		// and that is what is pinned here.
+		raw, err := os.ReadFile("../../packaging/systemd/openvox-ca-first-boot.service")
+		Expect(err).NotTo(HaveOccurred())
+		var oneshot string
+		for _, line := range strings.Split(string(raw), "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "TimeoutStartSec="); ok {
+				oneshot = v
+			}
+		}
+		Expect(oneshot).To(Equal(unit["TimeoutStartSec"]))
 	})
 })

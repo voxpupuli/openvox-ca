@@ -459,7 +459,7 @@ PCA_PID=$!
 
 # Poll rather than sleep: bootstrapping a cold cadir generates an RSA-4096 key
 # first, which is not a fixed-length wait on a slow or entropy-starved machine.
-# 300s matches the TimeoutStartSec the shipped systemd unit allows for it.
+# 300s is ample for that on all but the slowest machine.
 for _ in $(seq 1 300); do
   curl -sf http://127.0.0.1:8140/puppet-ca/v1/certificate/ca >/dev/null && break
   sleep 1
@@ -2800,7 +2800,12 @@ can take minutes, as the backfill after [a backend
 migration](storage-backends.md) does. Under the Helm chart, raise
 `startupProbe.failureThreshold` for that start, or the kubelet restarts the pod
 before it finishes; the rows it has written are kept, so it still completes,
-but only across restarts. The systemd unit allows 300 seconds.
+but only across restarts. In the default topology, with or without a
+supervisor, the frontend waits [`sql_migration_timeout_sec`](storage-backends.md#how-long-startup-may-wait)
+plus 60 seconds for the signer to finish it, 11 minutes by default; raise that
+setting, and the unit's `TimeoutStartSec`, for this start if it may need longer.
+That holds on etcd and Redis too, where the setting bounds no migration and only
+sizes this wait.
 
 Each digest also stays in the signer's memory while it starts: with `SHA1` and
 `SHA512` both listed, its startup peak grows from about 420 to about 1,000
