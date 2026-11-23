@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Copyright (C) 2026 Chris Boot
 // Copyright (C) 2026 Vox Pupuli and contributors
 //
@@ -18,7 +20,6 @@
 // Not built on Windows: these specs set syscall.Umask, which does not exist
 // there, and file modes do not carry the meaning they are about. The build
 // system tolerates a Windows target but nothing ships one.
-//go:build !windows
 
 package storage
 

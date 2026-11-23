@@ -1,3 +1,5 @@
+//go:build unix
+
 // Copyright (C) 2026 Chris Boot
 // Copyright (C) 2026 Vox Pupuli and contributors
 //
@@ -14,8 +16,6 @@
 // You should have received a copy of the GNU General Public License along
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
-
-//go:build unix
 
 // White-box, so the specs can name autosignConcurrency rather than repeat its
 // value, and fill the slots directly where a spec needs them full.
