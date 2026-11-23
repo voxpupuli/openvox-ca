@@ -1276,7 +1276,7 @@ so the pair obligation is its own rule ("A new nesting is protocol too") in
 `allowedLockNesting` and a line in the **Lock ordering** section above, added
 together. The failure message names the offending pair.
 
-Three things that file pins which nothing else does:
+Four things that file pins which nothing else does:
 
 - **Rule 4's "release `c.mu` before entering another `WithLock`".** `c.mu` is
   unexported, so no spec outside `internal/ca` can probe it, and the per-caller
@@ -1300,6 +1300,13 @@ Three things that file pins which nothing else does:
   migration lock would look like a safety improvement while converting a
   documented "stop the server" into a silent stall bounded only by
   `lockTimeout`.
+- **Which named lock guards each driven mutation.** A table drives each
+  operation once and requires exactly the lock classes the lock table above
+  assigns it, counted, plus a fresh store's `Init` (`hmac-key` and
+  `bootstrap`) and `ImportCA` (`bootstrap` and `crl`). Rule 11 makes this
+  protocol, so the lock table's "Taken by" column and that spec change
+  together, in a major release from 1.0.0. The mutations it does not drive are
+  listed in the file's header comment.
 
 What the observer does **not** see, stated because a check that never reaches a
 class of acquisition reports a clean graph exactly as a check that reached it

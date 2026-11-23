@@ -204,6 +204,15 @@ runs the same target, so a broken expression fails the build rather than
 waiting to be noticed in an alertmanager that never fires. It skips with a message if
 `jsonnet` or `promtool` is not on your `PATH`.
 
+The alert names and `_config` keys are public API
+([what the version number promises](../docs/development/releasing.md#what-the-version-number-promises)),
+so `tests.yaml` has at least one case naming every alert, and `mage test:mixin`
+also refuses any name in `publishedMixinAlerts` or `publishedMixinConfigKeys`
+(in `magefile.go`) that the mixin no longer renders: renaming or removing one
+needs a major release. Additions pass that check, so a change that adds an
+alert or a `_config` key also adds it to those lists and gives the alert a
+case in `tests.yaml`, or nothing protects it.
+
 ## Importing into another repo
 
 Vendor the mixin with [jsonnet-bundler](https://github.com/jsonnet-bundler/jsonnet-bundler):

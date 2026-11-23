@@ -200,8 +200,12 @@ var _ = Describe("Trust domains", func() {
 		})
 
 		It("names a configured domain by its entry", func() {
+			// The whole shape, not just the name: docs/ca-key-security.md
+			// publishes client_ca "<name>" as one of client.domain's three
+			// values for operators to match on, and releasing.md covers it.
+			// Changing it needs a major release.
 			d := api.TrustDomain{Name: "server-ca"}
-			Expect(d.Describe()).To(ContainSubstring("server-ca"))
+			Expect(d.Describe()).To(Equal(`client_ca "server-ca"`))
 		})
 	})
 })
