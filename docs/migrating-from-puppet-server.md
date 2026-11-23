@@ -370,9 +370,10 @@ Some limits worth knowing before you rely on re-import as a refresh mechanism.
 > (`crl_chain.urls` or `crl_chain.file`) is what keeps them current without an
 > operator acting before each lapse.
 >
-> `openvox-ca-ctl import` is the one place it is detectable, so read its output. It warns when a
-> supplied ancestor is already past its `nextUpdate`, and when the chain carries
-> more than one CRL for the same ancestor:
+> `openvox-ca-ctl import` also checks the chain at the moment of import, so read
+> its output. It warns when a supplied ancestor is already past its
+> `nextUpdate`, and when the chain carries more than one CRL for the same
+> ancestor:
 >
 > ```text
 > level=WARN msg="Ancestor CRL has already expired; agents doing full-chain revocation checking will reject the published chain" issuer="CN=Root CA" next_update=2026-01-01T00:00:00Z
@@ -517,8 +518,9 @@ First, be clear what restoring it costs. Admin is a single boolean
 (`isAdmin`), not a per-route grant, so both of the options that preserve
 authentication give the caller the *entire* admin tier — `POST /sign`,
 `POST /sign/all`, `POST /generate/{subject}`, `PUT /clean`,
-`DELETE /certificate_status/{subject}`, `PUT /certificate/{subject}` and CRL
-replacement, as listed under [Authorization tiers](api.md#authorization-tiers).
+`DELETE /certificate_status/{subject}`, `PUT /certificate/{subject}` and
+`PUT /certificate_revocation_list/ca` among them; the full list is under
+[Authorization tiers](api.md#authorization-tiers).
 There is no read-only status grant today. A monitoring host given option 1 or 2
 to fix a status poll can also sign and revoke certificates.
 
@@ -748,7 +750,7 @@ to the inventory, appears in `openvox-ca-ctl list --all`, is swept by the expiry
 job, and can be revoked by name.
 
 `pp_cli_auth` grants the entire admin tier — signing, revoking, cleaning,
-importing, replacing the CRL. Withdrawing it takes three steps rather than one,
+importing, re-signing the CRL. Withdrawing it takes three steps rather than one,
 and `--pp-cli-auth` has other requirements and caveats worth reading before you
 use it: see [`generate`](operator-cli.md#administrator-credentials).
 

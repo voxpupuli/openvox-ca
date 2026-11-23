@@ -851,12 +851,14 @@ new one.
 
 It is a gauge of the latest outcome rather than a count of failures because of
 what happens after the first one. That failure is free and the next pass
-retries. From the second, the CA withholds the entry's passes — 15m, then 30m,
-doubling to a cap of 24h, cleared outright by any successful write — so a
-counter would rise once and then sit flat for up to a day while the entry was
-still broken. A withheld pass leaves the gauge at `1`. The backoff exists
-because every failed attempt revokes the serial it had just signed: without it
-a refused store cost one revoked serial per interval, and each stays on the CRL
+retries. From the second consecutive failed store write, the CA withholds the
+entry's passes — 15m, then 30m, doubling to a cap of 24h, cleared outright by
+any successful write — so a counter would rise once and then sit flat for up to
+a day while the entry was still broken. A withheld pass leaves the gauge at `1`.
+Any other failure — a read, a lock, a signature — is retried on every pass, so
+for those the gauge clears as soon as a pass succeeds. The backoff exists
+because every failed write revokes the serial it had just signed: without it a
+refused store cost one revoked serial per interval, and each stays on the CRL
 until its certificate's `NotAfter` — five years for an entry with no `ttl`.
 
 ```promql
@@ -882,11 +884,11 @@ The logs say why. The first failure logs the failure itself; each withheld pass
 logs at `WARN` with the subject, the issue reason and `retry_in`, which is when
 the CA will next try.
 
-Fixing the store does not clear the alert by itself. Only a pass that runs can
-clear the gauge, and nothing notices the fix until the next attempt, which
-`retry_in` names and which can be up to a day away. Restarting the CA retries
-at once: the backoff is held in memory per process, like the gauge, and the
-reconcile loop runs immediately at startup.
+Fixing a store that refused writes does not clear the alert by itself. Only a
+pass that runs can clear the gauge, and nothing notices the fix until the next
+attempt, which `retry_in` names and which can be up to a day away. Restarting
+the CA retries at once: the backoff is held in memory per process, like the
+gauge, and the reconcile loop runs immediately at startup.
 
 **Displacement is not a gap here, though it reads like one.** When a managed
 issuance replaces a certificate the CA already held for that name, the
