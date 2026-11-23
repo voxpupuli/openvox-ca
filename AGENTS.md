@@ -204,7 +204,8 @@ Conventions:
   `pp_cli_auth` credential, which the CSR path deliberately strips so that no
   request can ask for one. If it fires, revisit the security argument in
   `internal/ca/authgrant.go` before touching the gate. Renaming any of those
-  identifiers breaks the compile-time bindings at the top of that file: update
+  identifiers breaks the compile-time bindings at the top of
+  `authseam_test.go`: update
   the bindings and the `forbidden` map together, and do not delete either to
   restore the build.
 

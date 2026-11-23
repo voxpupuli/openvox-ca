@@ -317,10 +317,15 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 ├── ca_key.pem              CA private key (see note)          0600
 ├── ca_pub.pem              CA public key
 ├── ca_crl.pem              Certificate Revocation List (see note)
-├── inventory.txt           Issued certificate log, in OpenVox Server's format
+├── inventory.txt           Issued certificate log, in
+│                           OpenVox Server's format            0600
+├── .inventory.hmac         Inventory integrity value          0600
+├── serial                  Kept for OpenVox Server's layout;
+│                           unread, since serials are random
 ├── superseded.json         Certificates awaiting delayed
 │                           revocation (see note)              0600
 ├── private/
+│   ├── .inventory_hmac_key inventory integrity key            0600
 │   └── <subject>_key.pem   server-generated private keys     0600
 ├── requests/
 │   └── <subject>.pem       pending CSRs
@@ -352,7 +357,8 @@ Server CA, so you can swap in `openvox-ca` without reorganising your SSL tree:
 > changes; only the number of PEM blocks inside it does. See
 > [storage internals](development/storage-internals.md).
 
-(The directory also holds small internal integrity files; leave them in place.)
+(`.inventory.hmac` and `private/.inventory_hmac_key` are integrity data; leave
+them in place.)
 File permissions are fixed: `0600` for `ca_key.pem`, `inventory.txt`, the
 integrity files and `superseded.json`, and for anything under `private/`;
 `0660` for the lock files under `locks/`, and `0770` for `locks/` itself;
@@ -568,8 +574,12 @@ etcd_tls_key_file:  /etc/openvox-ca/etcd-client-key.pem
   pin the key to a local file with `ca_key_file` (see
   [CA cert/key as local files](#ca-certkey-as-local-files)).
 - **`openvox-ca-ctl setup` / `import` work on the local filesystem only.** To
-  import a CA into an etcd-backed cluster, run them against a scratch directory
-  first, then point `openvox-ca` at a cadir containing the output.
+  import a CA into an etcd-backed cluster, run them against a scratch
+  filesystem cadir first, then copy it into etcd with `openvox-ca-ctl migrate`
+  (see [migrating between backends](#migrating-between-backends)). Pointing an
+  etcd-backed `openvox-ca` at the scratch cadir does not import it: the cadir
+  holds only `private/` on this backend, so the server finds an empty store and
+  bootstraps a new CA.
 - **The certificate inventory is stored as one etcd key per issued
   certificate**, not as a single ever-growing text blob, so signing cost does
   not grow with the size of the inventory and duplicate serial numbers are
@@ -732,8 +742,11 @@ redis_tls_key_file:  /etc/openvox-ca/redis-client-key.pem
   `encrypt_ca_key`, or pin the key to a local file with `ca_key_file` (see
   [CA cert/key as local files](#ca-certkey-as-local-files)).
 - **`openvox-ca-ctl setup` / `import` work on the local filesystem only.**
-  Bootstrap/import against a scratch directory, then point `openvox-ca` at a
-  cadir containing the output.
+  Bootstrap or import against a scratch filesystem cadir, then copy it into
+  Redis with `openvox-ca-ctl migrate` (see [migrating between
+  backends](#migrating-between-backends)). Pointing a Redis-backed `openvox-ca`
+  at the scratch cadir does not import it: the server finds an empty keyspace
+  and bootstraps a new CA.
 - **The certificate inventory is stored as one hash field per issued
   certificate**, not as a single ever-growing text value, so signing cost does
   not grow with the size of the inventory and duplicate serial numbers are
@@ -945,9 +958,11 @@ The directory holding the database is yours, and `openvox-ca` never changes its
 mode. Anything that copies the database — a backup, a volume snapshot, a restored
 tarball — has to preserve the modes, sidecars included.
 
-`openvox-ca-ctl setup` / `import` work on the local filesystem
-only; bootstrap against a scratch directory, then point a SQLite-backed
-`openvox-ca` at a fresh database.
+`openvox-ca-ctl setup` / `import` work on the local filesystem only: bootstrap
+or import against a scratch filesystem cadir, then copy it into the database
+with `openvox-ca-ctl migrate` (see [migrating between
+backends](#migrating-between-backends)). A SQLite-backed `openvox-ca` started on
+a fresh database finds no CA in it and bootstraps a new one.
 
 Alongside the database, `openvox-ca` keeps a hidden `.<database>.locks/`
 directory — `.ca.db.locks/` for the DSN above — holding the lock files that stop
@@ -997,7 +1012,8 @@ The `sql_tls_*_file` options stand in for the DSN's `sslrootcert`, `sslcert`
 and `sslkey`, and `sslmode` means the same with either:
 `sql_tls_ca_file` with `sslmode=require` checks the certificate chain but not
 the host name, exactly as `sslrootcert` with `sslmode=require` does. Without
-`sql_tls_ca_file`, the server is checked against the system's trusted CAs.
+`sql_tls_ca_file`, `verify-ca` and `verify-full` check the server against the
+system's trusted CAs, and `require` checks nothing.
 `openvox-ca` refuses to open the database when the two ways conflict or the
 files would go unused:
 
@@ -1461,9 +1477,9 @@ Notes:
   destination does not set `encrypt_ca_key`, and with `--force` that includes
   over an encrypted key already in the destination: `migrate` does not refuse
   it, as `import` does, and says nothing. Set `encrypt_ca_key` in
-  `--dest-config` to keep that destination's key encrypted. See [backward
-  compatibility](ca-key-security.md#backward-compatibility) for encrypting an
-  existing key this way.
+  `--dest-config` to keep that destination's key encrypted. See [encrypting a
+  key that already exists](ca-key-security.md#encrypting-a-key-that-already-exists)
+  for doing it this way.
 - **Re-runnable.** The copy is idempotent per item; an interrupted run can be
   repeated (with `--force` if a partial CA already landed).
 - Use `--verbose` to log each item as it is copied.

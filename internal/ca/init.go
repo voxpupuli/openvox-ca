@@ -256,7 +256,7 @@ func (c *CA) Init(ctx context.Context) error {
 // cache). c.mu must be held by the caller. When the CRL is absent from the
 // backend but the cert+key loaded successfully — the common case when an
 // existing CA cert/key is mounted via an overlay against a fresh remote
-// backend — the CRL, inventory and serial counter are seeded so startup can
+// backend — the CRL, inventory and serial file are seeded so startup can
 // complete.
 //
 // That seeding is the only part of this function that takes a distributed
@@ -303,11 +303,12 @@ func (c *CA) finishLoadExisting(ctx context.Context, seed func(context.Context) 
 	return nil
 }
 
-// seedSupportingState writes the public key, CRL, inventory, and serial counter
-// that bootstrapCA would normally create, for the case where the cert+key
-// already exist (e.g. mounted via an overlay against an empty backend). It
-// takes the bootstrap lock so concurrent replicas don't race to seed, so the
-// caller must NOT already hold that lock — one that does wants
+// seedSupportingState writes the public key, CRL and inventory that
+// bootstrapCA would normally create, and the serial file kept for OpenVox
+// Server's layout (which bootstrapCA does not write), for the case where the
+// cert+key already exist (e.g. mounted via an overlay against an empty
+// backend). It takes the bootstrap lock so concurrent replicas don't race to
+// seed, so the caller must NOT already hold that lock — one that does wants
 // seedSupportingStateLocked below, because WithLock is not reentrant.
 func (c *CA) seedSupportingState(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
@@ -503,7 +504,7 @@ func (c *CA) warnPlaintextKey() {
 	}
 	slog.Warn("encrypt_ca_key is set, but the stored CA key is not encrypted: "+
 		"the setting applies only when a CA key is created and does not re-encrypt an existing one; "+
-		"see \"Backward compatibility\" in docs/ca-key-security.md", args...)
+		"see \"Encrypting a key that already exists\" in docs/ca-key-security.md", args...)
 }
 
 func (c *CA) bootstrapCA(ctx context.Context) error {

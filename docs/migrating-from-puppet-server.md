@@ -146,7 +146,7 @@ openvox-ca-ctl import \
   --cadir       "$NEW_CADIR" \
   --cert-bundle "$CA_CERT" \
   --private-key "$CA_KEY" \
-  --crl-chain   "$CA_CRL"   # only X509 CRL blocks; anything else is refused
+  --crl-chain   "$CA_CRL"   # every X509 CRL block must parse; other PEM blocks are ignored
 
 cp "$PUPPET_SSL/ca/signed/"*.pem "$NEW_CADIR/signed/"
 cp "$PUPPET_SSL/ca/inventory.txt" "$NEW_CADIR/inventory.txt"
@@ -220,8 +220,8 @@ the shipped mixin alerts on it.
 
 Re-import is also not signalled to consumers: the Kubernetes exporter republishes
 on CRL notifications, which the import path deliberately does not send. After a
-live ancestor refresh, run `openvox-ca-ctl reissue-crl` or restart to republish
-the exported copies.
+re-import, start the CA, or run `openvox-ca-ctl reissue-crl` once it is running,
+to republish the exported copies.
 
 ## Step 6: Disable the built-in CA
 
@@ -332,10 +332,12 @@ next time it mints.
 # Check the CA is serving
 curl -sfk https://openvox-ca.example.com:8140/puppet-ca/v1/certificate/ca | head -1
 
-# List all certificates
+# List all certificates, as the admin named by --puppet-server in step 7
 openvox-ca-ctl \
-  --server-url https://openvox-ca.example.com:8140 \
-  --ca-cert "$NEW_CADIR/ca_crt.pem" \
+  --server-url  https://openvox-ca.example.com:8140 \
+  --ca-cert     "$NEW_CADIR/ca_crt.pem" \
+  --client-cert "$PUPPET_SSL/certs/puppet-master.example.com.pem" \
+  --client-key  "$PUPPET_SSL/private_keys/puppet-master.example.com.pem" \
   list --all
 
 # Run a puppet agent to verify connectivity
@@ -375,8 +377,10 @@ Some limits worth knowing before you rely on re-import as a refresh mechanism.
 > attribute names the server's own processes (see
 > [log output](configuration.md#log-output)).
 >
-> Running `import` with no `--crl-chain` writes nothing and still performs both
-> checks, so it is a safe way to ask whether the chain you are serving is sound.
+> Running `import` with no `--crl-chain` leaves the stored CRL chain as it is
+> and still performs both checks on it. It is not read-only: it rewrites the CA
+> key and certificate from `--private-key` and `--cert-bundle`, so give it the
+> stored ones, and it runs only while the CA is stopped.
 >
 > **`import` writes to a local filesystem directory only.** It takes `--cadir` and
 > constructs filesystem storage directly; unlike `migrate` it has no
@@ -467,8 +471,8 @@ reconciles what two processes would each hold in memory (see
 
 Re-import is also not signalled to consumers: the Kubernetes exporter republishes
 on CRL notifications, which the import path deliberately does not send. After a
-live ancestor refresh, run `openvox-ca-ctl reissue-crl` or restart to republish
-the exported copies.
+re-import, start the CA, or run `openvox-ca-ctl reissue-crl` once it is running,
+to republish the exported copies.
 
 ## Directory layout mapping
 
@@ -544,9 +548,10 @@ of preference:
    which needs no access to the raw CA key and so works under
    `ca_key_provider: openbao` and `encrypt_ca_key` as well as with a key file.
    The reason to prefer option 1 is not availability but withdrawal: an
-   allow-list entry is taken back by editing a file and restarting, whereas this
-   grant is baked into a certificate and comes back only by revoking every live
-   serial for that subject *and* restarting the server. It also has no effect if
+   allow-list entry is withdrawn by editing `--puppet-server-file` and
+   reloading (or by a restart, for a CN given with `--puppet-server`), whereas
+   this grant is baked into a certificate and comes back only by revoking every
+   live serial for that subject. It also has no effect if
    `--no-pp-cli-auth` / `no_pp_cli_auth: true` is set. Grants full admin.
 
 Separately, **`allow_public_status: true`** exists if agents must poll status
@@ -565,14 +570,14 @@ holds, so on a replica that has not yet synced a revoked certificate gets past
 the middleware and is refused here instead — `403 access denied` either way.
 That is deliberate, and it is why revoking cannot be outrun by renewing.
 
-The issuer requirement is reachable once a `client_ca` entry is configured: the
-middleware then trusts a second issuer for authentication, while renewal stays
-scoped to this CA's own namespace. A foreign certificate authenticates, may be
-an administrator of its own domain, and is still answered `403 certificate not
-eligible for renewal` — renewal reissues under our authority using the presented
-certificate's subject, which is only safe for names we assigned. With no
-`client_ca` configured there is one trust domain and the requirement is
-unreachable.
+The issuer requirement is a defence in depth that no shipped configuration
+reaches. With a `client_ca` entry the middleware trusts a second issuer for
+authentication, but renewal stays scoped to this CA's own namespace: a foreign
+certificate authenticates, may be an administrator of its own domain, and is
+refused renewal by the middleware with `403 access denied`, logged as
+`Auth: rejecting a foreign client certificate for an own-CA operation` —
+renewal reissues under our authority using the presented certificate's subject,
+which is only safe for names we assigned.
 
 The third is a defence-in-depth invariant on the internal API rather than
 something a request can trip: the HTTP handler derives the subject from the
@@ -595,10 +600,10 @@ Those agents must re-enrol.
 
 **There is no opt-out**, and none is planned: the gate is what stops this CA
 reissuing under its own authority for a name it never assigned, so re-enrolment
-is the resolution. When the CA's own refusal is reached — which takes a second
-trusted issuer, as above — it logs `Renewal rejected: certificate not eligible`,
-or `Auto-renewal rejected: certificate not eligible` for the empty-body form,
-each with the `subject` and the reason in `error`.
+is the resolution. The CA's own issuer refusal, which no shipped configuration
+reaches (see above), would log `Renewal rejected: certificate not eligible`, or
+`Auto-renewal rejected: certificate not eligible` for the empty-body form, each
+with the `subject` and the reason in `error`.
 
 ## CLI command mapping
 
@@ -720,8 +725,7 @@ openvox-ca generate --cadir "$NEW_CADIR" --certname admin-cli \
 Run it on the CA host, against the server's own configuration. No running
 server, no admin certificate, and no API — and on the filesystem backend this
 guide configures, **stop the CA first if it is already running**: `generate`
-cannot coordinate with it, and a concurrent write can corrupt the inventory
-integrity record (see
+is refused while a server holds the store, and names the process holding it (see
 [running alongside a live server](operator-cli.md#running-alongside-a-live-server)).
 During the migration itself this costs nothing, because the new CA has not been
 started yet. `--cadir` is spelled out because this
@@ -747,9 +751,10 @@ than issuing a certificate that would grant nothing.
 
 Alternatively, use the `--puppet-server` flag to grant admin access by CN
 without needing the `pp_cli_auth` extension at all. Prefer it where the caller
-has a stable CN: an allow-list entry is withdrawn by editing a file and
-restarting, whereas this grant is withdrawn only by revoking the certificate and
-restarting every replica.
+has a stable CN: an allow-list entry is withdrawn by editing
+`--puppet-server-file` and reloading, or by a restart for a CN given with
+`--puppet-server`, whereas this grant is withdrawn only by revoking the
+certificate.
 
 #### Certificates you already minted with openssl
 
@@ -769,12 +774,12 @@ openvox-ca-ctl import-cert --certname admin-tool --cert-file admin.crt
 # 2. It is now in the inventory and revocable by name.
 openvox-ca-ctl revoke --certname admin-tool
 
-# 3. Restart every replica so the revocation is honoured.
+# 3. Allow one crl_sync_interval_sec (60s by default) for every replica to
+#    reload the CRL; no restart is needed.
 #
 # 4. Stop the CA before re-minting. On the filesystem backend this guide
-#    configures, generate does not coordinate with a running server, and a
-#    concurrent write can corrupt the inventory integrity record so the server
-#    will not restart. See docs/operator-cli.md#running-alongside-a-live-server.
+#    configures, generate is refused while a server holds the store.
+#    See docs/operator-cli.md#running-alongside-a-live-server.
 systemctl stop openvox-ca
 
 openvox-ca generate --cadir "$NEW_CADIR" --certname admin-tool \
@@ -854,10 +859,8 @@ OpenVox Server finds the certificates openvox-ca issued and revoked, and can
 list, revoke and clean them. That holds while openvox-ca has run as OpenVox
 Server's user and kept the CA key as a plain file in the directory; see
 [Sharing the cadir with OpenVox Server](storage-backends.md#sharing-the-cadir-with-openvox-server).
-After an import into a separate directory (step 5), that directory belongs to
-openvox-ca's own user and its key and inventory are `0600`. Give it to
-OpenVox Server's user first (`chown -R puppet:puppet "$NEW_CADIR"`), then
-point OpenVox Server's `cadir` at it or copy it back over the original. If the
+After an import into a separate directory (step 5), point OpenVox Server's
+`cadir` at it or copy it back over the original. If the
 import used `--encrypt-ca-key`, the directory's key is encrypted and OpenVox
 Server cannot sign with it. Before pointing OpenVox Server at the directory,
 replace its `ca_key.pem` with the original plaintext key (from `$PUPPET_SSL`,

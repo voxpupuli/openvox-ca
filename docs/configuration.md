@@ -43,6 +43,10 @@ re-asserting inventory integrity on a CA that will not start.
 | `--storage-backend` | `filesystem` | Storage backend for CA state: `filesystem`, `sqlite`, `postgres`, `mysql`, `etcd`, or `redis`. See [storage backends](storage-backends.md) |
 | `--etcd-endpoints` | `""` | Comma-separated etcd endpoints (used when `--storage-backend etcd`) |
 | `--etcd-key-prefix` | `/puppet-ca` | etcd key namespace for this CA |
+| `--redis-addrs` | `""` | Comma-separated Redis/Valkey addresses for direct connections (used when `--storage-backend redis`) |
+| `--redis-sentinel-master-name` | `""` | Redis Sentinel primary name; set to enable Sentinel-managed failover |
+| `--redis-sentinel-addrs` | `""` | Comma-separated Redis Sentinel addresses |
+| `--redis-key-prefix` | `puppet-ca` | Redis key namespace for this CA |
 | `--sql-dsn` | `""` | SQL data source name (used when `--storage-backend` is `sqlite`, `postgres` or `mysql`). Do not put a password here: use `--sql-dsn-file` instead. See [keeping the database password private](storage-backends.md#keeping-the-database-password-private) |
 | `--sql-dsn-file` | `""` | Path to a file containing the SQL data source name (first line used). Mutually exclusive with `--sql-dsn` |
 | `--ca-cert-file` | `""` | Keep the CA certificate at this local path regardless of backend |
@@ -55,7 +59,8 @@ re-asserting inventory integrity on a CA that will not start.
 
 ## Precedence
 
-All flags can be set via a YAML config file or environment variables. Precedence
+All flags except `--daemon` and `--single-process` can be set via a YAML config
+file or environment variables. Precedence
 (highest → lowest): **CLI flag** → **environment variable** → **config file** → **built-in default**.
 
 That ordering applies to each setting on its own. `sql_dsn` and `sql_dsn_file`
@@ -295,6 +300,10 @@ Environment variables mirror the CLI flags:
 | `--storage-backend` | `OPENVOX_CA_STORAGE_BACKEND` |
 | `--etcd-endpoints` | `OPENVOX_CA_ETCD_ENDPOINTS` |
 | `--etcd-key-prefix` | `OPENVOX_CA_ETCD_KEY_PREFIX` |
+| `--redis-addrs` | `OPENVOX_CA_REDIS_ADDRS` |
+| `--redis-sentinel-master-name` | `OPENVOX_CA_REDIS_SENTINEL_MASTER_NAME` |
+| `--redis-sentinel-addrs` | `OPENVOX_CA_REDIS_SENTINEL_ADDRS` |
+| `--redis-key-prefix` | `OPENVOX_CA_REDIS_KEY_PREFIX` |
 | `--sql-dsn` | `OPENVOX_CA_SQL_DSN` |
 | `--sql-dsn-file` | `OPENVOX_CA_SQL_DSN_FILE` |
 | `--ca-cert-file` | `OPENVOX_CA_CA_CERT_FILE` |
@@ -374,6 +383,9 @@ A database password needs the same care. Give it in `--sql-dsn-file`,
 > **Note:** `--daemon` is intentionally excluded from config file and environment
 > variable support because `OPENVOX_CA_DAEMON` is used internally as the daemon fork
 > signal.
+>
+> `--single-process` likewise has no config key or environment variable: it is a
+> flag only.
 
 Boolean env vars accept `1`, `t`, `T`, `true`, `TRUE` or `True` to enable, and
 `0`, `f`, `F`, `false`, `FALSE` or `False` to disable: the values Go's
@@ -789,9 +801,11 @@ look:
 | **larger than 4 MiB** | the chain already published, unchanged | Refused rather than truncated: a half-read PEM blob would silently drop CRLs. A real chain is a handful of CRLs. |
 | **holding more than 64 CRLs** | the chain already published, unchanged | Refused. The byte bound does not cover this: one ancestor with a long revocation list is legitimately large, while many small CRLs are what cost, since each one's signer is resolved by trial verification against the whole CA bundle while the CRL lock is held. A chain is one CRL per ancestor, so more than a couple of dozen means a directory concatenated by accident or a file appended to instead of replaced. |
 
-> **The one revocation this does not block is auto-renewal's.** When an agent
-> renews, the CA revokes the certificate it just replaced (`revoke_on_auto_renew`,
-> on by default) on a best-effort basis: a failure there is logged
+> **The one revocation this does not block is auto-renewal's, under
+> `superseded_cert_revoke_after_sec: 0`.** When an agent renews with that
+> setting, the CA revokes the certificate it just replaced
+> (`revoke_on_auto_renew`, on by default) inside the renewal, on a best-effort
+> basis: a failure there is logged
 > (`AutoRenew: failed to retire replaced certificate`) and the renewal is allowed
 > to stand, with no retry. So a chain file that is unreadable at that moment does
 > not block the renewal — it skips that one revocation permanently, and the
@@ -801,6 +815,12 @@ look:
 > revoking by subject will not reach it — the replacement is what makes it a
 > renewal, so `revoke --certname` retires that instead. Retire it with
 > `openvox-ca-ctl revoke --serial <hex>` if the window mattered.
+>
+> Under the default 24-hour window the renewal only records the predecessor and
+> touches neither the CRL nor the chain file. The revocation comes later, from
+> the [superseded sweep](#delayed-supersession), and an unreadable chain file
+> makes that sweep fail and retry, holding back every due revocation until the
+> file is fixed; `openvoxca_supersede_failures_total` counts it.
 
 **Write the file atomically** — write to a temporary path, then rename. A read
 that catches a `cat >` mid-write sees a file that does not end on a PEM block
@@ -1796,6 +1816,7 @@ the certificates can undo. The server refuses to start when a `cert`, `key` or
 | `tls_cert`, `tls_key` | the pair the CA presents on its own listener |
 | `serving_cert.store.files.cert`, `.key` | the pair the CA issues for its own listener, when it self-provisions into files. Reserved only while `serving_cert` uses a file store. Its `ca` chain file is deliberately **not** reserved, for the same reason two managed entries may share one: every entry writes the same chain from the same source and none reads it back, so a shared chain file is the ordinary shared-host layout. Sharing it with a `managed_certs` entry's own `ca` is allowed; pointing it at that entry's `cert` or `key` is refused at startup, because the chain would overwrite the component's material on every issuance |
 | `ca_key_passphrase_file` | what unlocks the CA key |
+| `sql_dsn_file` | the file holding the database DSN, password included, without which the CA cannot open its store at the next start |
 | `crl_chain_file` | the upstream CRL bundle the CA re-reads and republishes |
 | `logfile` | where the CA writes its log |
 | `puppet_server_file` | the admin allow list |
@@ -1956,8 +1977,11 @@ serving_cert:
 own key and certificate.** The example above is written for a fresh install. On
 an existing deployment, narrowing `cadir` from `/var/lib/openvox-ca` to
 `/var/lib/openvox-ca/ca` points the CA at a directory that does not contain the
-CA tree, and it will refuse to start rather than issue from an empty one. Two
-ways round it:
+CA tree, and nothing notices: finding no CA there, it bootstraps a new one, and
+every agent that trusts the old CA stops trusting it. With `ca_cert_file` and
+`ca_key_file` set it keeps its key but starts from an empty inventory and an
+empty CRL, so every certificate revoked under the old `cadir`, administrator
+credentials included, authenticates again. Two ways round it:
 
 - **Move the tree.** Stop the CA, `mv` the contents of the old `cadir` into the
   new one, then change the setting. Nothing rewrites paths inside the inventory,
@@ -2993,11 +3017,10 @@ share under the Go runtime's own footprint is arithmetically valid and
 operationally a process that collects continuously. A `memory_budget_percent`
 that is non-zero and outside 1-100 is likewise rejected. In each of these cases
 the built-in default is used and **the launcher logs a warning naming the key and
-the value it ignored**, so a mistyped reservation does not pass unnoticed. One
-value escapes that promise: an `OPENVOX_CA_MEMORY_BUDGET_PERCENT` that is not an
-integer at all is discarded during parsing, before the launcher can see it, like
-every other numeric environment variable here, and the default is used
-silently.
+the value it ignored**, so a mistyped reservation does not pass unnoticed. An
+`OPENVOX_CA_MEMORY_BUDGET_PERCENT` that is not an integer at all never reaches
+the launcher: like every integer environment variable, it refuses startup with
+an error naming the variable (see [environment variables](#environment-variables)).
 
 Nothing is divided at all in three cases. One is logged as a **warning**,
 because the operator stated a ceiling and did not get the division: a budget too
@@ -3076,6 +3099,8 @@ Output that does not go through the logger carries no `role`:
   names it.
 - Everything `openvox-ca-ctl` logs. It is a separate program, not one of the
   server's processes, and its records have no `role`.
+- Records from the offline `csr` and `import-ca-cert`, which install no logger
+  and write to stderr through Go's default logger.
 
 ### Audit events
 
@@ -3138,8 +3163,8 @@ Everything else — the listen address, the storage backend, CA key custody, CA 
 
 Two file-backed inputs are consulted live, with no signal needed at all: the autosign allowlist or executable is read on every CSR (an executable's path is resolved and [checked](#the-autosign-executables-path) again each time), and the OpenBao AppRole `role_id`/`secret_id` files are read on every login (see [OpenBao Transit-engine CA key](openbao-transit.md)). Editing those takes effect on the next request; only the settings naming them are fixed at startup.
 
-**A self-provisioned serving certificate is the third thing that changes without
-a restart, and it needs no signal either.** With
+**A self-provisioned serving certificate also changes without a restart, and
+needs no signal either.** With
 [`serving_cert`](#the-cas-own-serving-certificate) the certificate is renewed by
 the reconcile loop and installed on the listener from there, so `SIGHUP` is a
 no-op for it and the table above does not apply — `tls_cert` / `tls_key` keep

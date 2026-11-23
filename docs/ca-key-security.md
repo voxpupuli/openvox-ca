@@ -180,10 +180,9 @@ is what lets a signing slot come back.
 
 That deadline is a backstop, not a tuning, and it bounds *this caller's wait
 rather than the signer's work*: the RPC layer has no cancellation, so an
-abandoned call leaves the child still signing and its reply is discarded. If
-you have raised OpenBao's login timeout substantially, note that the signer
-child's own call is bounded at roughly twice it — well inside two minutes at
-the 10s default, but worth knowing the ceiling exists.
+abandoned call leaves the child still signing and its reply is discarded. The
+signer child's own call is bounded at roughly twice the OpenBao client's fixed
+10-second login timeout, well inside two minutes.
 
 An abandoned call also leaves a small entry in the RPC client's pending table,
 which is only reclaimed if a reply eventually arrives. Against a signer that is
@@ -287,10 +286,10 @@ openvox-ca-ctl setup --cadir /srv/openvox-ca --encrypt-ca-key \
   --ca-key-passphrase-file /etc/openvox-ca/key-passphrase
 ```
 
-### Backward compatibility
+### Encrypting a key that already exists
 
-Existing CAs with unencrypted keys continue to work without changes, and the
-server's `--encrypt-ca-key` (`encrypt_ca_key`) affects new CA bootstraps only:
+A CA whose key is stored unencrypted works without changes, and the server's
+`--encrypt-ca-key` (`encrypt_ca_key`) affects new CA bootstraps only:
 the server does not re-encrypt a key that already exists. The offline
 `openvox-ca-ctl` commands below can. A CA started with `encrypt_ca_key` set
 whose stored key is plaintext logs a warning saying so, once per start, from

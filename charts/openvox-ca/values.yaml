@@ -8,8 +8,10 @@
 # side — volumes, RBAC, ports — *and* set the matching config keys for you.
 # Anything you set in `config` wins over what those blocks compute — except
 # `port`, `cadir` and `metrics_listen`, which also shape a Kubernetes object; the
-# install is refused rather than left to diverge. Use listen.port,
-# persistence.mountPath and metrics.port for those.
+# install is refused when an override would leave that object behind: a port
+# other than listen.port, a cadir outside persistence.mountPath (a directory
+# under it is fine), or a metrics_listen without metrics.enabled or on a port
+# other than metrics.port.
 
 # -- Image ---------------------------------------------------------------------
 
@@ -131,6 +133,9 @@ config: {}
 #   * `config`, `verbosity`, `listen.host`, `puppetServers`, `autosign`,
 #     `extraConfigFiles` and `kubernetesExport.targets` stop being written
 #     anywhere — set the equivalents in your own ConfigMap.
+#   * Nothing writes persistence.mountPath as `cadir` either, and the server
+#     does not start without one: set `cadir` to the mount point, or a
+#     directory under it, in your own config.yaml.
 #   * The tls/ca/caKeyPassphrase Secrets are still *mounted*, but nothing points
 #     the server at them; write the paths into your config.yaml yourself.
 #   * `configChecksumAnnotation` goes inert, so pods do not roll on a change.
@@ -145,8 +150,10 @@ config: {}
 #     the opposite: that Secret holds the certificate the listener presents,
 #     so the CA does not start at all. Create that Role yourself.
 #
-# Two values keep working and must be kept in step with your own config.yaml by
-# hand, because they shape the pod rather than the config file:
+# Three values keep working and must be kept in step with your own config.yaml
+# by hand, because they shape the pod rather than the config file:
+#   * `persistence.mountPath` is where the volume is mounted; your config.yaml's
+#     `cadir` must be it or a directory under it, as above.
 #   * `listen.port` is the container port, the target of all three probes, and
 #     what the Service forwards to. Set it to whatever your config.yaml's
 #     `port` says or the pod never becomes ready.
@@ -436,8 +443,8 @@ replicaCount: 1
 # restating it: Recreate while persistence is enabled, because the default cadir
 # volume is a ReadWriteOnce PVC that a surging replacement pod could not mount —
 # and RollingUpdate once persistence.enabled is false, where the CA's state is in
-# an external backend and there is nothing left to serialise on. Leaving Recreate
-# fixed there bought a full outage on every upgrade for no reason.
+# an external backend and there is nothing left to serialise on. Recreate there
+# would cost a full outage on every upgrade for no reason.
 #
 # Set it explicitly to override either way — a ReadWriteMany volume can roll
 # while persistence is on, for instance:
@@ -710,10 +717,11 @@ extraVolumeMounts: []
 
 serviceAccount:
   create: true
-  # Required when kubernetesExport.rbac.create is on and create is false: the
-  # chart refuses to bind the export Role to the namespace's default
-  # ServiceAccount, which would grant create/patch on Secrets to every pod in
-  # the namespace.
+  # Required when create is false and the chart renders the export Role
+  # (kubernetesExport.rbac.create) or the managed-certificate Role
+  # (managedCerts.rbac.create): it refuses to bind either to the namespace's
+  # default ServiceAccount, which would grant access to those Secrets to every
+  # pod in the namespace.
   name: ""
   annotations: {}
   labels: {}
@@ -857,10 +865,10 @@ networkPolicy:
   # POD, so any initContainers or extraContainers you add are bound by it too
   # and need their own destinations listed. Typically: your storage backend,
   # OpenBao if the key lives there, anything your sidecars fetch, and the
-  # Kubernetes API when kubernetesExport is in use or a managed certificate uses
-  # a Secret store (a file store needs none) -- OpenBao's kubernetes auth needs
-  # no API egress, since the pod presents a mounted token and OpenBao does the
-  # TokenReview.
+  # Kubernetes API when kubernetesExport is in use or a managed certificate or
+  # config.serving_cert uses a Secret store (a file store needs none) --
+  # OpenBao's kubernetes auth needs no API egress, since the pod presents a
+  # mounted token and OpenBao does the TokenReview.
   egress:
     enabled: false
     # Where DNS (port 53, UDP and TCP) may go: the cluster DNS pods, matched by
