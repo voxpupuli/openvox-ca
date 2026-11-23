@@ -379,6 +379,21 @@ var _ = Describe("Generate with LeafKeyConfig", func() {
 		Expect(rsaKey.N.BitLen()).To(Equal(2048), "leaf_key_algo: rsa alone must take the leaf default, not the CA's")
 	})
 
+	It("generates ECDSA P-256 when the algorithm is set with no size", func() {
+		// docs/configuration.md states it: an algorithm set with no size takes
+		// that algorithm's default curve.
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA}
+
+		result, err := myCA.Generate(context.Background(), "leaf-ecdsa-nosize", nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		keyBlock, _ := pem.Decode(result.PrivateKeyPEM)
+		Expect(keyBlock).NotTo(BeNil())
+		ecKey, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ecKey.Curve).To(Equal(elliptic.P256()))
+	})
+
 	It("generates ECDSA P-256 when LeafKeyConfig={ECDSA,256}", func() {
 		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
 
