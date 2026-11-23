@@ -1715,10 +1715,8 @@ func (c *CA) Renew(ctx context.Context, subject string, csrPEM []byte, presented
 		// here shouldn't undo the renewal the caller is waiting on.
 		// Lock ordering: subject-lock (held) -> CRL-lock -> c.mu, matching Clean.
 		if err := c.supersedeReplaced(ctx, subject, oldSerial); err != nil {
-			// The failure is already counted — into crlUpdateFailures by
-			// revokeSerialLocked/signCRLLocked on the immediate path, and into
-			// supersedeFailures on the delayed one. Here we only note it and
-			// let the renewal stand.
+			// The failure is already counted, into supersedeFailures on
+			// either path. Here we only note it and let the renewal stand.
 			slog.Warn("Renew: failed to retire replaced certificate", "subject", subject, "serial", oldSerial, "error", err)
 		}
 		return nil
@@ -1864,9 +1862,8 @@ func (c *CA) AutoRenew(ctx context.Context, presentedCert *x509.Certificate) ([]
 		// here shouldn't undo the renewal the agent is waiting on.
 		// Lock ordering: subject-lock (held) -> CRL-lock -> c.mu, matching Clean.
 		if err := c.supersedeReplaced(ctx, subject, oldSerial); err != nil {
-			// Counted already — crlUpdateFailures on the immediate path,
-			// supersedeFailures on the delayed one. Here we only note it and
-			// let the renewal stand.
+			// Counted already, into supersedeFailures on either path. Here we
+			// only note it and let the renewal stand.
 			slog.Warn("AutoRenew: failed to retire replaced certificate", "subject", subject, "serial", oldSerial, "error", err)
 		}
 		return nil

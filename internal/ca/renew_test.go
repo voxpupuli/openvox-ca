@@ -194,6 +194,9 @@ var _ = Describe("CA Renew", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(revoked).To(BeTrue(),
 			"the pre-renewal serial must be revoked so it can no longer authenticate or pass OCSP/CRL checks")
+		Expect(myCA.SupersedeFailures()).To(BeZero(),
+			"a revocation that succeeded must not count as a supersede failure; "+
+				"OpenVoxCASupersedeFailing fires on one")
 	})
 
 	It("still returns the renewed certificate when revoking the replaced one fails", func() {
@@ -216,6 +219,11 @@ var _ = Describe("CA Renew", func() {
 			"the renewal must still issue a fresh serial")
 		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1),
 			"the best-effort revoke failure must be counted for alerting")
+		// And as a replaced certificate left valid, which is what
+		// OpenVoxCASupersedeFailing fires on at one failure: the CRL alert
+		// above needs two in its window (#679).
+		Expect(myCA.SupersedeFailures()).To(BeNumerically("==", 1),
+			"openvoxca_supersede_failures_total must count an immediate revocation that failed")
 	})
 
 	It("renews a subject with no prior certificate in storage or inventory", func() {
@@ -695,5 +703,7 @@ var _ = Describe("CA AutoRenew", func() {
 			"the auto-renewal must still issue a fresh serial")
 		Expect(myCA.CRLUpdateFailures()).To(BeNumerically("==", 1),
 			"the best-effort revoke failure must be counted for alerting")
+		Expect(myCA.SupersedeFailures()).To(BeNumerically("==", 1),
+			"openvoxca_supersede_failures_total must count an immediate revocation that failed")
 	})
 })

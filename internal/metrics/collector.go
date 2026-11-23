@@ -139,6 +139,7 @@ type Collector struct {
 	leafNotBefore         *prometheus.Desc
 	leafNotAfter          *prometheus.Desc
 	managedCertConfigured *prometheus.Desc
+	managedCertFailing    *prometheus.Desc
 	leafStateCount        *prometheus.Desc
 }
 
@@ -191,7 +192,10 @@ func NewCollector(c *ca.CA, opts ...Option) *Collector {
 				"revoke path only, a malformed serial or a failed inventory read while resolving the "+
 				"subject's serial. Not every revocation that missed the CRL lands here: one refused "+
 				"at a cross-node lock acquisition, or at a same-host one on filesystem and SQLite, "+
-				"fails ahead of any CRL work and is logged only, so this is a lower bound, while on "+
+				"fails ahead of any CRL work and is not counted here, so this is a lower bound (where "+
+				"the CA swallows such a failure, the renewal and reissue retire steps count it on "+
+				"openvoxca_supersede_failures_total and a clean's revoke step on "+
+				"openvoxca_clean_failures_total), while on "+
 				"filesystem and SQLite a revocation that queued past lockTimeout behind another "+
 				"goroutine in this process fails at that inventory read and is counted. A rising value means the "+
 				"CRL is not being maintained; for revocations it means a superseded certificate may "+
@@ -268,19 +272,19 @@ func NewCollector(c *ca.CA, opts ...Option) *Collector {
 			nil, nil),
 		supersedeFailures: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "supersede", "failures_total"),
-			"Total failures to schedule or carry out the revocation of a certificate a renewal "+
-				"replaced: a supersession the renewal path could not record, a pending-revocation "+
-				"list that could not be read or parsed, a sweep pass that could not take the CRL "+
-				"lock or write the list back, and each pass that left an entry unrevoked or "+
-				"discarded one whose serial it could never revoke. One pass counts "+
-				"once however many entries it failed on. Only where "+
-				"superseded_cert_revoke_after_sec is 0 is nothing recorded — the revocation then "+
-				"happens inside the renewal, and a failure there lands in "+
-				"openvoxca_crl_update_failures_total instead — so this stays flat there, with one "+
-				"exception: the sweep, every renewal and every subject revocation read the pending "+
-				"list whatever the setting says, and a store that cannot serve that key raises "+
-				"this even with the window closed. A rising value means a certificate a renewal "+
-				"replaced may still be a valid credential.",
+			"Total failures to retire a certificate that a renewal or a managed certificate's "+
+				"reissue replaced: an immediate revocation that did not happen, whatever stopped it, "+
+				"the CRL lock included (where superseded_cert_revoke_after_sec, or a managed entry's "+
+				"revoke_after, is 0); a certificate a managed reissue signed and could not store, "+
+				"whose own revocation then failed; a supersession that could not be recorded; a "+
+				"sweep pass that could not take the CRL lock or write the list back; each pass "+
+				"that left an entry "+
+				"unrevoked or discarded one whose serial it could never revoke; and a "+
+				"pending-revocation list that could not be read or parsed, which the sweep, every "+
+				"renewal and every subject revocation read whatever the setting says. One pass "+
+				"counts once however many entries it failed on. An immediate revocation that "+
+				"reached the CRL work counts in openvoxca_crl_update_failures_total too. A rising "+
+				"value means a replaced certificate may still be a valid credential.",
 			nil, nil),
 		supersedePending: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "supersede", "pending"),
@@ -412,6 +416,15 @@ func NewCollector(c *ca.CA, opts ...Option) *Collector {
 				"Published whether or not the certificate exists yet, so that an entry which "+
 				"has never issued is a value rather than an absence.",
 			[]string{"subject"}, nil),
+		managedCertFailing: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "managed_certificate", "reconcile_failing"),
+			"1 while this process's latest attempt to reconcile a configured managed certificate "+
+				"failed — its store could not be read or written, its lock could not be taken, or "+
+				"it could not be signed — and 0 otherwise, including before the first attempt. A "+
+				"failed store write leaves the previous certificate in service, and later passes "+
+				"are withheld on a backoff of up to a day, which keeps this at 1 until a write "+
+				"succeeds. One series per configured entry.",
+			[]string{"subject"}, nil),
 	}
 	for _, opt := range opts {
 		opt(col)
@@ -460,6 +473,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.leafNotBefore
 	ch <- c.leafNotAfter
 	ch <- c.managedCertConfigured
+	ch <- c.managedCertFailing
 	ch <- c.leafStateCount
 }
 
@@ -569,6 +583,13 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	for i := range c.ca.ManagedCerts {
 		ch <- prometheus.MustNewConstMetric(c.managedCertConfigured, prometheus.GaugeValue, 1,
 			c.ca.ManagedCerts[i].Spec.Subject)
+	}
+	// In-process state like the counters above, and here for the same reason
+	// as the configured series: a storage outage is a likely cause of the
+	// failures this reports, so the gather failing must not take it away.
+	for subject, failing := range c.ca.ManagedReconcileFailing() {
+		ch <- prometheus.MustNewConstMetric(c.managedCertFailing, prometheus.GaugeValue,
+			boolToFloat(failing), subject)
 	}
 
 	// Readiness and the CA certificate are in-process state as well, so they

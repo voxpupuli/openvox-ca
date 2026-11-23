@@ -28,8 +28,9 @@ signer process has no network exposure).
 
 > **Security:** the certificate metrics expose node hostnames (certificate
 > subjects) as label values. That includes
-> `openvoxca_managed_certificate_configured`, whose subjects come from
-> configuration — so it names a component the CA is *meant* to issue for even
+> `openvoxca_managed_certificate_configured` and
+> `openvoxca_managed_certificate_reconcile_failing`, whose subjects come from
+> configuration — so they name a component the CA is *meant* to issue for even
 > before any certificate exists. Bind the exporter to loopback or a trusted
 > management network — e.g. `127.0.0.1:9140` scraped via a node exporter sidecar,
 > or a dedicated interface protected by a network policy — rather than a public
@@ -183,8 +184,9 @@ expiry alert to firing on its own.
 everything else, including `openvoxca_ca_ready`, the three
 `openvoxca_ca_certificate_*` series, `openvoxca_crl_cached_number`, every
 `*_failures_total` counter, the signing-bound and OCSP-index gauges,
-`openvoxca_managed_certificate_configured`, and the three `openvoxca_collector_*`
-series themselves.
+`openvoxca_managed_certificate_configured`,
+`openvoxca_managed_certificate_reconcile_failing`, and the three
+`openvoxca_collector_*` series themselves.
 
 A rule that combines a held series with a live one sees mixed freshness during
 an outage, which is why the lists above go series by series. Two consequences
@@ -286,7 +288,10 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > revoke path is the shared revoke-by-serial code, so it also covers
 > `DELETE /certificate_status` (`puppet cert clean`) and the best-effort
 > revocation of a superseded certificate on renewal, which on a busy fleet is
-> the likeliest source of a rising count: grep for `Renew:` /
+> the likeliest source of a rising count. That last one is counted on
+> [`openvoxca_supersede_failures_total`](#delayed-supersession) too, every arm
+> of it, and `OpenVoxCASupersedeFailing` fires on one. To find the
+> certificate, grep for `Renew:` /
 > `AutoRenew:` / `RenewStored:` / `ReconcileManaged: failed to retire replaced
 > certificate` alongside the `Clean:` warnings. All four *renewal* warnings name
 > the serial,
@@ -328,6 +333,11 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > (`ReconcileSuperseded`),
 > `ReconcileManaged`'s immediate revoke of a certificate whose store write
 > failed after signing, and `ImportCA`, are not counted on that arm at all.
+> Of those, the retire step, the sweep and `ReconcileManaged`'s revoke of a
+> certificate it could not store are counted on
+> [`openvoxca_supersede_failures_total`](#delayed-supersession) instead, and the
+> revoke step inside `Clean` on
+> [`openvoxca_clean_failures_total`](#revocation-and-cleaning).
 >
 > The line between the two is whether the revocation is one an operator asked
 > for. A contended lock during `Clean`'s best-effort revoke is not a revocation
@@ -604,25 +614,32 @@ cleaned once more. `OpenVoxCACleanIncomplete` warns on a single failure. The
 
 Present on every CA, and live on any CA that renews certificates, since
 [`superseded_cert_revoke_after_sec`](configuration.md#delayed-supersession)
-defaults to 24 hours. Only where it is set to `0`, and no `managed_certs` entry
-sets a non-zero `revoke_after` of its own, is nothing ever recorded — a renewal
-then revokes its predecessor inside the call, and a failure there is a
-CRL failure counted above instead — so there the gauge sits at zero and the
-counter stays flat.
+defaults to 24 hours. Where it is set to `0`, and for a managed certificate
+whose effective `revoke_after` is `0`, nothing is recorded: the renewal or
+reissue revokes its predecessor inside the call. Where that is true of every
+path — the setting is `0` and no `managed_certs` entry sets a non-zero
+`revoke_after` of its own — the gauge sits at zero. The counter still counts
+a revocation there that fails, whatever stopped it, the CRL lock included — the
+certificate stays a valid credential and nothing will try again — so
+`OpenVoxCASupersedeFailing` fires on that single failure. A failure that
+reached the CRL work is counted [above](#crl) as well, but that alert needs two
+in its window. The same goes for one more inline revocation: when a managed
+certificate's store refuses the write, the CA revokes the certificate it has
+just signed, and a failure there is counted here too.
 
-Even there, one exception, and it is the one an operator who set `0` will
-actually hit: three code paths read the pending list whatever the setting says —
-the sweep, every renewal, and every subject revocation — and each counts a list
-it could not read. A store that cannot serve the `superseded` key therefore
-raises the counter, and fires `OpenVoxCASupersedeFailing`, even with the window
-closed. The log line says which path: `Superseded-certificate revocation sweep
-failed`, `cannot determine supersession status`, or `Revoke: could not read
-pending supersessions`.
+With the window closed, the counter has one more source, and it is the one an
+operator who set `0` will most often hit: three code paths read the pending list
+whatever the setting says — the sweep, every renewal, and every subject
+revocation — and each counts a list it could not read. A store that cannot
+serve the `superseded` key therefore raises the counter, and fires
+`OpenVoxCASupersedeFailing`, even with the window closed. The log line says
+which path: `Superseded-certificate revocation sweep failed`, `cannot determine
+supersession status`, or `Revoke: could not read pending supersessions`.
 
 | Metric | Description |
 | --- | --- |
 | `openvoxca_supersede_pending` | Certificates a renewal has replaced that are still inside their overlap window and not yet revoked. Read from storage, so identical on every replica. **Absent, not zero**, when the list could not be read — zero is what a drained list reports, so an unreadable one must not report it too. |
-| `openvoxca_supersede_failures_total` | Counter of failures to schedule or carry out one of those revocations. Per-process, and resets to `0` on process restart. |
+| `openvoxca_supersede_failures_total` | Counter of failures to retire a certificate a renewal or a managed certificate's reissue replaced, immediately or after its window. Per-process, and resets to `0` on process restart. |
 
 `openvoxca_supersede_pending` is the live measure of the exposure the window
 buys: each of those certificates is a credential the CA still accepts even
@@ -630,10 +647,14 @@ though something newer has taken its place. It rises as renewals happen and
 falls as the sweep drains the list, so a value that does not fall means the
 sweep is not completing — check the failure counter.
 
-> **What the failure counter sees.** A supersession the renewal path could not
-> record (the certificate was replaced but nothing scheduled its revocation —
-> the `failed to retire replaced certificate` warning names the serial); a
-> pending list that could not be *read*, on the renewal path, in the sweep, or
+> **What the failure counter sees.** An immediate revocation that failed, where
+> the window is `0` (the certificate was replaced and stays valid — the `failed
+> to retire replaced certificate` warning names the serial); a supersession the
+> renewal path could not record (the certificate was replaced but nothing
+> scheduled its revocation — the same warning names the serial); a certificate
+> a managed reissue signed and could not store, whose own revocation then failed
+> (`A managed certificate could not be stored and could not then be revoked`
+> names the serial); a pending list that could not be *read*, on the renewal path, in the sweep, or
 > while revoking a subject; one that could not be *parsed*, in the sweep or
 > while revoking a subject — a parse failure met on the renewal path refuses
 > that renewal but is left for the sweep to count, so one corrupt blob cannot
@@ -724,23 +745,26 @@ while a gather runs can appear in that one scrape.
 
 Only present when [`managed_certs`](configuration.md#managed-certificates) or
 [`serving_cert`](configuration.md#the-cas-own-serving-certificate) is configured.
-One series per entry, whatever store it uses, published from the configuration
-rather than from anything that has happened.
+Two series per entry, whatever store it uses: one published from the
+configuration rather than from anything that has happened, and one saying how
+the entry's latest reconcile went.
 
 The CA's own serving certificate is one such entry, labelled with the CA's own
 certname, because it renews on the same loop through the same mechanism. So a
 deployment that configures no component certificates at all still publishes one
-series, and `OpenVoxCAManagedCertificateNeverIssued` covers it.
+series of each, and the alerts below cover it.
 
 | Metric | Labels | Description |
 | --- | --- | --- |
 | `openvoxca_managed_certificate_configured` | `subject` | Constant `1`, one per configured entry. |
+| `openvoxca_managed_certificate_reconcile_failing` | `subject` | `1` while this process's latest attempt to reconcile the entry failed, `0` otherwise, including before the first attempt. Per-process: every replica reconciles every entry. |
 
-**A constant is the point.** The reconcile loop's outcomes are otherwise
-ordinary certificate facts: a managed certificate is a certificate with an
-inventory row, so once one exists the leaf series above cover its expiry and
-the shipped expiry alerts cover it with no new series at all. The outcome that
-reasoning cannot reach is an entry that has *never* issued — a store that never
+**A constant is the point.** Once a managed certificate exists it is an
+ordinary certificate fact: a certificate with an inventory row, so the leaf
+series above cover its expiry and the shipped expiry alerts cover it. That
+reasoning misses two outcomes. One is a reissue that keeps failing, which
+`openvoxca_managed_certificate_reconcile_failing` reports (see below). The
+other is an entry that has *never* issued — a store that never
 accepted a write — because there is no series for a certificate that does not
 exist, and no PromQL comparison matches an absence.
 
@@ -781,28 +805,6 @@ found to be wrong without it:
   collapses every serial for the subject, so a signed certificate beside a
   revoked predecessor still satisfies the entry.
 
-**What this still does not cover.** An entry that has issued before, whose
-reissue then keeps failing, is not silent because of this rule: the CA restores
-the predecessor after a failed store write, so a signed certificate remains and
-the component keeps working. Something is logged on every pass and the ordinary
-expiry alerts take over as that predecessor ages — but there is no series that
-says "this entry's last reconcile failed", so between those two there is a
-window where only the logs show it.
-
-What gets logged changes after the first failure, so the log line to grep for
-changes with it. The first failure is free and logs the failure itself. From the
-second, the CA withholds the entry's passes — 15m, then 30m, doubling to a cap
-of 24h, cleared outright by any successful write — and each withheld pass logs
-at `WARN` with the subject, the issue reason and `retry_in`. So a persistently
-failing entry produces withholding notices rather than repeated failures, and
-`retry_in` is what tells an operator when to look again. The backoff exists
-because every failed attempt revokes the serial it had just signed: without it a
-refused store cost one revoked serial per interval, and each stays on the CRL
-until its certificate's `NotAfter` — five years for an entry with no `ttl`. Closing that needs a per-entry
-reconcile-failure series, of the shape
-`openvoxca_k8s_export_last_error_timestamp_seconds` takes for the
-exporter; openvox-ca has none yet.
-
 `max without (serial, state)` rather than `on (subject)`: it collapses the
 leaf series' per-certificate labels while keeping every target label the
 deployment attached, so the two sides match per scrape target instead of across
@@ -814,6 +816,56 @@ managed certificate may live in a Kubernetes Secret or in local files, and the
 CA's own serving certificate is a third case with different failure
 semantics again — a series shaped around Secrets would be one those could not
 use.
+
+**A reissue that keeps failing is the other series' job.** An entry that has
+issued before, whose reissue then keeps failing, is not silent because of the
+rule above: the CA restores the predecessor after a failed store write, so a
+signed certificate remains and the component keeps working, and the expiry
+alerts take over only as that predecessor ages.
+`openvoxca_managed_certificate_reconcile_failing` covers the time in between.
+It reads `1` from the first failed pass — a store that could not be read or
+written, a subject lock that could not be taken, a certificate that could not
+be signed — until a pass finds the certificate current or issues and stores a
+new one.
+
+It is a gauge of the latest outcome rather than a count of failures because of
+what happens after the first one. That failure is free and the next pass
+retries. From the second, the CA withholds the entry's passes — 15m, then 30m,
+doubling to a cap of 24h, cleared outright by any successful write — so a
+counter would rise once and then sit flat for up to a day while the entry was
+still broken. A withheld pass leaves the gauge at `1`. The backoff exists
+because every failed attempt revokes the serial it had just signed: without it
+a refused store cost one revoked serial per interval, and each stays on the CRL
+until its certificate's `NotAfter` — five years for an entry with no `ttl`.
+
+```promql
+openvoxca_managed_certificate_reconcile_failing == 1
+```
+
+The mixin ships this as `OpenVoxCAManagedCertificateReissueFailing`, a warning
+with a `for` of `managedCertReissueFailingFor` (30 minutes). That is two passes
+at the default `managed_cert_interval_sec` of 15 minutes, so the failure the next
+pass retries and clears does not fire it; raise it if you lengthen the
+interval. It fires for an entry that has never issued as well, beside
+`OpenVoxCAManagedCertificateNeverIssued`, which still covers the one case this
+series cannot see: a reconcile loop that never runs at all.
+
+Unlike that rule it is not qualified on `openvoxca_collector_scrape_success`,
+deliberately. Every pass takes its subject's lock in the CA's own storage, so an
+outage of that storage that outlasts the dwell fails every entry and fires this
+once per entry, the CA's own serving certificate included, beside
+`OpenVoxCAScrapeFailing`. That is true — no entry can renew while it lasts — but
+the cause is then the CA's storage, not each entry's store.
+
+The logs say why. The first failure logs the failure itself; each withheld pass
+logs at `WARN` with the subject, the issue reason and `retry_in`, which is when
+the CA will next try.
+
+Fixing the store does not clear the alert by itself. Only a pass that runs can
+clear the gauge, and nothing notices the fix until the next attempt, which
+`retry_in` names and which can be up to a day away. Restarting the CA retries
+at once: the backoff is held in memory per process, like the gauge, and the
+reconcile loop runs immediately at startup.
 
 **Displacement is not a gap here, though it reads like one.** When a managed
 issuance replaces a certificate the CA already held for that name, the
@@ -993,9 +1045,10 @@ the stored one (`openvoxca_crl_cached_number`,
 `openvoxca_crl_sync_failures_total`), a replica that cannot reload its OCSP
 serial index (`openvoxca_ocsp_index_sync_failures_total`, while `enable_ocsp`
 serves the responder), an inventory that fails its integrity check or cannot
-be read to check it (`openvoxca_inventory_verify_failures_total`), delayed revocations
-that were lost or could not be carried out
-(`openvoxca_supersede_failures_total`), the [upstream CRL
+be read to check it (`openvoxca_inventory_verify_failures_total`), a
+certificate a renewal or managed reissue replaced that could not be retired,
+immediately or after its window (`openvoxca_supersede_failures_total`), the
+[upstream CRL
 chain](#upstream-crl-chain) (an ancestor nearing or past its `NextUpdate`, and
 the four ways `crl_chain_file` goes wrong — unreadable, a CRL discarded, one
 rolled back, one removed — plus a file that has never been read at all),
@@ -1003,8 +1056,10 @@ rolled back, one removed — plus a file that has never been read at all),
 unusable or stale (`OpenVoxCAClientCRLUnusable`, `OpenVoxCAClientCRLRefusals` and
 `OpenVoxCAClientCRLStale`, and only where `client_ca` is configured), and
 Kubernetes export failures, file export targets that have gone stale
-(`OpenVoxCAFileExportStale`), and managed certificates that were never issued —
-all with configurable thresholds. It does **not**
+(`OpenVoxCAFileExportStale`), and managed certificates that were never issued
+or whose reissue keeps failing
+(`openvoxca_managed_certificate_reconcile_failing`) — all with configurable
+thresholds. It does **not**
 alert on the fleet-relative `openvoxca_ocsp_index_serials` comparison — that one
 is left to the operator, since it needs a `by (job)` aggregation to avoid
 fanning in across unrelated CAs and the condition it catches is not fail-open.
@@ -1053,16 +1108,16 @@ fires. To keep those silent, set the mixin's `crlUpdateThreshold` to `3` and
 
 One failure the CA does not retry falls below the CRL-update threshold: a
 best-effort revocation, which the CA logs and abandons rather than returning an
-error. The revocation in a clean is one, and is counted on its own in
+error. Each has a counter of its own that alerts at the first failure. The
+revocation in a clean is counted in
 [`openvoxca_clean_failures_total{step="revoke"}`](#revocation-and-cleaning),
-which `OpenVoxCACleanIncomplete` warns on at the first failure. The others are
-the immediate revocation of a certificate that a renewal replaced (where
-`superseded_cert_revoke_after_sec` is `0`) or that a managed certificate's
-reissue replaced (where its effective `revoke_after` is `0`). A failure there
-leaves the certificate valid, and if it is the only one in the window — a
-transient fault, or a sign- or write-only fault on a CA that is otherwise quiet
-— only its log warning reports it. See the note under [CRL](#crl) for the lines
-to grep for. With an overlap window the
-revocation is on the pending list instead, and `OpenVoxCASupersedeFailing`
-still fires on a single failure. A revocation an operator asked for is not
-abandoned: it fails with an error to the caller.
+which `OpenVoxCACleanIncomplete` warns on. The immediate revocation of a
+certificate that a renewal replaced (where `superseded_cert_revoke_after_sec`
+is `0`) or that a managed certificate's reissue replaced (where its effective
+`revoke_after` is `0`) is counted in
+[`openvoxca_supersede_failures_total`](#delayed-supersession), which
+`OpenVoxCASupersedeFailing` warns on; see the note under [CRL](#crl) for the
+lines that name the serial. So is the revocation of a certificate a managed
+reissue signed and then could not store. With an overlap window the revocation is on the
+pending list instead, and the same alert covers it. A revocation an operator
+asked for is not abandoned: it fails with an error to the caller.

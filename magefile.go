@@ -9254,6 +9254,7 @@ var publishedMixinAlerts = []string{
 	"OpenVoxCAKubernetesExportNotRunning",
 	"OpenVoxCAFileExportStale",
 	"OpenVoxCAManagedCertificateNeverIssued",
+	"OpenVoxCAManagedCertificateReissueFailing",
 }
 
 var publishedMixinConfigKeys = []string{
@@ -9289,6 +9290,7 @@ var publishedMixinConfigKeys = []string{
 	"leafExpiryCriticalSeconds",
 	"leafExpiryWarningSeconds",
 	"managedCertNeverIssuedFor",
+	"managedCertReissueFailingFor",
 	"ocspIndexSyncFor",
 	"ocspIndexSyncThreshold",
 	"ocspIndexSyncWindow",

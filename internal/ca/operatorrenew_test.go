@@ -167,6 +167,22 @@ var _ = Describe("CA RenewStored", func() {
 
 			Expect(revoked(original.SerialNumber)).To(BeTrue())
 			Expect(pending()).To(BeEmpty())
+			Expect(myCA.SupersedeFailures()).To(BeZero(),
+				"a revocation that succeeded must not count as a supersede failure; "+
+					"OpenVoxCASupersedeFailing fires on one")
+		})
+
+		It("keeps the renewal, and counts it, when the immediate retirement fails", func() {
+			original := issue("keep-fail")
+			Expect(store.UpdateCRL(ctx, []byte("not a valid CRL"))).To(Succeed())
+			before := myCA.SupersedeFailures()
+
+			renewedPEM, err := myCA.RenewStored(ctx, "keep-fail", nil)
+			Expect(err).NotTo(HaveOccurred(),
+				"retiring the predecessor is best-effort; the renewal stands")
+			Expect(parseCert(renewedPEM).SerialNumber).NotTo(Equal(original.SerialNumber))
+			Expect(myCA.SupersedeFailures()).To(Equal(before+1),
+				"openvoxca_supersede_failures_total must count an immediate revocation that failed")
 		})
 
 		It("puts the predecessor on the pending list when a window is configured", func() {
