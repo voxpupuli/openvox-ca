@@ -430,14 +430,19 @@ var _ = Describe("Subject alternative name policy", func() {
 			Expect(ca.IPAddressStrings(cert.IPAddresses)).To(ConsistOf("10.0.0.12"))
 			Expect(cert.EmailAddresses).To(ConsistOf("web12@example.com"))
 		})
+	})
 
-		It("never issues an IPv4-mapped IP SAN, because the CSR carrying one is refused at submission", func() {
-			// crypto/x509 refuses to parse a 16-byte ::ffff:a.b.c.d SAN, in a
-			// certificate and in a request alike, so a CSR asking for one never
-			// reaches the queue and cannot produce a certificate this CA, and
-			// every Go TLS peer, would then be unable to read. The extension is
-			// built by hand because CreateCertificateRequest would write the
-			// address as 4 bytes.
+	// crypto/x509 refuses to parse a 16-byte ::ffff:a.b.c.d SAN, in a
+	// certificate and in a request alike, so a CSR asking for one never reaches
+	// the queue and cannot produce a certificate this CA, and every Go TLS peer,
+	// would then be unable to read. Parsing comes before the policy, so the
+	// refusal holds whatever allow_subject_alt_names says, as the docs promise;
+	// both settings are entries so that neither half rests on the other. The
+	// extension is built by hand because CreateCertificateRequest would write
+	// the address as 4 bytes.
+	DescribeTable("never issues an IPv4-mapped IP SAN, because the CSR carrying one is refused at submission",
+		func(allow bool) {
+			myCA.AllowSubjectAltNames = allow
 			mapped, err := asn1.Marshal([]asn1.RawValue{{
 				Class: asn1.ClassContextSpecific, Tag: 7, Bytes: net.ParseIP("::ffff:192.0.2.11").To16(),
 			}})
@@ -450,8 +455,10 @@ var _ = Describe("Subject alternative name policy", func() {
 			Expect(err).To(MatchError(ContainSubstring("IPv4-mapped")))
 			_, err = store.GetCSR(ctx, "web13")
 			Expect(errors.Is(err, fs.ErrNotExist)).To(BeTrue(), "the refused CSR must not be queued")
-		})
-	})
+		},
+		Entry("with the policy turned on", true),
+		Entry("with the policy turned off", false),
+	)
 
 	Describe("renewal", func() {
 		// Renewal is outside the gate: it takes every name from the
