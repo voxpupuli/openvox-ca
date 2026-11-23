@@ -186,6 +186,17 @@ var _ = Describe("CA Bootstrap key algorithms", func() {
 		Expect(string(keyData)).To(ContainSubstring("RSA PRIVATE KEY"))
 	})
 
+	// #681: a size set without an algorithm used to be dropped, bootstrapping
+	// the built-in RSA 4096 without a word.
+	It("bootstraps a size set without an algorithm as RSA of that size", func() {
+		myCA.CAKeyConfig = ca.KeyConfig{Size: 2048}
+		Expect(myCA.Init(context.Background())).To(Succeed())
+
+		rsaKey, ok := myCA.CAKey.(*rsa.PrivateKey)
+		Expect(ok).To(BeTrue(), "a size alone means RSA")
+		Expect(rsaKey.N.BitLen()).To(Equal(2048), "ca_key_size must not be dropped when ca_key_algo is unset")
+	})
+
 	It("bootstraps ECDSA P-256", func() {
 		myCA.CAKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoECDSA, Size: 256}
 		Expect(myCA.Init(context.Background())).To(Succeed())
@@ -350,6 +361,22 @@ var _ = Describe("Generate with LeafKeyConfig", func() {
 		rsaKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(rsaKey.N.BitLen()).To(Equal(2048))
+	})
+
+	// #681: the RSA algorithm alone used to fall to generateKey's own zero-size
+	// default, which is the CA's 4096 rather than the leaf's documented 2048.
+	It("generates RSA 2048 when only the RSA algorithm is set", func() {
+		myCA.LeafKeyConfig = ca.KeyConfig{Algo: ca.KeyAlgoRSA}
+
+		result, err := myCA.Generate(context.Background(), "leaf-rsa-algo-only", nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		keyBlock, _ := pem.Decode(result.PrivateKeyPEM)
+		Expect(keyBlock.Type).To(Equal("RSA PRIVATE KEY"))
+
+		rsaKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rsaKey.N.BitLen()).To(Equal(2048), "leaf_key_algo: rsa alone must take the leaf default, not the CA's")
 	})
 
 	It("generates ECDSA P-256 when LeafKeyConfig={ECDSA,256}", func() {

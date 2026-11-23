@@ -511,11 +511,7 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 		hostname = "puppet"
 	}
 
-	// Resolve key config; fall back to default if not set.
-	keyCfg := c.CAKeyConfig
-	if keyCfg.Algo == "" {
-		keyCfg = DefaultCAKeyConfig
-	}
+	keyCfg := c.caKeyConfig()
 
 	slog.Debug("Generating CA key", "algo", string(keyCfg.Algo), "size", keyCfg.Size)
 	var key crypto.Signer

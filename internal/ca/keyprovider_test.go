@@ -53,6 +53,7 @@ type fakeKeyProvider struct {
 	key           crypto.Signer
 	loadErr       error // if non-nil (and not ErrKeyProviderKeyNotFound-wrapped), returned verbatim by Load
 	generateCalls int
+	generatedWith ca.KeyConfig // the configuration the last Generate was asked for
 	loadCalls     int
 }
 
@@ -73,6 +74,7 @@ func (f *fakeKeyProvider) Generate(_ context.Context, cfg ca.KeyConfig) (crypto.
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.generateCalls++
+	f.generatedWith = cfg
 	if f.key != nil {
 		return nil, fmt.Errorf("fakeKeyProvider: key already exists")
 	}
@@ -411,6 +413,17 @@ var _ = Describe("BuildCSR and LoadOrCreateCAKey against a key provider", func()
 		Expect(err).NotTo(HaveOccurred())
 		Expect(gotDER).To(Equal(wantDER))
 		noLocalKey()
+	})
+
+	// #681: the provider is asked for the resolved configuration, so a size set
+	// without an algorithm reaches it as RSA of that size. OpenBao's Transit
+	// provider maps a zero size to its own default, so a dropped size would
+	// pass through as RSA 4096 there.
+	It("asks the provider for the size set without an algorithm, as RSA", func() {
+		subject.CAKeyConfig = ca.KeyConfig{Size: 2048}
+		_, err := subject.LoadOrCreateCAKey(ctx, true)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(provider.generatedWith).To(Equal(ca.KeyConfig{Algo: ca.KeyAlgoRSA, Size: 2048}))
 	})
 
 	It("does not rotate a key the provider already holds, even with --create-key", func() {

@@ -19,10 +19,12 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/pem"
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -122,4 +124,68 @@ var _ = Describe("import subcommand key encryption", func() {
 		Expect(err).To(MatchError(ContainSubstring("none of the others can be")))
 		Expect(storage.New(caDir).HasCACert(context.Background())).To(BeFalse())
 	})
+})
+
+// --crl-validity-days (#681): import cannot read the server's crl_validity_days,
+// so the operator passes it, and the CRL import signs when it holds none of
+// this CA's own is valid for that long.
+var _ = Describe("import subcommand CRL validity", func() {
+	var caDir, certFile, keyFile, ctlCfg string
+
+	BeforeEach(func() {
+		saveCtlGlobals()
+		clearCtlEnv()
+		ctlCfg = writeTempCtlConfig("")
+
+		dir := GinkgoT().TempDir()
+		caDir = filepath.Join(dir, "cadir")
+		keyPEM, crtPEM, _, err := testutil.GenerateTestCA()
+		Expect(err).NotTo(HaveOccurred())
+		certFile = filepath.Join(dir, "ca_crt.pem")
+		keyFile = filepath.Join(dir, "ca_key.pem")
+		Expect(os.WriteFile(certFile, crtPEM, 0o600)).To(Succeed())
+		Expect(os.WriteFile(keyFile, keyPEM, 0o600)).To(Succeed())
+	})
+
+	runImport := func(extra ...string) error {
+		cmd := newRootCmd()
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs(append([]string{"import", "--config", ctlCfg, "--cadir", caDir, "--cert-bundle", certFile,
+			"--private-key", keyFile}, extra...))
+		return cmd.Execute()
+	}
+
+	storedCRLWindow := func() time.Duration {
+		GinkgoHelper()
+		blob, err := storage.New(caDir).GetCRL(context.Background())
+		Expect(err).NotTo(HaveOccurred())
+		block, _ := pem.Decode(blob)
+		Expect(block).NotTo(BeNil())
+		crl, err := x509.ParseRevocationList(block.Bytes)
+		Expect(err).NotTo(HaveOccurred())
+		return crl.NextUpdate.Sub(crl.ThisUpdate)
+	}
+
+	It("signs the CRL for --crl-validity-days", func() {
+		Expect(runImport("--crl-validity-days", "7")).To(Succeed())
+		Expect(storedCRLWindow()).To(Equal(7 * 24 * time.Hour))
+	})
+
+	It("defaults to the server's own default", func() {
+		Expect(runImport()).To(Succeed())
+		Expect(storedCRLWindow()).To(Equal(ca.CRLValidity))
+	})
+
+	DescribeTable("refuses a validity it cannot honour, writing nothing",
+		func(days string) {
+			Expect(runImport("--crl-validity-days", days)).To(
+				MatchError(ContainSubstring("--crl-validity-days must be a positive number of days")))
+			Expect(storage.New(caDir).HasCACert(context.Background())).To(BeFalse())
+		},
+		Entry("zero", "0"),
+		Entry("a negative number", "-1"),
+		// The first day count a time.Duration cannot hold: it would wrap.
+		Entry("one past the largest Duration", "106752"),
+	)
 })

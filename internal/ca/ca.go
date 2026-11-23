@@ -80,13 +80,14 @@ type CA struct {
 	Hostname       string
 
 	// CAKeyConfig controls the algorithm and key size used when bootstrapping a
-	// new CA certificate. Zero value uses DefaultCAKeyConfig (RSA 4096).
-	// Ignored when a CA already exists on disk.
+	// new CA certificate. Either half may be zero; see resolveKeyConfig. The
+	// zero value uses DefaultCAKeyConfig (RSA 4096). Ignored when a CA already
+	// exists on disk.
 	CAKeyConfig KeyConfig
 
 	// LeafKeyConfig controls the algorithm and key size for server-side
-	// generated leaf certificates (Generate). Zero value uses
-	// DefaultLeafKeyConfig (RSA 2048).
+	// generated leaf certificates (Generate). Either half may be zero; see
+	// resolveKeyConfig. The zero value uses DefaultLeafKeyConfig (RSA 2048).
 	LeafKeyConfig KeyConfig
 
 	// CASubject holds optional subject DN fields for a bootstrapped CA

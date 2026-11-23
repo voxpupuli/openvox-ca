@@ -350,6 +350,11 @@ openvox-ca-ctl import \
 # concatenated into it is refused, for the same reason the certificate bundle
 # rejects keys: the result is world-readable and served to every agent.
 #
+# When neither --crl-chain nor the store holds this CA's own CRL, import signs
+# an empty one, valid for --crl-validity-days (default 30). import cannot read
+# the server's configuration, so pass its crl_validity_days if you set one;
+# otherwise the CRL keeps the default until the server next re-signs it.
+#
 # import writes no inventory integrity value, so the server's next start logs
 # "No inventory HMAC found on an established CA" at WARN, once, as it
 # establishes one. That is expected after an import.

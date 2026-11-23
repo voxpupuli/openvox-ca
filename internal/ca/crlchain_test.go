@@ -1225,6 +1225,37 @@ var _ = Describe("CRL chain ordering at import", func() {
 		upstream, upsCRL = upstreamCA("Upstream Root CA")
 	})
 
+	// #681: both places the import signs a CRL of ours afresh used the package
+	// default, so crl_validity_days reached only the re-signing path.
+	Context("when it has to sign this CA's CRL itself", func() {
+		const week = 7 * 24 * time.Hour
+
+		window := func() time.Duration {
+			GinkgoHelper()
+			chain := crlBlocks(mustGetCRL(ctx, store))
+			Expect(chain).NotTo(BeEmpty())
+			return chain[0].NextUpdate.Sub(chain[0].ThisUpdate)
+		}
+
+		It("makes it valid for CRLValidity when given no chain", func() {
+			Expect(ca.ImportCAWithOptions(ctx, store, certPEM, keyPEM, nil,
+				ca.ImportCAOptions{CRLValidity: week})).To(Succeed())
+			Expect(window()).To(Equal(week))
+		})
+
+		It("makes it valid for CRLValidity when given ancestors only", func() {
+			Expect(ca.ImportCAWithOptions(ctx, store, certPEM, keyPEM, upsCRL,
+				ca.ImportCAOptions{CRLValidity: week})).To(Succeed())
+			Expect(window()).To(Equal(week))
+			Expect(crlBlocks(mustGetCRL(ctx, store))[1].AuthorityKeyId).To(Equal(upstream.SubjectKeyId))
+		})
+
+		It("uses the package default when CRLValidity is unset", func() {
+			Expect(ca.ImportCAWithOptions(ctx, store, certPEM, keyPEM, nil, ca.ImportCAOptions{})).To(Succeed())
+			Expect(window()).To(Equal(ca.CRLValidity))
+		})
+	})
+
 	It("leaves the stored chain alone when no --crl-chain is supplied", func() {
 		// Omitting the flag used to generate a fresh empty CRL and overwrite,
 		// which on a CA that had been issuing for months destroyed every
