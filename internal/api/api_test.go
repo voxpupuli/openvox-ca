@@ -39,6 +39,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -162,6 +163,40 @@ var _ = Describe("API Workflow", func() {
 			Expect(rr.Body.String()).To(ContainSubstring("failed to reissue CRL"))
 			Expect(rr.Body.String()).NotTo(ContainSubstring("PEM"),
 				"the generic arm must not surface the underlying error")
+		})
+
+		It("answers 503, not 404, when the re-signed CRL cannot be read back", func() {
+			// The re-sign has landed by the time the handler reads it back, so
+			// a storage fault there is neither "CRL not found" nor a failed
+			// reissue. The fault arms only once the CRL is written, which
+			// keeps ReissueCRL's own read of the old CRL working.
+			ctx := context.Background()
+			dir := GinkgoT().TempDir()
+			backend := &readBackFaultBackend{Backend: storage.NewFilesystemBackend(dir), key: storage.KeyCRL}
+			store := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+			Expect(store.EnsureDirs(ctx)).To(Succeed())
+			Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+			Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+			Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+			Expect(store.TouchInventory(ctx)).To(Succeed())
+			Expect(backend.Backend.Put(ctx, storage.KeyCRL, cachedCrlPEM, storage.BlobPublic)).To(Succeed())
+			faultCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+			Expect(faultCA.Init(ctx)).To(Succeed())
+			Expect(backend.written.Load()).To(BeFalse(), "Init must not have rewritten the CRL, or the fault is armed early")
+
+			logBuf := &bytes.Buffer{}
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			DeferCleanup(func() { slog.SetDefault(orig) })
+
+			rr := httptest.NewRecorder()
+			api.New(faultCA).Routes().ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_revocation_list/ca", nil))
+			Expect(backend.written.Load()).To(BeTrue(), "the re-sign must have been written")
+			Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+			Expect(rr.Body.String()).To(ContainSubstring("the CRL was re-signed but could not be read back"))
+			Expect(rr.Body.String()).NotTo(ContainSubstring("backend unavailable"),
+				"the cause can name storage paths, so it stays out of the response")
+			Expect(logBuf.String()).To(ContainSubstring("backend unavailable"))
 		})
 
 		It("re-signs the CRL on PUT and returns the fresh CRL", func() {
@@ -424,6 +459,63 @@ var _ = Describe("API Workflow", func() {
 			mux.ServeHTTP(rr, req)
 			Expect(rr.Code).To(Equal(http.StatusOK))
 			Expect(rr.Body.String()).To(ContainSubstring("X509 CRL"))
+		})
+
+		Context("when the CRL cannot be read", func() {
+			// docs/api.md documents 404 for a missing CRL and 503 for a
+			// storage failure, where OpenVox Server answers 500. Before #688
+			// every read error answered 404, so an outage looked like a CA
+			// that had never published a CRL.
+			var (
+				backend *getFaultBackend
+				handler http.Handler
+			)
+
+			BeforeEach(func() {
+				ctx := context.Background()
+				dir := GinkgoT().TempDir()
+				backend = &getFaultBackend{Backend: storage.NewFilesystemBackend(dir), fail: map[string]bool{}}
+				store := storage.NewWithBackend(backend, filepath.Join(dir, "private"))
+				Expect(store.EnsureDirs(ctx)).To(Succeed())
+				Expect(store.SaveCAKey(ctx, cachedKeyPEM)).To(Succeed())
+				Expect(store.SaveCACert(ctx, cachedCrtPEM)).To(Succeed())
+				Expect(store.UpdateCRL(ctx, cachedCrlPEM)).To(Succeed())
+				Expect(store.WriteSerial(ctx, "0001")).To(Succeed())
+				Expect(store.TouchInventory(ctx)).To(Succeed())
+				faultCA := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
+				Expect(faultCA.Init(ctx)).To(Succeed())
+				handler = api.New(faultCA).Routes()
+			})
+
+			getCRL := func() *httptest.ResponseRecorder {
+				rr := httptest.NewRecorder()
+				handler.ServeHTTP(rr, httptest.NewRequest("GET", "/certificate_revocation_list/ca", nil))
+				return rr
+			}
+
+			It("answers 404 when the CRL is missing", func() {
+				Expect(getCRL().Code).To(Equal(http.StatusOK), "unfaulted, the CRL is served")
+				Expect(backend.Delete(context.Background(), storage.KeyCRL)).To(Succeed())
+				rr := getCRL()
+				Expect(rr.Code).To(Equal(http.StatusNotFound))
+				Expect(rr.Body.String()).To(ContainSubstring("CRL not found"))
+			})
+
+			It("answers 503, with the cause in the log and not the body, when reading the CRL fails", func() {
+				Expect(getCRL().Code).To(Equal(http.StatusOK), "unfaulted, the CRL is served")
+				logBuf := &bytes.Buffer{}
+				orig := slog.Default()
+				slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+				DeferCleanup(func() { slog.SetDefault(orig) })
+
+				backend.fail[storage.KeyCRL] = true
+				rr := getCRL()
+				Expect(rr.Code).To(Equal(http.StatusServiceUnavailable))
+				Expect(rr.Body.String()).To(ContainSubstring("could not read the CRL; see the server log"))
+				Expect(rr.Body.String()).NotTo(ContainSubstring("backend unavailable"),
+					"the cause can name storage paths, so it stays out of the response")
+				Expect(logBuf.String()).To(ContainSubstring("backend unavailable"))
+			})
 		})
 
 		It("serves the whole stored chain, not just this CA's own block", func() {
@@ -3188,6 +3280,32 @@ type getFaultBackend struct {
 
 func (b *getFaultBackend) Get(ctx context.Context, key string) ([]byte, error) {
 	if b.fail[key] {
+		return nil, errors.New("backend unavailable")
+	}
+	return b.Backend.Get(ctx, key)
+}
+
+// readBackFaultBackend fails every Get of key once a Put of it has landed,
+// so an operation that reads, rewrites and then re-reads the blob sees only
+// its re-read fail.
+type readBackFaultBackend struct {
+	storage.Backend
+	key     string
+	written atomic.Bool
+}
+
+func (b *readBackFaultBackend) Put(ctx context.Context, key string, data []byte, kind storage.BlobKind) error {
+	if err := b.Backend.Put(ctx, key, data, kind); err != nil {
+		return err
+	}
+	if key == b.key {
+		b.written.Store(true)
+	}
+	return nil
+}
+
+func (b *readBackFaultBackend) Get(ctx context.Context, key string) ([]byte, error) {
+	if key == b.key && b.written.Load() {
 		return nil, errors.New("backend unavailable")
 	}
 	return b.Backend.Get(ctx, key)

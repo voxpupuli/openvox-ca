@@ -802,7 +802,17 @@ func (s *Server) handleGetCRL(w http.ResponseWriter, r *http.Request) {
 
 	crlPEM, err := s.CA.Storage.GetCRL(r.Context())
 	if err != nil {
-		http.Error(w, "CRL not found", http.StatusNotFound)
+		// 404 only when no CRL is stored. Any other error is a read the CA
+		// could not complete, and answering 404 for it would make a storage
+		// outage look like a CA that has never published a CRL. 503 is this
+		// API's answer for that, where OpenVox Server answers 500; the cause
+		// goes to the log, not the body, because it can name storage paths.
+		if errors.Is(err, fs.ErrNotExist) {
+			http.Error(w, "CRL not found", http.StatusNotFound)
+			return
+		}
+		slog.Warn("GET certificate_revocation_list/ca: could not read the CRL", "error", err)
+		http.Error(w, "could not read the CRL; see the server log", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
@@ -833,7 +843,14 @@ func (s *Server) handleReissueCRL(w http.ResponseWriter, r *http.Request) {
 
 	crlPEM, err := s.CA.Storage.GetCRL(r.Context())
 	if err != nil {
-		http.Error(w, "CRL not found", http.StatusNotFound)
+		// The re-sign has already been written, so neither a 404 nor a 500
+		// would be true of it, whatever the read-back error: even a CRL gone
+		// by now was found and re-signed a moment ago. Only the read-back
+		// failed, so 503, with the cause in the log because it can name
+		// storage paths.
+		slog.Warn("PUT certificate_revocation_list/ca: the CRL was re-signed but could not be read back", "error", err)
+		http.Error(w, "the CRL was re-signed but could not be read back; see the server log",
+			http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
