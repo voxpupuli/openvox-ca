@@ -1465,6 +1465,23 @@ var _ = Describe("EtcdPreAlphaInventoryBlob", func() {
 		Expect(err).To(MatchError(errUndecomposedInventory))
 	})
 
+	It("refuses a marker it cannot decode, at startup and on a read", func() {
+		// Not a pre-alpha blob and not an empty marker: refusing it as
+		// corrupt is the only answer that does not read it as an inventory.
+		const prefix = "/test-inv-prealpha-undecodable"
+		_, err := cli.Put(ctx, prefix+"/inventory/data", "abc")
+		Expect(err).NotTo(HaveOccurred())
+		b := NewEtcdBackendFromClient(cli, prefix, 5*time.Second)
+		defer b.Close()
+
+		err = b.EnsureReady(ctx)
+		Expect(err).To(MatchError(ContainSubstring("decoding blob")), "startup")
+		Expect(err).NotTo(MatchError(errUndecomposedInventory), "a corrupt marker is not a pre-alpha blob")
+		_, err = b.Get(ctx, KeyInventory)
+		Expect(err).To(MatchError(ContainSubstring("decoding blob")), "a read of the inventory")
+		Expect(err).NotTo(MatchError(errUndecomposedInventory), "a corrupt marker is not a pre-alpha blob")
+	})
+
 	It("refuses a migration from it, which never starts the store", func() {
 		const prefix = "/test-inv-prealpha-migrate"
 		plant(prefix)
