@@ -157,6 +157,17 @@ var _ = Describe("SaveRequest duplicate-certificate policy", func() {
 			subject + " already has a " + state + " certificate; ignoring certificate request"))
 	}
 
+	// refusals builds what DuplicateRefusals should report, so that each
+	// spec states every state's count and a refusal counted under the wrong
+	// one fails as surely as one not counted at all.
+	refusals := func(requested, signed, revoked uint64) map[string]uint64 {
+		return map[string]uint64{
+			ca.DuplicateRequested: requested,
+			ca.DuplicateSigned:    signed,
+			ca.DuplicateRevoked:   revoked,
+		}
+	}
+
 	BeforeEach(func() {
 		ctx = context.Background()
 		var err error
@@ -194,6 +205,8 @@ var _ = Describe("SaveRequest duplicate-certificate policy", func() {
 			_, err = myCA.SaveRequest(ctx, subject, csr())
 			expectRefused(err, ca.DuplicateRequested)
 			Expect(stored(store.GetCSR)).To(Equal(first))
+			Expect(myCA.DuplicateRefusals()).To(Equal(refusals(1, 0, 0)),
+				"openvoxca_csr_duplicate_refusals_total{state=\"requested\"} must count the refusal")
 		})
 
 		It("refuses a resubmission of the very same CSR, as OpenVox Server does", func() {
@@ -215,6 +228,8 @@ var _ = Describe("SaveRequest duplicate-certificate policy", func() {
 			expectRefused(err, ca.DuplicateSigned)
 			Expect(store.HasCSR(ctx, subject)).To(BeFalse())
 			Expect(stored(store.GetCert)).To(Equal(certPEM))
+			Expect(myCA.DuplicateRefusals()).To(Equal(refusals(0, 1, 0)),
+				"openvoxca_csr_duplicate_refusals_total{state=\"signed\"} must count the refusal")
 		})
 
 		It("refuses a subject with a revoked certificate and keeps the certificate", func() {
@@ -229,6 +244,8 @@ var _ = Describe("SaveRequest duplicate-certificate policy", func() {
 			Expect(store.HasCSR(ctx, subject)).To(BeFalse())
 			Expect(stored(store.GetCert)).To(Equal(certPEM),
 				"a refused CSR must not evict the revoked certificate")
+			Expect(myCA.DuplicateRefusals()).To(Equal(refusals(0, 0, 1)),
+				"openvoxca_csr_duplicate_refusals_total{state=\"revoked\"} must count the refusal")
 		})
 
 		DescribeTable("accepts a CSR again once a pending one is removed",
@@ -343,6 +360,8 @@ var _ = Describe("SaveRequest duplicate-certificate policy", func() {
 			Expect(store.HasCSR(ctx, subject)).To(BeFalse(),
 				"an unanswered check must not fall through to the save")
 			Expect(stored(store.GetCert)).To(Equal(certPEM))
+			Expect(myCA.DuplicateRefusals()).To(Equal(refusals(0, 0, 0)),
+				"a check storage could not answer is a fault, not a duplicate")
 		})
 
 		It("lets exactly one of two racing submissions through", func() {
@@ -438,6 +457,8 @@ var _ = Describe("SaveRequest duplicate-certificate policy", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stored(store.GetCSR)).To(Equal(next))
 			Expect(stored(store.GetCert)).To(Equal(certPEM))
+			Expect(myCA.DuplicateRefusals()).To(Equal(refusals(0, 0, 0)),
+				"an accepted duplicate is not a refusal")
 		})
 
 		It("queues a CSR alongside a revoked certificate, leaving the certificate in place", func() {

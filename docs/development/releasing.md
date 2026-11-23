@@ -95,20 +95,21 @@ rule wins.
    `client.domain`; the field values the documentation tells you to match on,
    such as `reason="route requires admin access"`, the three shapes of
    `client.domain` and the `renewal` values; and the `event` value of each
-   audit record, from the closed set the documentation lists. No record carries
-   one yet: [#666](https://github.com/voxpupuli/openvox-ca/issues/666) adds the
-   field and that list before 1.0.0. Fields are how you find and join the
-   records behind an alert.
+   audit record and the attributes listed beside it, from the closed set in
+   [the audit events table](../configuration.md#audit-events). Fields are how
+   you find and join the records behind an alert.
 
 Not covered, so free to change in a minor or patch release:
 
 - **Log message text, and the order of fields in a record**, even where the
   documentation quotes a message or tells you to look for one. Logs are for a
   human to learn more once something has fired. Alert on a metric, or on an
-  audit record's `event` field; where a condition the documentation tells you
-  to watch for has neither yet,
-  [#666](https://github.com/voxpupuli/openvox-ca/issues/666) adds one before
-  1.0.0.
+  audit record's `event` field. Two conditions the documentation describes
+  still have neither: a best-effort immediate revocation, after a renewal or a
+  managed certificate's reissue, that fails once, and a managed certificate
+  whose reissue keeps failing.
+  [#679](https://github.com/voxpupuli/openvox-ca/issues/679) gives them a
+  metric before 1.0.0.
 - **The HTTP fine print:** error-body wording, response headers other than
   `Content-Type`, the order of `certificate_statuses`, and the body and media
   type of a request no route serves, the same things the [Puppet-parity

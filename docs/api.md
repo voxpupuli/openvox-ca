@@ -596,10 +596,12 @@ issuance is the only thing that does. With it off, the two differ as follows:
   own — unless a replacement has since been issued for the same subject, which
   makes it resolve to the replacement instead and leaves
   [revocation by serial](#revocation-by-serial) the only way back to the
-  original. The
-  server's `Clean: revoke failed`, `Clean: delete cert failed` and
-  `Clean: delete CSR failed` warnings are the complete signal;
-  `openvoxca_crl_update_failures_total` covers most of the first — a CRL that
+  original.
+  [`openvoxca_clean_failures_total{step}`](metrics.md#revocation-and-cleaning)
+  is the complete signal: it counts every failed step, as `revoke`,
+  `delete_cert` or `delete_csr`, and the server's `Clean: revoke failed`,
+  `Clean: delete cert failed` and `Clean: delete CSR failed` warnings name the
+  subject. `openvoxca_crl_update_failures_total` covers most of the first — a CRL that
   could not be read, signed or written all count, as does an inventory read that
   *failed* while resolving the subject's serial — but not a revocation refused
   because the CRL lock could not be taken at all, which never reaches the CRL
@@ -611,13 +613,14 @@ issuance is the only thing that does. With it off, the two differ as follows:
   inventory entry for the subject; and not a failed delete at all. The no-inventory-entry exclusion is the one `clean` swallows
   rather than surfaces: it revokes only when a certificate is in storage, so
   here it means the certificate is present and the inventory entry is gone, and
-  the call still answers `204` with a `Clean: revoke failed` warning — where
+  the call still answers `204`, counting `step="revoke"` with a
+  `Clean: revoke failed` warning — where
   [`PUT /certificate_status`](#certificate-status) answers `404` for that same
   state. `PUT /clean` shares this path. Neither of the other two states reaches
   the revoke path at all, since `clean` revokes only under its `hasCert` arm: a
   subject with no certificate and no pending request is a `404` that revokes and
   deletes nothing, and one holding only a pending request is a `204` whose sole
-  reachable warning is `Clean: delete CSR failed`.
+  reachable failure is `step="delete_csr"`.
 
 After a `DELETE` the next CSR is accepted: with autosign enabled it is signed at
 once and the agent is back with a fresh, unrevoked certificate; with autosign
@@ -711,7 +714,7 @@ Two limits are worth knowing before relying on that to decommission a host. `--p
 
 No *new* `pp_cli_auth` grant can be requested through this API: authorization-arc OIDs are stripped from submitted CSRs so that no request can ask for elevated privileges. Mint one offline with [`openvox-ca generate --pp-cli-auth`](operator-cli.md#administrator-credentials), which also documents what the grant covers and the three steps needed to withdraw it.
 
-An existing holder can still obtain a *fresh certificate* carrying the grant, because renewal preserves authorization-arc OIDs deliberately, with or without a CSR (see [Certificate renewal](#certificate-renewal) above). That is not an escalation — it requires already holding one — but it does mean a compromised admin credential can renew itself into a new serial and a new validity window, and through the CSR path onto a new key, which is why withdrawing one is not simply a matter of waiting for it to expire. Each such renewal logs the same `WARN` that minting one does, `Issued certificate carrying a Puppet authorisation extension`, with a `renewal` attribute saying whether the key changed — see [administrator credentials](operator-cli.md#administrator-credentials).
+An existing holder can still obtain a *fresh certificate* carrying the grant, because renewal preserves authorization-arc OIDs deliberately, with or without a CSR (see [Certificate renewal](#certificate-renewal) above). That is not an escalation — it requires already holding one — but it does mean a compromised admin credential can renew itself into a new serial and a new validity window, and through the CSR path onto a new key, which is why withdrawing one is not simply a matter of waiting for it to expire. Each such renewal writes the same [audit record](configuration.md#audit-events) that minting one does, `event=certificate.auth_grant_issued`, with a `renewal` attribute saying whether the key changed — see [administrator credentials](operator-cli.md#administrator-credentials).
 
 > **OID source:** [`lib/puppet/ssl/oids.rb`](https://github.com/puppetlabs/puppet/blob/main/lib/puppet/ssl/oids.rb)
 

@@ -43,7 +43,9 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gbytes"
 	"github.com/openbao/openbao/api/v2"
+	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 	"github.com/voxpupuli/openvox-ca/internal/signer/openbao"
 )
 
@@ -525,7 +527,7 @@ var _ = Describe("OpenBao token lifecycle", func() {
 
 		Context("when the 403 persists after a re-login", func() {
 			DescribeTable("throttles the next 403 rather than logging in again",
-				func(refuseRelogin bool, wantSigns int) {
+				func(refuseRelogin bool, wantLogins, wantSigns int) {
 					fake.refuseEverySign()
 					tm := start(openbao.AuthAppRole)
 					signer := load(tm)
@@ -537,12 +539,15 @@ var _ = Describe("OpenBao token lifecycle", func() {
 					_, err := signer.Sign(nil, digest, crypto.SHA256)
 					Expect(err).To(HaveOccurred())
 					Expect(err).NotTo(MatchError(openbao.ErrReauthThrottled), "the first 403 past the interval should try to log in")
-					Expect(fake.loginCount()).To(Equal(2))
+					// A failed re-login hands over to the background loop,
+					// whose first retry is immediate; waited for here so the
+					// count below is the request path's alone.
+					Eventually(fake.loginCount).WithTimeout(2 * time.Second).Should(Equal(wantLogins))
 
 					_, err = signer.Sign(nil, digest, crypto.SHA256)
 
 					Expect(err).To(MatchError(openbao.ErrReauthThrottled))
-					Expect(fake.loginCount()).To(Equal(2), "the re-login attempt, successful or not, starts a new interval")
+					Expect(fake.loginCount()).To(Equal(wantLogins), "the re-login attempt, successful or not, starts a new interval")
 					Expect(fake.signCount()).To(Equal(wantSigns))
 					// While the credential is bad, the throttle has to say
 					// why the last login failed, or every issuance error would
@@ -551,8 +556,9 @@ var _ = Describe("OpenBao token lifecycle", func() {
 				},
 				// A successful re-login retries the sign once; a failed one does
 				// not, so the second Sign is the third or the second request.
-				Entry("when the re-login succeeds", false, 3),
-				Entry("when the re-login fails", true, 2),
+				// A failed one is retried once at once by the background loop.
+				Entry("when the re-login succeeds", false, 2, 3),
+				Entry("when the re-login fails", true, 3, 2),
 			)
 		})
 
@@ -566,17 +572,51 @@ var _ = Describe("OpenBao token lifecycle", func() {
 				openbao.ExpireReauthThrottleForTest(tm)
 				_, err := signer.Sign(nil, digest, crypto.SHA256)
 				Expect(err).To(MatchError(ContainSubstring("invalid credentials")), "the re-login should have failed")
+				// The background loop's immediate retry, refused too; the next
+				// is reauthRetryInterval away, past the end of this spec.
+				Eventually(fake.loginCount).WithTimeout(2 * time.Second).Should(Equal(3))
 
 				fake.acceptLoginsFromNow()
 				openbao.ExpireReauthThrottleForTest(tm)
 				_, err = signer.Sign(nil, digest, crypto.SHA256)
 				Expect(err).NotTo(MatchError(openbao.ErrReauthThrottled), "the re-login should have gone ahead")
-				Expect(fake.loginCount()).To(Equal(3))
+				Expect(fake.loginCount()).To(Equal(4))
 
 				_, err = signer.Sign(nil, digest, crypto.SHA256)
 
 				Expect(err).To(MatchError(openbao.ErrReauthThrottled))
 				Expect(err.Error()).NotTo(ContainSubstring("invalid credentials"), "a login that has since succeeded is not why this was throttled")
+			})
+		})
+
+		Context("when a request-path re-login succeeds while the background loop is retrying", func() {
+			It("does not log in again from the background, and renews the new token", func() {
+				tm := start(openbao.AuthAppRole)
+				signer := load(tm)
+				first := tm.Client().Token()
+				fake.refuseSignsWith(first)
+
+				fake.refuseLoginsFromNow()
+				openbao.ExpireReauthThrottleForTest(tm)
+				_, err := signer.Sign(nil, digest, crypto.SHA256)
+				Expect(err).To(MatchError(ContainSubstring("invalid credentials")), "the re-login should have failed")
+				Eventually(fake.loginCount).WithTimeout(2*time.Second).Should(Equal(3),
+					"the background loop retries at once, and is refused too")
+
+				fake.acceptLoginsFromNow()
+				openbao.ExpireReauthThrottleForTest(tm)
+				_, err = signer.Sign(nil, digest, crypto.SHA256)
+				Expect(err).NotTo(HaveOccurred(), "the request path logs in and the retried sign goes through")
+				Expect(fake.loginCount()).To(Equal(4))
+				second := tm.Client().Token()
+
+				// The loop's next retry, which WakeForTest brings forward from
+				// reauthRetryInterval, must find the token replaced and start
+				// renewing it, not mint another.
+				openbao.WakeForTest(tm)
+				Eventually(fake.renewedTokens).WithTimeout(2 * time.Second).Should(ContainElement(second))
+				Expect(fake.loginCount()).To(Equal(4), "the background loop logged in again after the request path had")
+				Expect(tm.Client().Token()).To(Equal(second))
 			})
 		})
 
@@ -636,6 +676,118 @@ var _ = Describe("OpenBao token lifecycle", func() {
 				Eventually(fake.loginCount).WithTimeout(5 * time.Second).Should(Equal(2))
 				Expect(string(logs.Contents())).To(MatchRegexp(`level=WARN msg="OpenBao token renewal ended, re-authenticating" error=.*permission denied`))
 			})
+		})
+	})
+
+	// openvoxca_openbao_authenticated is the metric docs/openbao-transit.md
+	// and the mixin's OpenVoxCAOpenBaoUnauthenticated alert read in place of
+	// the "re-authentication failed" log line, so each way it moves is pinned
+	// here, through the collector the signer registers rather than the bare
+	// accessor, so the series name is pinned with it.
+	Describe("authentication state", func() {
+		gauge := func(tm *openbao.TokenManager) float64 {
+			GinkgoHelper()
+			reg := prometheus.NewRegistry()
+			Expect(reg.Register(openbao.NewKeyProvider(tm, "transit", "mykey"))).To(Succeed())
+			mfs, err := reg.Gather()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(mfs).To(HaveLen(1))
+			Expect(mfs[0].GetName()).To(Equal(constants.OpenBaoAuthenticatedMetric))
+			Expect(mfs[0].GetMetric()).To(HaveLen(1))
+			Expect(mfs[0].GetMetric()[0].GetLabel()).To(BeEmpty())
+			return mfs[0].GetMetric()[0].GetGauge().GetValue()
+		}
+
+		It("reads 1 once the initial login has succeeded", func() {
+			Expect(gauge(start(openbao.AuthAppRole))).To(Equal(1.0))
+		})
+
+		It("reads 0 from a failed request-path re-login until one succeeds", func() {
+			fake.refuseEverySign()
+			tm := start(openbao.AuthAppRole)
+			signer := load(tm)
+
+			fake.refuseLoginsFromNow()
+			openbao.ExpireReauthThrottleForTest(tm)
+			_, err := signer.Sign(nil, digest, crypto.SHA256)
+			Expect(err).To(MatchError(ContainSubstring("invalid credentials")), "the re-login should have failed")
+			Expect(gauge(tm)).To(Equal(0.0))
+
+			// A throttled Reauth attempts no login, so it must leave the
+			// state as the last attempt left it, in either direction.
+			_, err = signer.Sign(nil, digest, crypto.SHA256)
+			Expect(err).To(MatchError(openbao.ErrReauthThrottled))
+			Expect(gauge(tm)).To(Equal(0.0))
+
+			fake.acceptLoginsFromNow()
+			openbao.ExpireReauthThrottleForTest(tm)
+			_, err = signer.Sign(nil, digest, crypto.SHA256)
+			Expect(err).NotTo(MatchError(openbao.ErrReauthThrottled), "the re-login should have gone ahead")
+			Expect(gauge(tm)).To(Equal(1.0))
+
+			_, err = signer.Sign(nil, digest, crypto.SHA256)
+			Expect(err).To(MatchError(openbao.ErrReauthThrottled))
+			Expect(gauge(tm)).To(Equal(1.0))
+		})
+
+		// The case the request path alone used to leave stuck: with no
+		// further traffic, nothing but the background loop can log in again,
+		// so a failed request-path login has to hand over to it or the page
+		// outlives the outage.
+		It("returns to 1 with no further request once a failed request-path login can succeed", func() {
+			fake.refuseEverySign()
+			tm := start(openbao.AuthAppRole)
+			signer := load(tm)
+
+			fake.refuseLoginsFromNow()
+			openbao.ExpireReauthThrottleForTest(tm)
+			_, err := signer.Sign(nil, digest, crypto.SHA256)
+			Expect(err).To(MatchError(ContainSubstring("invalid credentials")), "the re-login should have failed")
+			Eventually(fake.loginCount).WithTimeout(2*time.Second).Should(Equal(3),
+				"the background loop retries at once")
+			Expect(gauge(tm)).To(Equal(0.0))
+
+			fake.acceptLoginsFromNow()
+			openbao.WakeForTest(tm)
+			Eventually(func() float64 { return gauge(tm) }).WithTimeout(2*time.Second).Should(Equal(1.0),
+				"the background loop's next retry must recover it")
+		})
+
+		// run() drops a hand-over left from before the watcher it is about to
+		// start: the loop has logged in since, so acting on it would end a
+		// healthy watcher and log in again for nothing.
+		It("does not end a fresh watcher over a hand-over the loop has already answered", func() {
+			tm := start(openbao.AuthAppRole)
+			signer := load(tm)
+			fake.refuseSignsWith(tm.Client().Token())
+
+			fake.refuseLoginsFromNow()
+			openbao.ExpireReauthThrottleForTest(tm)
+			_, err := signer.Sign(nil, digest, crypto.SHA256)
+			Expect(err).To(MatchError(ContainSubstring("invalid credentials")), "the re-login should have failed")
+			Eventually(fake.loginCount).WithTimeout(2*time.Second).Should(Equal(3),
+				"the background loop retries at once, is refused, and waits")
+
+			// A stale hand-over, about the watcher before the login below.
+			openbao.QueueReloginForTest(tm)
+			fake.acceptLoginsFromNow()
+			openbao.WakeForTest(tm)
+			Eventually(fake.loginCount).WithTimeout(2*time.Second).Should(Equal(4), "the retry logs in")
+
+			// Bring forward the spacing before the loop starts the new watcher.
+			openbao.WakeForTest(tm)
+			fresh := tm.Client().Token()
+			Eventually(fake.renewedTokens).WithTimeout(2 * time.Second).Should(ContainElement(fresh))
+			Consistently(fake.loginCount).WithTimeout(500*time.Millisecond).Should(Equal(4),
+				"the stale hand-over ended the fresh watcher and the loop logged in again")
+		})
+
+		It("reads 0 when the background loop cannot log in again", func() {
+			fake.issueShortLivedTokens(false)
+			tm := start(openbao.AuthAppRole)
+			fake.refuseLoginsFromNow()
+
+			Eventually(func() float64 { return gauge(tm) }).WithTimeout(5 * time.Second).Should(Equal(0.0))
 		})
 	})
 

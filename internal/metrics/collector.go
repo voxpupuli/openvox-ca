@@ -116,6 +116,9 @@ type Collector struct {
 
 	inventoryVerifyFailures *prometheus.Desc
 
+	cleanFailures     *prometheus.Desc
+	duplicateRefusals *prometheus.Desc
+
 	caInfo      *prometheus.Desc
 	caNotBefore *prometheus.Desc
 	caNotAfter  *prometheus.Desc
@@ -215,6 +218,25 @@ func NewCollector(c *ca.CA, opts ...Option) *Collector {
 				"could not read the inventory at all. Every replica verifies on every backend, "+
 				"once per inventory_verify_interval_sec.",
 			[]string{"reason"}, nil),
+		cleanFailures: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "clean", "failures_total"),
+			"Total failed steps of a clean, by step: revoke (the certificate could not be put on "+
+				"the CRL, for any reason, before it was deleted), delete_cert and delete_csr. A "+
+				"clean carries on past each failure and still reports success, so this is the "+
+				"signal that one left something behind: on revoke, a certificate gone from "+
+				"storage that remains a valid credential until it expires; on a delete, a blob "+
+				"that keeps the subject from enrolling again until it is cleaned once more. "+
+				"Covers single and bulk cleans alike.",
+			[]string{"step"}, nil),
+		duplicateRefusals: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "csr", "duplicate_refusals_total"),
+			"Total certificate requests refused because the subject already held something, by "+
+				"state: requested (a pending CSR), signed or revoked (a certificate). An agent "+
+				"waiting to be signed resubmits its CSR on every poll, so state=\"requested\" "+
+				"rises steadily on a healthy CA with unsigned requests; signed and revoked mean "+
+				"a node that will not enrol until it is cleaned. Always 0 with "+
+				"allow_duplicate_certs, which accepts these.",
+			[]string{"state"}, nil),
 		signingInFlight: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "ca_signing", "in_flight"),
 			"CA-key signatures in flight right now, across certificate issuance, CRL re-signing and "+
@@ -416,6 +438,8 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 		ch <- c.ocspIndexSerials
 	}
 	ch <- c.inventoryVerifyFailures
+	ch <- c.cleanFailures
+	ch <- c.duplicateRefusals
 	ch <- c.signingInFlight
 	ch <- c.signingLimit
 	ch <- c.signingShed
@@ -478,6 +502,12 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		float64(readErrors), "read_error")
 	ch <- prometheus.MustNewConstMetric(c.supersedeFailures, prometheus.CounterValue,
 		float64(c.ca.SupersedeFailures()))
+	for step, n := range c.ca.CleanFailures() {
+		ch <- prometheus.MustNewConstMetric(c.cleanFailures, prometheus.CounterValue, float64(n), step)
+	}
+	for state, n := range c.ca.DuplicateRefusals() {
+		ch <- prometheus.MustNewConstMetric(c.duplicateRefusals, prometheus.CounterValue, float64(n), state)
+	}
 	// Emitted alongside the failure counters, and for the same reason: these
 	// are in-process state, so an unreadable storage backend must not blind an
 	// operator to the responder shedding. The limit is emitted even when it is

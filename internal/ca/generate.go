@@ -27,6 +27,8 @@ import (
 	"log/slog"
 	"regexp"
 	"time"
+
+	"github.com/voxpupuli/openvox-ca/internal/audit"
 )
 
 // maxDNSAltNames is the maximum number of DNS alt names allowed per certificate.
@@ -360,6 +362,7 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 			// the end would leave that issuance with no trace outside the DER.
 			// NIST 800-53: AC-6 (Least Privilege), AU-2 (Event Logging)
 			slog.Warn("Issued certificate carrying a Puppet authorisation extension",
+				audit.Event(audit.CertificateAuthGrantIssued),
 				"subject", subject, "grant", g.String())
 		}
 

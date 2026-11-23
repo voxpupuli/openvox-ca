@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/openbao/openbao/api/v2"
@@ -65,6 +66,10 @@ var ErrReauthThrottled = errors.New("OpenBao re-authentication throttled")
 // errTokenManagerClosed is returned by Reauth after Close. Logging in then
 // would mint a token that nothing will ever revoke.
 var errTokenManagerClosed = errors.New("OpenBao token manager is closed")
+
+// errRequestReloginFailed is what watchOne reports when a request-path Reauth
+// tried to log in and failed, handing the retry to the background loop.
+var errRequestReloginFailed = errors.New("a request-path OpenBao login failed")
 
 // TokenManager owns an OpenBao client's token lifecycle: it logs in once at
 // construction, then runs a background goroutine that proactively renews the
@@ -117,7 +122,28 @@ type TokenManager struct {
 	// closed is set by Close, under mu, before it revokes the token.
 	closed bool
 
+	// authenticated reports whether the most recent login attempt, of any
+	// kind, succeeded: true from the initial login, false from the first
+	// re-authentication that fails until one succeeds. Written under mu,
+	// read without it by Authenticated, which a metrics scrape calls.
+	authenticated atomic.Bool
+
 	doneCh chan struct{} // closed once the background loop has exited
+
+	// relogin carries a request-path Reauth's failed login to the background
+	// loop, which then retries every reauthRetryInterval as it does when a
+	// watcher ends. Without it a failed request-path login was retried only
+	// by the next 403 past the throttle, so on a quiet CA Authenticated could
+	// read false long after OpenBao had recovered. Buffered 1: one pending
+	// hand-over is all the loop needs, and Reauth must never block on it.
+	relogin chan struct{}
+
+	// wake cuts short whichever wait the background loop is in: the retry
+	// interval, or the spacing between watcher starts. Only specs send on it
+	// (see export_test.go), so they can step the loop without waiting the
+	// intervals out in real time. Buffered 1, so a wake sent just before the
+	// loop starts to wait is not lost.
+	wake chan struct{}
 }
 
 // NewTokenManager builds an OpenBao client from cfg, performs the initial
@@ -147,6 +173,8 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 		ctx:          tmCtx,
 		cancel:       cancel,
 		doneCh:       make(chan struct{}),
+		relogin:      make(chan struct{}, 1),
+		wake:         make(chan struct{}, 1),
 	}
 
 	loginCtx, loginCancel := context.WithTimeout(tmCtx, tm.loginTimeout)
@@ -165,6 +193,7 @@ func NewTokenManager(ctx context.Context, cfg Config) (*TokenManager, error) {
 		return nil, fmt.Errorf("starting OpenBao token lifetime watcher: %w", err)
 	}
 	tm.watcher = watcher
+	tm.authenticated.Store(true)
 
 	go tm.run()
 	return tm, nil
@@ -248,6 +277,17 @@ func newLoginFunc(client *api.Client, cfg Config) (func(ctx context.Context) (*a
 // Exits when Close cancels tm.ctx.
 func (tm *TokenManager) run() {
 	defer close(tm.doneCh)
+	// The watcher a failed request-path login left running is still renewing
+	// when the loop exits from its retries, which watchOne's own Stop does not
+	// reach. Stop is idempotent, so stopping whichever watcher is current
+	// covers that and costs nothing otherwise.
+	defer func() {
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		if tm.watcher != nil {
+			tm.watcher.Stop()
+		}
+	}()
 	var lastWatch time.Time
 	for {
 		// Never (re)start a watcher more often than minReauthInterval, so a
@@ -257,7 +297,7 @@ func (tm *TokenManager) run() {
 		// Reauth's own throttle bounds how often that can happen.
 		if !lastWatch.IsZero() {
 			if wait := minReauthInterval - time.Since(lastWatch); wait > 0 {
-				if !sleepOrDone(tm.ctx, wait) {
+				if !sleepOrDone(tm.ctx, wait, tm.wake) {
 					return
 				}
 			}
@@ -266,6 +306,13 @@ func (tm *TokenManager) run() {
 
 		tm.mu.Lock()
 		watcher := tm.watcher
+		// A hand-over from before this watcher was picked is about an older
+		// one, and the loop has logged in since; acting on it would end a
+		// healthy watcher.
+		select {
+		case <-tm.relogin:
+		default:
+		}
 		tm.mu.Unlock()
 
 		go watcher.Start()
@@ -288,14 +335,32 @@ func (tm *TokenManager) run() {
 			lastWatch = time.Time{}
 			continue
 		}
-		if doneErr != nil {
+		switch {
+		case errors.Is(doneErr, errRequestReloginFailed):
+			// The watcher is still renewing the token in hand, and keeps doing
+			// so until a login replaces it: the source credential failing is
+			// no reason to let a working token lapse sooner.
+			slog.Info("A request-path OpenBao login failed, retrying from the background loop")
+		case doneErr != nil:
 			slog.Warn("OpenBao token renewal ended, re-authenticating", "error", doneErr)
-		} else {
+		default:
 			slog.Info("OpenBao token renewal window closed, re-authenticating")
 		}
 
 		attempts := 0
 		for {
+			// A request-path Reauth that succeeded while this loop was
+			// retrying has already replaced the watcher; logging in again
+			// would only mint a second token. Start renewing that one now, as
+			// the swapped case above does.
+			tm.mu.Lock()
+			replaced := tm.watcher != watcher
+			tm.mu.Unlock()
+			if replaced {
+				slog.Debug("OpenBao token replaced by a request-path re-login while retrying, renewing the new one")
+				lastWatch = time.Time{}
+				break
+			}
 			err := tm.reauthAndRewatch(tm.ctx)
 			if err == nil {
 				if attempts > 0 {
@@ -318,16 +383,17 @@ func (tm *TokenManager) run() {
 				slog.Debug("OpenBao re-authentication still failing, retrying",
 					"error", err, "attempt", attempts, "retry_in", reauthRetryInterval)
 			}
-			if !sleepOrDone(tm.ctx, reauthRetryInterval) {
+			if !sleepOrDone(tm.ctx, reauthRetryInterval, tm.wake) {
 				return
 			}
 		}
 	}
 }
 
-// sleepOrDone waits for d or until ctx is cancelled, reporting which
-// happened first (true = the timer fired, false = ctx was cancelled).
-func sleepOrDone(ctx context.Context, d time.Duration) bool {
+// sleepOrDone waits for d, a receive on wake, or ctx's cancellation,
+// reporting which happened first (true = the wait is over, false = ctx was
+// cancelled).
+func sleepOrDone(ctx context.Context, d time.Duration, wake <-chan struct{}) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
@@ -335,13 +401,17 @@ func sleepOrDone(ctx context.Context, d time.Duration) bool {
 		return false
 	case <-t.C:
 		return true
+	case <-wake:
+		return true
 	}
 }
 
 // watchOne selects on watcher's channels until either DoneCh fires (ended is
-// true, and doneErr is whatever the watcher ended with) or tm.ctx is cancelled
-// (ended is false: the caller should exit). It leaves logging the end to run,
-// which alone knows whether a request-path Reauth caused it.
+// true, and doneErr is whatever the watcher ended with), a request-path Reauth
+// hands over a failed login (ended is true, doneErr is
+// errRequestReloginFailed, and the watcher is still running), or tm.ctx is
+// cancelled (ended is false: the caller should exit). It leaves logging the end
+// to run, which alone knows whether a request-path Reauth caused it.
 func (tm *TokenManager) watchOne(watcher *api.LifetimeWatcher) (ended bool, doneErr error) {
 	for {
 		select {
@@ -352,6 +422,8 @@ func (tm *TokenManager) watchOne(watcher *api.LifetimeWatcher) (ended bool, done
 			slog.Debug("OpenBao token renewed", "lease_duration", renewal.Secret.LeaseDuration)
 		case err := <-watcher.DoneCh():
 			return true, err
+		case <-tm.relogin:
+			return true, errRequestReloginFailed
 		}
 	}
 }
@@ -366,8 +438,12 @@ func (tm *TokenManager) reauthAndRewatch(ctx context.Context) error {
 	return tm.reauthLocked(ctx)
 }
 
-// reauthLocked is reauthAndRewatch's body; the caller holds tm.mu.
-func (tm *TokenManager) reauthLocked(ctx context.Context) error {
+// reauthLocked is reauthAndRewatch's body; the caller holds tm.mu. Whatever
+// it returns is what Authenticated reports from then on: a login that
+// succeeded but left no watcher to renew its token is not one to count on.
+func (tm *TokenManager) reauthLocked(ctx context.Context) (err error) {
+	defer func() { tm.authenticated.Store(err == nil) }()
+
 	loginCtx, cancel := context.WithTimeout(ctx, tm.loginTimeout)
 	defer cancel()
 
@@ -428,7 +504,26 @@ func (tm *TokenManager) Reauth(ctx context.Context, rejected string) error {
 			ErrReauthThrottled, since.Round(time.Second), minReauthInterval)
 	}
 	slog.Info("OpenBao refused a request with 403, re-authenticating")
-	return tm.reauthLocked(ctx)
+	err := tm.reauthLocked(ctx)
+	if err != nil {
+		select {
+		case tm.relogin <- struct{}{}:
+		default:
+		}
+	}
+	return err
+}
+
+// Authenticated reports whether the most recent login attempt succeeded: the
+// initial one, the background loop's re-authentication, or a request-path
+// Reauth. A Reauth declined by its throttle attempts no login and changes
+// nothing. It is what openvoxca_openbao_authenticated reports.
+//
+// It describes the source credential, not the token in hand: a token revoked
+// out of band reads true here until the next login is attempted, which the
+// first 403 triggers.
+func (tm *TokenManager) Authenticated() bool {
+	return tm.authenticated.Load()
 }
 
 // Client returns the managed OpenBao client. Its token is kept current by

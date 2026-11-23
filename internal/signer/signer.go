@@ -46,6 +46,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+
+	"github.com/voxpupuli/openvox-ca/internal/audit"
 )
 
 // InheritedFD is the file descriptor number used to pass the socketpair
@@ -89,8 +91,9 @@ type MetricsResponse struct {
 // statistics so the frontend can expose them on /metrics: the signer has no
 // listener of its own, by design. Metrics takes no input and never touches the
 // key. What it returns -- heap and GC figures, goroutine counts, the runtime's
-// memory limit -- is aggregate telemetry with nothing in it that depends on the
-// key, and it goes to the same audience as the frontend's own go_* series:
+// memory limit, and under OpenBao whether the key backend session is
+// authenticated -- is aggregate telemetry with nothing in it that depends on
+// the key, and it goes to the same audience as the frontend's own series:
 // whoever can reach the metrics listener.
 type Service struct {
 	key     crypto.Signer
@@ -98,12 +101,16 @@ type Service struct {
 }
 
 // newRuntimeGatherer returns the registry the signer's Metrics answers from:
-// the standard Go collector and nothing else. Its process_* series are read
-// from /proc by the frontend instead, which keeps working when this RPC does
-// not -- a wedged signer is exactly when its resident memory matters.
-func newRuntimeGatherer() prometheus.Gatherer {
+// the standard Go collector, plus whatever the key provider reports about its
+// own session (extra; today only an OpenBao Transit provider's
+// openvoxca_openbao_authenticated, which only this process can see, since the
+// token manager runs here). Its process_* series are read from /proc by the
+// frontend instead, which keeps working when this RPC does not -- a wedged
+// signer is exactly when its resident memory matters.
+func newRuntimeGatherer(extra ...prometheus.Collector) prometheus.Gatherer {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector())
+	reg.MustRegister(extra...)
 	return reg
 }
 
@@ -160,7 +167,7 @@ func (s *Service) Sign(req *SignRequest, resp *SignResponse) error {
 	if err := checkSignRequest(req); err != nil {
 		// The frontend never builds such a request itself, so one arriving
 		// here means a frontend that is broken or no longer ours.
-		slog.Warn("Refused a signing request", "error", err)
+		slog.Warn("Refused a signing request", audit.Event(audit.SignerRequestRefused), "error", err)
 		return err
 	}
 	sig, err := s.key.Sign(rand.Reader, req.Digest, req.HashFunc)
@@ -190,12 +197,14 @@ func (s *Service) Metrics(_ *MetricsRequest, resp *MetricsResponse) error {
 
 // Serve runs the signer RPC server on the inherited socketpair fd.
 // It blocks until the connection is closed or a SIGTERM/SIGINT is received.
+// extra are reported by Metrics beside the Go runtime series; see
+// newRuntimeGatherer.
 //
 // Before serving RPC calls the signer performs a mandatory mutual
 // challenge-response handshake using the PSK read from the inherited pipe
 // (fd 4): it verifies the frontend's HMAC proof before serving any request,
 // and supplies its own proof so the frontend can reject an impostor signer.
-func Serve(key crypto.Signer) error {
+func Serve(key crypto.Signer, extra ...prometheus.Collector) error {
 	// Recover the socketpair endpoint passed via ExtraFiles (fd 3).
 	conn, err := connFromFD(InheritedFD)
 	if err != nil {
@@ -213,7 +222,7 @@ func Serve(key crypto.Signer) error {
 	}
 	slog.Info("PSK handshake succeeded")
 
-	svc := &Service{key: key, runtime: newRuntimeGatherer()}
+	svc := &Service{key: key, runtime: newRuntimeGatherer(extra...)}
 	server := rpc.NewServer()
 	if err := server.RegisterName("Signer", svc); err != nil {
 		return fmt.Errorf("registering signer RPC service: %w", err)

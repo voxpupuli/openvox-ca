@@ -31,7 +31,10 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+
+	"github.com/voxpupuli/openvox-ca/internal/constants"
 )
 
 // wedgedMetrics accepts a Metrics call and answers only when released.
@@ -119,6 +122,25 @@ var _ = Describe("the signer's runtime metrics", func() {
 			Expect(strings.HasPrefix(name, "go_")).To(BeTrue(),
 				"the signer reports its runtime only; process_* comes from /proc on the frontend side, got %q", name)
 		}
+	})
+
+	// The isolated signer is the only process that can see an OpenBao
+	// Transit session's state, so openvoxca_openbao_authenticated has to cross
+	// the same RPC the go_* families do. This pins that a collector given to
+	// newRuntimeGatherer crosses it. Serve's handing its extra collectors on,
+	// and runSignerMode's passing the key provider's, are not driven by any
+	// spec: Serve needs the launcher's inherited descriptors.
+	It("carries the key provider's collectors beside the go_* families", func() {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		Expect(err).NotTo(HaveOccurred())
+		session := prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: constants.OpenBaoAuthenticatedMetric, Help: "the key provider's session"})
+		session.Set(1)
+		rs := serveOver(&Service{key: key, runtime: newRuntimeGatherer(session)}, 0)
+
+		mfs, err := rs.Gather()
+		Expect(err).NotTo(HaveOccurred())
+		Expect(familyNames(mfs)).To(ContainElements("go_goroutines", constants.OpenBaoAuthenticatedMetric))
 	})
 
 	It("waits for no longer than its deadline on a signer that does not answer", func() {

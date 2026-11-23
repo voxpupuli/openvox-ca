@@ -51,9 +51,9 @@ func runInventoryVerify(ctx context.Context, c *ca.CA, interval time.Duration) {
 
 // verifyInventoryOnce runs a single pass. A failure is logged and swallowed so
 // the next tick tries again; CA.VerifyInventory has already counted it into
-// openvoxca_inventory_verify_failures_total. A mismatch has also been logged by
-// the storage layer, with the scheme and the repair hint, which is the line to
-// alert on in a log pipeline.
+// openvoxca_inventory_verify_failures_total, which is what to alert on. A
+// mismatch has also been logged by the storage layer, with the scheme and the
+// repair hint, for whoever answers the alert.
 func verifyInventoryOnce(ctx context.Context, c *ca.CA) {
 	if err := c.VerifyInventory(ctx); err != nil && ctx.Err() == nil {
 		slog.Warn("Inventory verification failed", "error", err)

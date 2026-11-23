@@ -58,7 +58,7 @@ the Unix epoch, the Prometheus convention for `*_timestamp_seconds` gauges.
 | --- | --- |
 | `go_*{role}` | Go runtime metrics (goroutines, GC, memory, `go_gc_gomemlimit_bytes`) from the standard Go collector, for each process with a Go runtime to report: the `frontend` and the `signer`, or the `single-process` server. See [one series per process](#one-series-per-process). |
 | `process_*{role}` | Process metrics (CPU, resident memory, open FDs) for the process serving `/metrics` where the platform supports them, and for the `launcher` and the `signer` on Linux. See [one series per process](#one-series-per-process). |
-| `openvoxca_http_requests_total{method,code}` | Total CA API requests, by HTTP method and response code. `PUT` `400`s include [duplicate certificate requests](configuration.md#duplicate-certificate-requests), which an agent waiting to be signed or cleaned sends on every poll, so a `PUT` `400` rate is not on its own a sign of malformed CSRs; the `SaveRequest refused: duplicate certificate request` log line tells them apart. |
+| `openvoxca_http_requests_total{method,code}` | Total CA API requests, by HTTP method and response code. `PUT` `400`s include [duplicate certificate requests](configuration.md#duplicate-certificate-requests), which an agent waiting to be signed or cleaned sends on every poll, so a `PUT` `400` rate is not on its own a sign of malformed CSRs; [`openvoxca_csr_duplicate_refusals_total`](#csr-submissions) counts them apart. |
 | `openvoxca_http_request_duration_seconds{method,code}` | CA API request latency histogram. |
 | `openvoxca_http_requests_in_flight` | CA API requests currently being served. |
 
@@ -92,6 +92,19 @@ launcher, has no PIDs to read, so its `process_*` series cover only itself; it
 still reports the signer's `go_*` series, which arrive over the socketpair
 rather than from `/proc`.
 
+That difference is what reveals a signer that is running but has stopped
+answering. Its `process_*` series stay, because the frontend reads them from
+`/proc`, while its `go_*` series, and `openvoxca_openbao_authenticated` with
+them, drop out of every scrape the signer does not answer within five seconds;
+the frontend logs `Could not read another process's Go runtime metrics` each
+time. Nothing else reports that state soon: readiness does not consult the
+signer, and a signature it does not answer fails only after two minutes.
+`OpenVoxCASignerUnresponsive` pages once the signer's process has had no
+`go_*` series for five minutes. It matches the two by `instance`, so it relies
+on each replica being its own target, as the chart's ServiceMonitor makes it
+unless `relabelings` collapse them. A signer that exits instead takes the
+frontend down with it, through the launcher.
+
 Aggregate by what the series measures:
 
 - **Memory against the container's limit:** `sum by (pod)
@@ -111,6 +124,7 @@ Aggregate by what the series measures:
 
 | Metric | Description |
 | --- | --- |
+| `openvoxca_csr_duplicate_refusals_total{state}` | Counter of CSR submissions refused with `400` as [duplicate certificate requests](configuration.md#duplicate-certificate-requests), by what the subject already held: `state="requested"` (a pending CSR), `"signed"` or `"revoked"` (a certificate). All three series are always present, and stay at `0` with `allow_duplicate_certs` on, which accepts these. `requested` rises steadily on a healthy CA with unsigned requests, since a waiting agent resubmits on every poll. `signed` and `revoked` are nodes that will not enrol until someone cleans them; the `WARN` the CA logs for each names the subject. Resets to `0` on process restart. |
 | `openvoxca_csr_rate_limited_total` | Counter of CSR submissions (`PUT /certificate_request`) refused with `429 Too Many Requests` because their client address was over [`csr_rate_limit`](configuration.md#rate-limit), or was new while the limiter was already tracking its maximum of addresses and no sweep freed room. Exported whenever the exporter is enabled, and stays at `0` while `csr_rate_limit` is `0`. Unlabelled: a label per client address would be unbounded, and any client could add to it. Resets to `0` on process restart. |
 
 The same refusals also show in `openvoxca_http_requests_total` as
@@ -440,6 +454,36 @@ All three are per-process. The bound itself is per-process too, so N replicas
 against one shared OpenBao Transit key permit N × the limit against that key —
 sum the series across the job to see what the signer actually faces.
 
+### OpenBao Transit session
+
+| Metric | Description |
+| --- | --- |
+| `openvoxca_openbao_authenticated` | `1` while the signer's most recent login to OpenBao succeeded, `0` from the first failed re-authentication until one succeeds. Present only where the CA key is an [OpenBao Transit key](openbao-transit.md). |
+
+The signer logs in before it starts, and does not start if it cannot, so the
+series reads `1` from the first scrape that carries it. It then drops to `0` the
+moment a re-authentication fails, whether the background renewal loop or a
+request refused with `403` asked for it, and returns to `1` on the next login
+that succeeds. A re-authentication declined because the last attempt was too
+recent attempts no login and leaves it unchanged. It describes the source
+credential, not the token in hand: a token revoked out of band reads `1` until
+the first `403` prompts a login.
+
+At `0` the signer cannot get a new token, so issuance, CRL re-signing and OCSP
+fail once the one in hand expires. It keeps renewing that token meanwhile, and
+retries the login every five seconds from its background loop, which also takes
+over the retry after a login a `403` prompted has failed, so the series returns
+to `1` by itself once a login can succeed, with or without further requests.
+`OpenVoxCAOpenBaoUnauthenticated` pages once it has read `0` for five minutes.
+
+The token manager runs in the signer, which has no listener of its own, so in
+the default deployment the frontend fetches this series from the signer along
+with the signer's `go_*` series. Like every `openvoxca_*` series it carries no
+`role`. If the signer cannot answer, the series is **absent** from that scrape,
+not `0`, as its `go_*` series are, so `OpenVoxCAOpenBaoUnauthenticated` cannot
+fire then. `OpenVoxCASignerUnresponsive` covers that state; see
+[one series per process](#one-series-per-process).
+
 ### OCSP responder
 
 | Metric | Description |
@@ -515,6 +559,34 @@ failed, after a further 5 minutes, so a single failure during a backend restart
 does not raise it. The CA log carries the detail: the
 `inventory HMAC mismatch` line, with the scheme and a repair hint, for a
 mismatch, and `Inventory verification failed` for a failed read.
+
+### Revocation and cleaning
+
+| Metric | Description |
+| --- | --- |
+| `openvoxca_destructive_operations_total{operation}` | Counter of subjects revoked or cleaned through the API, on success only, by `operation`: `revoke` (by subject or by serial), `clean`, or `bulk-clean` (`PUT /clean`), which counts each subject it removed rather than the request. All three series are always present. Resets to `0` on process restart. |
+| `openvoxca_clean_failures_total{step}` | Counter of failed steps of a clean, single or bulk, by `step`: `revoke`, `delete_cert` or `delete_csr`. All three series are always present. Resets to `0` on process restart. |
+
+A burst of destructive operations is a compromised administrator credential or
+an operational mistake. `OpenVoxCADestructiveOperationsHigh` warns when more
+than 25 subjects are revoked or cleaned across the CA's replicas in five
+minutes; a shorter burst stays under that, so see its `_config` keys in the
+mixin's README if one matters to you. The CA also logs `High rate of destructive operations detected` when
+one client passes 5 operations in a minute on one replica, with `client.cn`,
+`client.domain` and `operation`. That record says who; the counter is what to
+alert on, since a label per client would be unbounded. See
+[monitoring destructive operations](ca-key-security.md#monitoring-destructive-operations).
+
+A clean carries on past a failed step and still answers `204` (`200` for a bulk
+clean), so `openvoxca_clean_failures_total` is the only signal that one left
+something behind. After a failed `revoke` the deleted certificate stays a valid
+credential until it expires; revoke it [by serial](api.md#revocation-by-serial).
+This step counts every failure, including the two arms
+`openvoxca_crl_update_failures_total` leaves out: a CRL lock that could not be
+taken, and an inventory with no entry for the certificate. After a failed
+`delete_cert` or `delete_csr` the subject cannot enrol again until it is
+cleaned once more. `OpenVoxCACleanIncomplete` warns on a single failure. The
+`Clean:` warnings in the CA log name the subject.
 
 ### Delayed supersession
 
@@ -892,6 +964,11 @@ is stored. See
 
 See the [`mixin/`](https://github.com/voxpupuli/openvox-ca/tree/main/mixin) directory for the Jsonnet monitoring mixin and
 instructions for rendering or importing it. It alerts on exporter availability,
+subjects revoked or cleaned in bulk (`openvoxca_destructive_operations_total`),
+a clean that left something behind (`openvoxca_clean_failures_total`), an
+OpenBao signer that cannot log in (`openvoxca_openbao_authenticated`), a
+signer that has stopped answering (its `go_*` series gone while its process is
+present),
 CA/CRL/leaf expiry, pending requests, CRL update failures
 (`openvoxca_crl_update_failures_total`), a replica whose CRL has fallen behind
 the stored one (`openvoxca_crl_cached_number`,
@@ -958,13 +1035,16 @@ fires. To keep those silent, set the mixin's `crlUpdateThreshold` to `3` and
 
 One failure the CA does not retry falls below the CRL-update threshold: a
 best-effort revocation, which the CA logs and abandons rather than returning an
-error. That is the revocation in a clean, and the immediate revocation of a
-certificate that a renewal replaced (where `superseded_cert_revoke_after_sec`
-is `0`) or that a managed certificate's reissue replaced (where its effective
-`revoke_after` is `0`). A failure leaves the certificate valid, and if it is
-the only one in the window — a transient fault, or a sign- or write-only fault
-on a CA that is otherwise quiet — only its log warning reports it. See the note
-under [CRL](#crl) for the lines to grep for. With an overlap window the
+error. The revocation in a clean is one, and is counted on its own in
+[`openvoxca_clean_failures_total{step="revoke"}`](#revocation-and-cleaning),
+which `OpenVoxCACleanIncomplete` warns on at the first failure. The others are
+the immediate revocation of a certificate that a renewal replaced (where
+`superseded_cert_revoke_after_sec` is `0`) or that a managed certificate's
+reissue replaced (where its effective `revoke_after` is `0`). A failure there
+leaves the certificate valid, and if it is the only one in the window — a
+transient fault, or a sign- or write-only fault on a CA that is otherwise quiet
+— only its log warning reports it. See the note under [CRL](#crl) for the lines
+to grep for. With an overlap window the
 revocation is on the pending list instead, and `OpenVoxCASupersedeFailing`
 still fires on a single failure. A revocation an operator asked for is not
 abandoned: it fails with an error to the caller.
