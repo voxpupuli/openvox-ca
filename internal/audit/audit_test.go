@@ -121,22 +121,55 @@ var _ = Describe("the audit event set", func() {
 
 	// The set is closed only if nothing emits an event the constants do not
 	// name. So every audit.Event call outside this package must pass one of
-	// them, and no slog call may spell the "event" key itself, which would be
-	// an audit record the table cannot list.
-	It("is emitted only through audit.Event and its constants", func() {
+	// them, and no other call may pass the "event" key itself, as a literal
+	// or as audit.Key, which would be an audit record the table cannot list.
+	//
+	// inspect reports a file's audit.Event calls and its problems. "Any other
+	// call", not "any slog call": a record logged through a *slog.Logger, or
+	// through slog.Default(), has a receiver that is not the slog package.
+	inspect := func(path string, f *ast.File) (calls int, problems []string) {
 		names := map[string]bool{}
 		for _, e := range declared() {
 			names[e.name] = true
 		}
-		// isConstant reports whether arg is audit.<one of the event constants>.
-		isConstant := func(arg ast.Expr) bool {
-			sel, ok := arg.(*ast.SelectorExpr)
+		// auditSel reports whether e is audit.<name>, and which name.
+		auditSel := func(e ast.Expr) (string, bool) {
+			sel, ok := e.(*ast.SelectorExpr)
 			if !ok {
-				return false
+				return "", false
 			}
 			x, ok := sel.X.(*ast.Ident)
-			return ok && x.Name == "audit" && names[sel.Sel.Name]
+			if !ok || x.Name != "audit" {
+				return "", false
+			}
+			return sel.Sel.Name, true
 		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if name, ok := auditSel(call.Fun); ok && name == "Event" {
+				calls++
+				if c, ok := auditSel(call.Args[0]); !ok || !names[c] {
+					problems = append(problems, path+": audit.Event is not passed one of audit's event constants")
+				}
+				return true
+			}
+			for _, a := range call.Args {
+				if lit, ok := a.(*ast.BasicLit); ok && lit.Value == `"event"` {
+					problems = append(problems, path+`: a call passes the "event" key itself; use audit.Event`)
+				}
+				if name, ok := auditSel(a); ok && name == "Key" {
+					problems = append(problems, path+": a call passes audit.Key itself; use audit.Event")
+				}
+			}
+			return true
+		})
+		return calls, problems
+	}
+
+	It("is emitted only through audit.Event and its constants", func() {
 		root := filepath.Join("..", "..")
 		var calls int
 		var problems []string
@@ -158,34 +191,9 @@ var _ = Describe("the audit event set", func() {
 			if err != nil {
 				return err
 			}
-			ast.Inspect(f, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				pkg, ok := sel.X.(*ast.Ident)
-				if !ok {
-					return true
-				}
-				switch {
-				case pkg.Name == "audit" && sel.Sel.Name == "Event":
-					calls++
-					if !isConstant(call.Args[0]) {
-						problems = append(problems, path+": audit.Event is not passed one of audit's event constants")
-					}
-				case pkg.Name == "slog":
-					for _, a := range call.Args {
-						if lit, ok := a.(*ast.BasicLit); ok && lit.Value == `"event"` {
-							problems = append(problems, path+`: a slog call spells the "event" key itself; use audit.Event`)
-						}
-					}
-				}
-				return true
-			})
+			c, p := inspect(path, f)
+			calls += c
+			problems = append(problems, p...)
 			return nil
 		})
 		Expect(err).NotTo(HaveOccurred())
@@ -193,5 +201,32 @@ var _ = Describe("the audit event set", func() {
 		// The floor: the three emission sites #666 added are found, so a walk
 		// that reads nothing cannot pass.
 		Expect(calls).To(BeNumerically(">=", 3), "the sweep found too few audit.Event calls to be reading the tree")
+	})
+
+	// The tree is clean, so the sweep above passes whether or not inspect can
+	// see a fault at all. These plant one of each kind.
+	DescribeTable("inspect refuses a record the table cannot list",
+		func(body, want string) {
+			src := "package p\nfunc f() {\n" + body + "\n}\n"
+			f, err := parser.ParseFile(token.NewFileSet(), "planted.go", src, 0)
+			Expect(err).NotTo(HaveOccurred())
+			_, problems := inspect("planted.go", f)
+			Expect(problems).To(ConsistOf(ContainSubstring(want)))
+		},
+		Entry("through the slog package", `slog.Info("x", "event", "made.up")`, `passes the "event" key itself`),
+		Entry("through a *slog.Logger", `logger.Info("x", "event", "made.up")`, `passes the "event" key itself`),
+		Entry("through slog.Default()", `slog.Default().Warn("x", "event", "made.up")`, `passes the "event" key itself`),
+		Entry("through slog.String", `logger.Info("x", slog.String("event", "made.up"))`, `passes the "event" key itself`),
+		Entry("with audit.Key", `logger.Info("x", audit.Key, "made.up")`, "passes audit.Key itself"),
+		Entry("with a literal event name", `logger.Info("x", audit.Event("made.up"))`, "not passed one of audit's event constants"),
+	)
+
+	It("inspect accepts an event logged through audit.Event and a constant", func() {
+		src := "package p\nfunc f() {\nlogger.Info(\"x\", audit.Event(audit.SignerRequestRefused), \"events\", 2)\n}\n"
+		f, err := parser.ParseFile(token.NewFileSet(), "planted.go", src, 0)
+		Expect(err).NotTo(HaveOccurred())
+		calls, problems := inspect("planted.go", f)
+		Expect(problems).To(BeEmpty())
+		Expect(calls).To(Equal(1))
 	})
 })
