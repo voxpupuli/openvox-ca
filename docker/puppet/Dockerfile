@@ -7,7 +7,7 @@
 # The entrypoint.sh bootstraps TLS certificates from the Go CA, configures
 # webserver.conf and puppet.conf, then starts `puppetserver foreground`.
 
-FROM registry.access.redhat.com/ubi10/ubi:10.3@sha256:73ea54bfbfb586075bd3d45df6483a7f68875233c8cc7cebcf9b2bb42306c308
+FROM registry.access.redhat.com/ubi10/ubi:10.3@sha256:87ceab8634a53a36c75a8ba7282f09f11c46ab3e8906db6c6d2b3cd2a7dc4f4e
 
 # Install OpenVox Server + PuppetDB terminus + runtime tools.
 RUN dnf -y install https://yum.voxpupuli.org/openvox8-release-el-10.noarch.rpm && \
