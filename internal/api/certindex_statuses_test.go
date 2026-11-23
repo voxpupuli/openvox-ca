@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -305,8 +306,9 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 	})
 
 	It("lists an imported certificate's IP SANs from the index exactly as from the stored PEM", func() {
-		// The signing path copies DNS SANs only, so a certificate carrying IP
-		// SANs reaches the index by import (or a migrated cadir).
+		// Imported rather than signed, so the fixture needs neither a CSR nor
+		// allow_subject_alt_names: an import (or a migrated cadir) is one of
+		// the ways a certificate carrying IP SANs reaches the index.
 		keyBlock, _ := pem.Decode(cachedKeyPEM)
 		Expect(keyBlock).NotTo(BeNil())
 		caKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
@@ -347,6 +349,65 @@ var _ = Describe("Certificate statuses via the certificate index", func() {
 		var single api.CertStatusResponse
 		Expect(json.Unmarshal(rr.Body.Bytes(), &single)).To(Succeed())
 		Expect(single.SubjectAltNames).To(Equal(want), "the per-certificate path must agree")
+	})
+
+	It("lists only the IP and DNS SANs of a request and of the certificate signed from it", func() {
+		// Signing copies all four SAN kinds, but the status response lists the
+		// IP and DNS ones only, as OpenVox Server's does (docs/api.md). Pinned
+		// in both states a request passes through: pending, where an operator
+		// reviews it before signing, and signed, served from the index.
+		spiffe, err := url.Parse("spiffe://example.com/idx-kinds")
+		Expect(err).NotTo(HaveOccurred())
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		Expect(err).NotTo(HaveOccurred())
+		csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+			Subject:        pkix.Name{CommonName: "idx-kinds"},
+			DNSNames:       []string{"idx-kinds.example.com"},
+			IPAddresses:    []net.IP{net.ParseIP("192.0.2.30")},
+			EmailAddresses: []string{"ops@example.com"},
+			URIs:           []*url.URL{spiffe},
+		}, key)
+		Expect(err).NotTo(HaveOccurred())
+		csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+
+		statusOf := func() api.CertStatusResponse {
+			GinkgoHelper()
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest("GET", "/certificate_status/idx-kinds", nil))
+			Expect(rr.Code).To(Equal(http.StatusOK))
+			var st api.CertStatusResponse
+			Expect(json.Unmarshal(rr.Body.Bytes(), &st)).To(Succeed())
+			return st
+		}
+		want := []string{"IP:192.0.2.30", "DNS:idx-kinds.example.com"}
+
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_request/idx-kinds", bytes.NewReader(csrPEM)))
+		Expect(rr.Code).To(Equal(http.StatusOK))
+		pending := statusOf()
+		Expect(pending.State).To(Equal("requested"))
+		Expect(pending.SubjectAltNames).To(Equal(want))
+		Expect(pending.DNSAltNames).To(Equal([]string{"DNS:idx-kinds.example.com"}))
+
+		body, err := json.Marshal(api.PutStatusBody{DesiredState: "signed"})
+		Expect(err).NotTo(HaveOccurred())
+		rr = httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest("PUT", "/certificate_status/idx-kinds", bytes.NewReader(body)))
+		Expect(rr.Code).To(Equal(http.StatusNoContent))
+
+		// The fixture must really carry the kinds the response leaves out,
+		// or the assertions below would hold for the wrong reason.
+		cert := storedCert(ctx, store, "idx-kinds")
+		Expect(cert.EmailAddresses).To(ConsistOf("ops@example.com"))
+		Expect(cert.URIs).To(HaveLen(1))
+
+		signed := statusOf()
+		Expect(signed.State).To(Equal("signed"))
+		Expect(signed.SubjectAltNames).To(Equal(want))
+		statuses := getStatuses("")
+		Expect(statuses).To(HaveLen(1))
+		Expect(statuses[0].SubjectAltNames).To(Equal(want), "the index listing must agree")
+		Expect(statuses[0].DNSAltNames).To(Equal([]string{"DNS:idx-kinds.example.com"}))
 	})
 
 	It("encodes an indexed serial as a JSON number by default", func() {

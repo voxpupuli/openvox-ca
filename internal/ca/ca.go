@@ -142,11 +142,12 @@ type CA struct {
 	EncryptCAKey bool
 
 	// PromoteCNToSAN, when true (the default), adds the CSR's Common Name as a
-	// DNS Subject Alternative Name when the CSR carries no SANs. RFC 2818 §3.1
-	// deprecated CN-based hostname verification in favour of the SAN extension;
-	// modern TLS clients (Go stdlib, Chrome, etc.) ignore the CN entirely. Set
-	// to false only when issuing certificates to legacy clients that cannot
-	// handle the SAN extension.
+	// DNS Subject Alternative Name when the CSR carries no DNS SAN, whatever IP,
+	// email or URI SANs it carries. RFC 2818 §3.1 deprecated CN-based hostname
+	// verification in favour of the SAN extension; modern TLS clients (Go
+	// stdlib, Chrome, etc.) ignore the CN entirely. Set to false only when
+	// issuing certificates to legacy clients that cannot handle the SAN
+	// extension.
 	PromoteCNToSAN bool
 
 	// AllowSubjectAltNames, when true, lets a submitted CSR request Subject
@@ -163,10 +164,9 @@ type CA struct {
 	// operator arriving from Puppet Server expects to exist and to be off.
 	// NIST 800-53: AC-6 (Least Privilege), IA-5(2) (PKI-Based Authentication)
 	//
-	// Enforcement only: it decides what a CSR may *ask* for, not what is
-	// issued. Only DNS names are carried onto a certificate today, so with this
-	// set to true a request for an IP, email or URI SAN is signed and the SAN
-	// dropped — see #241, which adds the carry-through this gate assumes.
+	// It covers all four SAN kinds crypto/x509 parses (DNS, IP, email, URI),
+	// which are the four a signed CSR carries onto its certificate: with this
+	// set to true each is issued as requested, as OpenVox Server issues them.
 	//
 	// The boundary is where the names come from, not the caller: this governs
 	// names carried on a submitted certificate request, wherever it arrives

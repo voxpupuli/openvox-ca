@@ -218,7 +218,7 @@ func (c *CA) GenerateWithOptions(ctx context.Context, subject string, opts Gener
 	}
 
 	// RFC 2818 3.1: TLS clients match the name against SANs, not the CN. The
-	// CSR path promotes the CN when a request carries no SANs; do the same here
+	// CSR path promotes the CN when a request carries no DNS SAN; do the same here
 	// so a generated certificate behaves identically to a signed one.
 	dnsNames := opts.DNSAltNames
 	if c.PromoteCNToSAN && len(dnsNames) == 0 {

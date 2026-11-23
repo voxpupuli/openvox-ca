@@ -55,7 +55,7 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 		RateLimitIPv6PrefixLength: 128,
 		// Same sentinel convention; see resolveSigningConcurrency.
 		CASigningConcurrency: -1,
-		PromoteCNToSAN:       true, // RFC 2818: add CN as SAN when CSR has no SANs
+		PromoteCNToSAN:       true, // RFC 2818: add CN as SAN when CSR has no DNS SAN
 		// AllowSubjectAltNames defaults to false — see the field comment. Left
 		// implicit here would make the safe default look like an oversight.
 		AllowSubjectAltNames: false,

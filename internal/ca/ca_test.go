@@ -290,7 +290,7 @@ var _ = Describe("CA Lifecycle", func() {
 			Expect(parseCert(certPEM).DNSNames).To(ConsistOf("test-node"))
 		})
 
-		It("does not promote CN when the CSR already carries SANs", func() {
+		It("does not promote CN when the CSR already carries a DNS SAN", func() {
 			// A CSR may only request SANs of its own where policy allows it,
 			// so this spec has to opt in to have anything to not-promote over.
 			myCA.AllowSubjectAltNames = true
