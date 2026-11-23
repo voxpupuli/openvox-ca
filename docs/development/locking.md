@@ -279,17 +279,18 @@ other replicas see nothing new. Priority is the default and yielding is opt-in,
 so a foreground operation added later is protected without anyone remembering
 to mark it.
 
-The four background jobs that write the CRL take it through
-`WithLockYielding`: `CleanupExpiredCerts`, `ReconcileSuperseded`,
-`RefreshCRLIfDue` and `RefreshCRLChainFile`. Every other acquisition of `crl`
-is foreground. What decides which side a job is on is whether anyone is
-waiting on it. Work an operator or a correctness path is waiting on keeps
-`WithLock`: `Revoke`, `RevokeSerial`, `ReissueCRL`, and `ReconcileManaged`'s
-rollback and the retirements it revokes inline, though that job runs on a
-timer. Scheduled work whose timing is already approximate yields: expiry
-pruning, the CRL refresh and the chain refresh, and the delayed-supersession
-sweep, whose revocations are owed after a window anyway and which #347 names as
-a sweep.
+The five background jobs that write the CRL take it through `WithLockYielding`:
+`CleanupExpiredCerts`, `ReconcileSuperseded`, `RefreshCRLIfDue`,
+`RefreshCRLChainFile` and `MergeFetchedUpstreamCRLs`, the `crl_chain.urls`
+merge. Every other acquisition of `crl` is foreground. What decides which side a
+job is on is whether anyone is waiting on it. Work an operator or a correctness
+path is waiting on keeps `WithLock`: `Revoke`, `RevokeSerial`, `ReissueCRL`, and
+`ReconcileManaged`'s rollback and the retirements it revokes inline, though that
+job runs on a timer. Scheduled work whose timing is already approximate yields:
+expiry pruning, the CRL refresh, the chain refresh and the `crl_chain.urls`
+merge (whose fetch runs before it takes the lock, never under it), and the
+delayed-supersession sweep, whose revocations are owed after a window anyway and
+which #347 names as a sweep.
 
 Recording a supersession is neither. `recordSuperseded`, the retire step of
 `Renew`, `AutoRenew`, `RenewStored` and `ReconcileManaged` while the window is
@@ -878,7 +879,8 @@ path — still provides no cross-replica guarantee anyway.
     table claim coverage it does not have.
 13. **Background work on the CRL lock yields, in bounded steps.** Scheduled
     work on `crl` whose timing is already approximate — expiry pruning, the
-    CRL refresh, the chain refresh, the delayed-supersession sweep — takes it
+    CRL refresh, the chain refresh, the `crl_chain.urls` merge, the
+    delayed-supersession sweep — takes it
     through `WithLockYielding`, through `withCRLLockYielding` in the CA if a
     failure to take it should move `crl_update_failures`. Each hold is bounded by
     `sweepStepBudget`; a sweep takes its steps through `CA.sweepStep`. Do not

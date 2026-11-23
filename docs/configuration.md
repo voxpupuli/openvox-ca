@@ -850,7 +850,10 @@ is not.
 
 **A fetch never blocks revocation.** Between rounds, revoking a certificate
 carries the stored ancestor CRLs forward unchanged, so an unreachable upstream
-cannot fail a revocation the way an unreadable `crl_chain.file` does.
+cannot fail a revocation the way an unreadable `crl_chain.file` does. Nor does
+a round's merge hold one up: it takes the CRL lock only after the fetch, as a
+background job that stands aside for a revocation waiting for the lock (see
+[locking](development/locking.md#revocations-go-before-background-work)).
 
 What each entry's result does:
 

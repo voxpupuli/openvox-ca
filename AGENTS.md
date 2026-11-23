@@ -259,7 +259,8 @@ the inventory, in-memory caches) must follow
   second recognised pattern — see locking.md for when each applies.
 - **A revocation always goes before background work on `crl`** (#347).
   Scheduled work whose timing is approximate — expiry pruning, the CRL and
-  chain refreshes, the delayed-supersession sweep — takes `crl` through
+  chain refreshes, the `crl_chain.urls` merge, the delayed-supersession
+  sweep — takes `crl` through
   `StorageService.WithLockYielding` (in the CA, `withCRLLockYielding` or
   `CA.sweepStep`), in holds bounded by `sweepStepBudget`, and never derives a
   detached context inside the lock. Work an operator or a correctness path is

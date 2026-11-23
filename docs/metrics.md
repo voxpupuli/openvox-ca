@@ -313,14 +313,14 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 >
 > It also counts a write path that could not take the CRL lock at all, on the
 > six writers that go through `withCRLLockCounted` or its background twin
-> `withCRLLockYielding` — revoke by subject, revoke by serial, reissue and the
-> `crl_chain.urls` merge through the first, refresh and cleanup through the
+> `withCRLLockYielding` — revoke by subject, revoke by serial and reissue
+> through the first, refresh, cleanup and the `crl_chain.urls` merge through the
 > second. The closure never runs in that case, so nothing beneath it could count
-> anything. Refresh and cleanup are background jobs: they stand aside while any
-> foreground CRL work is waiting for the lock (a revocation, a clean or a
-> reissue) and give up after 15 seconds rather than 60. So a run of foreground
-> CRL work lasting a whole 15 seconds counts here too, as a refresh or cleanup
-> step that did not happen, and the server logs it as
+> anything. Refresh, cleanup and the merge are background jobs: they stand aside
+> while any foreground CRL work is waiting for the lock (a revocation, a clean
+> or a reissue) and give up after 15 seconds rather than 60. So a run of
+> foreground CRL work lasting a whole 15 seconds counts here too, as a refresh,
+> cleanup or merge step that did not happen, and the server logs it as
 > `waiting to acquire lock "crl" behind a priority caller` (see
 > [locking](development/locking.md#revocations-go-before-background-work)).
 > A wait that a shutdown ends is not counted: the process is stopping, and the

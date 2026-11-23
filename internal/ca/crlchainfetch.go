@@ -278,6 +278,12 @@ type UpstreamMergeResult struct {
 // a storage read, the re-sign -- no entry is recorded as a success, and the
 // failure is counted as a CRL update failure rather than against any URL,
 // whose fault it is not.
+//
+// Background work, so the merge runs as one sweep step through sweepStep and
+// withCRLLockYielding: a revocation waiting in this process goes first, and one
+// arriving after it starts waits for no longer than a step's budget plus the CA
+// signature it has in flight (#347). Only the merge and its re-sign hold the
+// lock; the fetch that feeds them ran before this was called.
 func (c *CA) MergeFetchedUpstreamCRLs(ctx context.Context, fetched []UpstreamFetch) (UpstreamMergeResult, error) {
 	verdicts := make([]error, len(fetched))
 	for i, f := range fetched {
@@ -289,14 +295,11 @@ func (c *CA) MergeFetchedUpstreamCRLs(ctx context.Context, fetched []UpstreamFet
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
-	defer cancel()
-
 	var events []mergeEvent
 	rewritten := false
 	usable := false
 	now := time.Now()
-	err := c.withCRLLockCounted(ctx, func() error {
+	err := c.sweepStep(ctx, c.withCRLLockYielding, func(ctx context.Context) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
