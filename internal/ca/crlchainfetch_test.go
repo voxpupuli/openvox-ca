@@ -308,7 +308,6 @@ var _ = Describe("MergeFetchedUpstreamCRLs", func() {
 			{URL: urlSub, Err: errors.New("timeout")},
 		})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Complete).To(BeFalse())
 		Expect(res.Usable).To(BeTrue(), "the condition a restart checks, so the one that releases the hold")
 	})
 
@@ -452,26 +451,21 @@ var _ = Describe("MergeFetchedUpstreamCRLs", func() {
 		Expect(verdicts).To(Equal([]error{nil, nil}))
 	})
 
-	It("reports a round complete only when every entry identified its ancestor", func() {
-		res, err := myCA.MergeFetchedUpstreamCRLs(ctx, []ca.UpstreamFetch{
-			{URL: urlRoot, CRL: crlOf(root, rootKey, 3)},
-			{URL: urlSub, Err: errors.New("timeout")},
-		})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Complete).To(BeFalse())
-
-		// An older CRL still names its ancestor, so it completes a round even
-		// though the entry fails.
-		res, err = myCA.MergeFetchedUpstreamCRLs(ctx, []ca.UpstreamFetch{
-			{URL: urlRoot, CRL: crlOf(root, rootKey, 2)},
-			{URL: urlSub, CRL: crlOf(sub, subKey, 5)},
-		})
-		Expect(err).NotTo(HaveOccurred())
-		Expect(res.Complete).To(BeTrue())
-		Expect(res.Verdicts[0]).To(HaveOccurred())
-	})
-
 	Describe("removal", func() {
+		// What a round decided is pinned through what an operator sees: the
+		// published chain, crl_chain_removed_total and the log. A complete
+		// round that may not remove says so at WARN, naming the ancestor it
+		// keeps and why; a partial round says nothing (see "an ancestor no
+		// entry serves, in a round that may not remove it" below).
+		var buf *bytes.Buffer
+
+		BeforeEach(func() {
+			buf = &bytes.Buffer{}
+			orig := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			DeferCleanup(func() { slog.SetDefault(orig) })
+		})
+
 		// The attack this guards against: over plain http, an attacker on the
 		// path answers one entry with another ancestor's CRL (public, and so
 		// valid). Were that round allowed to remove, the real ancestor would be
@@ -498,8 +492,11 @@ var _ = Describe("MergeFetchedUpstreamCRLs", func() {
 					{URL: subURL, CRL: crlOf(bystander, bystanderKey, 1)},
 				})
 				Expect(err).NotTo(HaveOccurred())
-				Expect(res.Complete).To(BeTrue(), "precondition: every entry named an ancestor")
-				Expect(res.Authoritative).To(BeFalse())
+				Expect(res.Verdicts).To(Equal([]error{nil, nil}), "precondition: every entry named an ancestor")
+				Expect(buf.String()).To(ContainSubstring("may not remove it"),
+					"precondition: the round was complete, so only the http:// rule kept the ancestor")
+				Expect(buf.String()).To(ContainSubstring(`issuer="CN=Upstream Sub CA"`))
+				Expect(buf.String()).To(ContainSubstring("plain http://"))
 				Expect(upstream()).To(HaveKeyWithValue("Upstream Sub CA", int64(7)))
 				Expect(myCA.CRLChainRemoved()).To(Equal(removed))
 
@@ -525,8 +522,10 @@ var _ = Describe("MergeFetchedUpstreamCRLs", func() {
 				{URL: urlSub, CRL: crlOf(root, rootKey, 3)},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(res.Complete).To(BeTrue())
-			Expect(res.Authoritative).To(BeFalse())
+			Expect(res.Verdicts).To(Equal([]error{nil, nil}), "precondition: both entries named an ancestor")
+			Expect(buf.String()).To(ContainSubstring("may not remove it"))
+			Expect(buf.String()).To(ContainSubstring(`issuer="CN=Upstream Sub CA"`))
+			Expect(buf.String()).To(ContainSubstring("two entries name the same ancestor"))
 			Expect(upstream()).To(HaveKey("Upstream Sub CA"))
 		})
 
@@ -539,16 +538,25 @@ var _ = Describe("MergeFetchedUpstreamCRLs", func() {
 			Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
 				pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: other.Raw})...))).To(Succeed())
 			publish(crlOf(root, rootKey, 3), crlOf(other, otherKey, 2), crlOf(sub, subKey, 5))
-			res, err := myCA.MergeFetchedUpstreamCRLs(ctx, []ca.UpstreamFetch{
+			removed := myCA.CRLChainRemoved()
+			_, err = myCA.MergeFetchedUpstreamCRLs(ctx, []ca.UpstreamFetch{
 				{URL: urlRoot, CRL: crlOf(root, rootKey, 3)},
 				{URL: fileSub, CRL: crlOf(sub, subKey, 5)},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(res.Authoritative).To(BeTrue())
 			Expect(upstream()).NotTo(HaveKey("Retired CA"))
+			Expect(myCA.CRLChainRemoved()).To(Equal(removed + 1))
 		})
 
 		It("does not let an entry serving this CA's own CRL stop a round being complete", func() {
+			// A published ancestor no entry serves: a complete round names it
+			// in a warning, and a partial one says nothing.
+			retired, retiredKey, _ := upstreamCAWithKey("Retired CA")
+			ours, err := store.GetCACert(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+				pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: retired.Raw})...))).To(Succeed())
+			publish(crlOf(root, rootKey, 3), crlOf(retired, retiredKey, 2), crlOf(sub, subKey, 5))
 			own := crlBlocks(mustGetCRL(ctx, store))[0]
 			const ownURL = "https://pki.example/self.crl"
 			myCA.SetCRLChainURLs([]string{urlRoot, urlSub, ownURL})
@@ -558,8 +566,32 @@ var _ = Describe("MergeFetchedUpstreamCRLs", func() {
 				{URL: ownURL, CRL: own},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(res.Complete).To(BeTrue(), "the entry names no ancestor, so it is ignored")
 			Expect(res.Verdicts[2]).To(MatchError(ContainSubstring("this CA's own CRL")))
+			Expect(buf.String()).To(ContainSubstring("may not remove it"),
+				"the entry names no ancestor, so it is ignored and the round stays complete")
+			Expect(buf.String()).To(ContainSubstring(`issuer="CN=Retired CA"`))
+		})
+
+		It("counts an entry whose CRL is older than the one published as naming its ancestor", func() {
+			// Its verdict fails, but the CRL still names its ancestor, so the
+			// round is complete and, every entry being https://, may remove the
+			// ancestor nothing serves.
+			retired, retiredKey, _ := upstreamCAWithKey("Retired CA")
+			ours, err := store.GetCACert(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(store.SaveCACert(ctx, append(append([]byte{}, ours...),
+				pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: retired.Raw})...))).To(Succeed())
+			publish(crlOf(root, rootKey, 3), crlOf(retired, retiredKey, 2), crlOf(sub, subKey, 5))
+			removed := myCA.CRLChainRemoved()
+			res, err := myCA.MergeFetchedUpstreamCRLs(ctx, []ca.UpstreamFetch{
+				{URL: urlRoot, CRL: crlOf(root, rootKey, 2)},
+				{URL: urlSub, CRL: crlOf(sub, subKey, 5)},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Verdicts[0]).To(HaveOccurred(), "precondition: the older CRL is refused")
+			Expect(upstream()).NotTo(HaveKey("Retired CA"))
+			Expect(upstream()).To(HaveKeyWithValue("Upstream Root CA", int64(3)), "the published CRL is kept")
+			Expect(myCA.CRLChainRemoved()).To(Equal(removed + 1))
 		})
 
 		// The same attack as over http://, by an origin that is authenticated
@@ -577,8 +609,11 @@ var _ = Describe("MergeFetchedUpstreamCRLs", func() {
 				{URL: urlSub, CRL: own},
 			})
 			Expect(err).NotTo(HaveOccurred())
-			Expect(res.Complete).To(BeTrue(), "precondition: the own-CRL entry is ignored, not partial")
-			Expect(res.Authoritative).To(BeFalse())
+			Expect(res.Verdicts[1]).To(MatchError(ContainSubstring("this CA's own CRL")))
+			Expect(buf.String()).To(ContainSubstring("may not remove it"),
+				"precondition: the own-CRL entry is ignored, not partial")
+			Expect(buf.String()).To(ContainSubstring(`issuer="CN=Upstream Sub CA"`))
+			Expect(buf.String()).To(ContainSubstring("an entry serves this CA's own CRL"))
 			Expect(upstream()).To(HaveKeyWithValue("Upstream Sub CA", int64(7)))
 			Expect(myCA.CRLChainRemoved()).To(Equal(removed))
 

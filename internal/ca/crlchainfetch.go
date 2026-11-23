@@ -196,19 +196,6 @@ type mergeEvent struct {
 type UpstreamMergeResult struct {
 	// Rewritten is whether the published chain changed.
 	Rewritten bool
-	// Complete is whether every entry yielded its issuer's full CRL from a
-	// certificate in the bundle (or this CA's own, which is ignored), so the
-	// round could say which ancestors the list covers. A delta or IDP-scoped
-	// CRL names no ancestor, so it leaves the round incomplete. Reported for
-	// observation and for the specs that pin the removal rule; the fetch job
-	// does not act on it.
-	Complete bool
-	// Authoritative is whether the round was allowed to remove an ancestor:
-	// complete, every entry fetched over https:// or from a file:/// path, no
-	// entry serving this CA's own CRL, and no two entries naming the same
-	// ancestor. See planUpstreamMerge. Reported as Complete is; the decision it
-	// records was taken, and logged, here.
-	Authoritative bool
 	// Usable is whether the chain as it stands after the merge holds any
 	// upstream CRL -- the condition HoldReadinessForUpstreamChain checks at
 	// startup, and so the one that releases the hold.
@@ -307,7 +294,7 @@ func (c *CA) MergeFetchedUpstreamCRLs(ctx context.Context, fetched []UpstreamFet
 
 	var events []mergeEvent
 	rewritten := false
-	complete, authoritative, usable := false, false, false
+	usable := false
 	now := time.Now()
 	err := c.withCRLLockCounted(ctx, func() error {
 		c.mu.Lock()
@@ -330,7 +317,6 @@ func (c *CA) MergeFetchedUpstreamCRLs(ctx context.Context, fetched []UpstreamFet
 
 		plan := c.planUpstreamMerge(issuers, published, fetched, verdicts, now)
 		events = plan.events
-		complete, authoritative = plan.complete, plan.authoritative
 		usable = len(plan.upstream) > 0
 		if sameCRLSet(published, plan.upstream) {
 			return nil
@@ -403,8 +389,7 @@ func (c *CA) MergeFetchedUpstreamCRLs(ctx context.Context, fetched []UpstreamFet
 			s.lastSuccess.Store(now.Unix())
 		}
 	}
-	return UpstreamMergeResult{Rewritten: rewritten, Complete: complete, Authoritative: authoritative,
-		Usable: usable, Verdicts: verdicts}, nil
+	return UpstreamMergeResult{Rewritten: rewritten, Usable: usable, Verdicts: verdicts}, nil
 }
 
 // recordFetchFailure counts and logs an entry that did not yield a usable,
@@ -430,10 +415,8 @@ type upstreamMergePlan struct {
 	upstream []*x509.RevocationList
 	// removed holds one log line per ancestor an authoritative round drops; the
 	// caller counts and logs them once the write lands.
-	removed       []mergeEvent
-	events        []mergeEvent
-	complete      bool
-	authoritative bool
+	removed []mergeEvent
+	events  []mergeEvent
 }
 
 // planUpstreamMerge judges each fetched CRL, filling verdicts, and works out
@@ -507,7 +490,6 @@ func (c *CA) planUpstreamMerge(issuers []*x509.Certificate, published []*x509.Re
 		named[string(signers[i].Raw)] = true
 	}
 	removing := complete && authenticated && noneOwn && unambiguous
-	plan.complete, plan.authoritative = complete, removing
 
 	// The newest published CRL per ancestor, as monotonicUpstream takes it.
 	current := newestPerAncestor(issuers, published)
