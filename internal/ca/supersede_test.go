@@ -266,6 +266,26 @@ var _ = Describe("Delayed supersession", func() {
 			Expect(entries[0].Subject).To(Equal("node-i"))
 		})
 
+		It("signals CRL consumers when it revokes", func() {
+			// CRLUpdated's documentation and docs/kubernetes-export.md list a
+			// delayed supersession among the re-export triggers; without the
+			// signal an exported CRL lacks the retired serial until the next
+			// local re-sign.
+			due := issue("node-sig")
+			writePending([]pendingEntry{
+				{Serial: hexSerial(due.SerialNumber), Subject: "node-sig", RevokeAt: time.Now().UTC().Add(-time.Minute)},
+			})
+			select {
+			case <-myCA.CRLUpdated():
+			default:
+			}
+
+			count, err := myCA.ReconcileSuperseded(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(count).To(Equal(1))
+			Eventually(myCA.CRLUpdated()).Should(Receive())
+		})
+
 		// Each entry's window was fixed when the supersession was recorded.
 		// Turning the delay off afterwards changes what future renewals record;
 		// it must not retroactively expire a window a fleet may be mid-way
