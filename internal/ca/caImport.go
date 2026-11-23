@@ -376,8 +376,11 @@ func importCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 	// The lock is cross-process on every backend since #187 — the single-node
 	// ones coordinate two processes on a host with flock(2) — so a live import
 	// no longer loses a concurrent revocation. The documentation still says to
-	// stop the server first, because the inventory append this and the server
-	// both perform is under no shared lock on any backend (#204).
+	// stop the server first. GET /certificate/ca and the CRL GET read storage on
+	// every request and serve the new material at once, but a running server
+	// issues and answers OCSP from the CA certificate, key and CRL it holds in
+	// memory, and nothing signals its Kubernetes exporter when this rewrites the
+	// CRL (see writeCRLChain), so those go on with what this replaces.
 	//
 	// A nil plan means the stored chain is already exactly what should be there,
 	// so nothing is written — re-taking the lock to rewrite identical bytes
@@ -400,8 +403,10 @@ func importCAMaterial(ctx context.Context, store *storage.StorageService, certBu
 		// Checked before the early return, so every import shape gets it --
 		// including the two that write nothing. These are pure reads of the chain
 		// about to be published, and an import that changes nothing still leaves
-		// a lapsed ancestor being served to every agent. This warning is the only
-		// detector of that: no series and no alert covers ancestor expiry.
+		// a lapsed ancestor being served to every agent. This warning is the
+		// detector at import time; once a server runs, the per-issuer
+		// openvoxca_crl_chain_next_update_timestamp_seconds series and its
+		// OpenVoxCAUpstreamCRL* expiry alerts are the standing one.
 		if len(plan) > 1 {
 			warnAboutAncestors(plan[1:])
 		}

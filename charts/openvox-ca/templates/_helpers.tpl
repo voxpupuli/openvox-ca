@@ -1675,7 +1675,7 @@ kubernetesExport.rbac.namespaces confines it to those namespaces.
 
 WARNING: Kubernetes export RBAC was created with {{ if eq .Values.kubernetesExport.rbac.scope "ClusterRole" }}cluster-wide{{ else }}namespace-wide{{ end }} patch on every
 Secret and ConfigMap in scope. The chart cannot read the configuration that names
-the export targets{{ if .Values.existingConfigMap }} (existingConfigMap){{ else }} (args, envFrom, or a --config in extraArgs){{ end }}, so it
+the export targets{{ if .Values.existingConfigMap }} (existingConfigMap){{ else }} (args, or a --config in extraArgs){{ end }}, so it
 cannot narrow the grant to their names.
 {{- if .Values.existingConfigMap }}
 To restrict it, move the targets into kubernetesExport.targets, or drop

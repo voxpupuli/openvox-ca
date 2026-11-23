@@ -157,8 +157,8 @@ type InstanceLocker interface {
 //   - The backend has no instance lock to take: an in-memory SQLite database
 //     private to this process, a platform without flock(2), a store on a
 //     read-only mount. Warned about, then allowed, because refusing to start
-//     over a lock that is unavailable rather than held would take down a CA
-//     that worked before this check existed.
+//     over a lock that is unavailable rather than held would stop a CA that is
+//     otherwise able to run.
 //
 // A caller that has already asked SupportsDistributedLocking may pass the
 // answer with WithKnownDistributedLocking and skip the probe here; without it

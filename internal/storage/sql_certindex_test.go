@@ -509,10 +509,11 @@ var _ = Describe("SQLiteCertIndex", func() {
 // The CertIndex capability is reached through a type assertion, so a wrapper
 // backend that does not implement it must be unwrapped or the capability
 // disappears. Its InventoryStore sibling has this exact regression test because
-// the exact bug shipped once: ca_key_file wraps the backend in an OverlayBackend,
-// the assertion failed on the wrapper, and StorageService silently fell back --
-// there to a whole-blob HMAC that did not match, here to the O(N) scan the index
-// exists to replace, which is slower but correct and so would not be noticed.
+// the exact bug existed once on main: ca_key_file wraps the backend in an
+// OverlayBackend, the assertion failed on the wrapper, and StorageService
+// silently fell back -- there to a whole-blob HMAC that did not match, here to
+// the O(N) scan the index exists to replace, which is slower but correct and
+// so would not be noticed.
 var _ = Describe("CertIndex through an OverlayBackend", func() {
 	It("still answers from the index when the backend is wrapped", func() {
 		ctx := context.Background()

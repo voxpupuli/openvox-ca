@@ -3070,14 +3070,13 @@ jobs:
 			Expect(verifyMageTargetsIn(goodMage, with("release.yml", goodWorkflow))).To(Succeed())
 		})
 
-		// The deliverable. The claim is not that a workflow names this target
-		// -- release.yml's packaging job is #266's, and lands after this -- but
-		// that the target is named as a STRING outside Go, as
-		// docs/development/releasing.md already does. Either way nothing in Go
-		// would notice it going away, which
-		// is why requiredMageTargets carries it rather than the workflow scan
-		// below: the scan can only see callers that exist. The comment above
-		// requiredMageTargets states the same thing from the other side.
+		// The deliverable. The claim is not only that a workflow names this
+		// target (release.yml's packaging job does), but that the target is
+		// named as a STRING outside Go, as docs/development/releasing.md
+		// already does. Either way nothing in Go would notice it going away,
+		// which is why requiredMageTargets carries it rather than the workflow
+		// scan below: the scan can only see callers that exist. The comment
+		// above requiredMageTargets states the same thing from the other side.
 		It("rejects a magefile that has lost build:packages, naming the target", func() {
 			without := bytes.Replace(goodMage, []byte("func (Build) Packages() error { return nil }\n"), nil, 1)
 			err := verifyMageTargetsIn(without, with("release.yml", goodWorkflow))

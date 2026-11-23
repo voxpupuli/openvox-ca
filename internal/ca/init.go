@@ -62,8 +62,9 @@ const (
 // inventory-HMAC step — the `hmac-key` lock EnsureHMACKey may wait on, plus the
 // verification scan that follows it. Other budgets are derived from this
 // constant (the shipped unit's WatchdogSec below, the chart's startupProbe,
-// sweepStepBudget in crlyield.go), so that second job is named here and not
-// only at the call site.
+// sweepStepBudget in crlyield.go, the frontend's signer handshake bound in
+// signerHandshakeTimeout in cmd/openvox-ca), so that second job is named here
+// and not only at the call site.
 //
 // Read "distributed" strictly: it bounds the cross-node half of an acquisition
 // and not a wait on another goroutine in this process, which no deadline ends.
@@ -79,11 +80,11 @@ const LockTimeout = 60 * time.Second
 
 // subjectLockName returns the distributed-lock name used to serialise
 // operations on a single subject: duplicate check or evict, save CSR, sign,
-// delete CSR, renew, import, clean, revoke and offline generation. Anything
-// that issues or mutates that subject's certificate takes it. Keep this list
-// and the Serialises cell of the Tier 1 table in docs/development/locking.md
-// in step — they are the same claim written twice, so they should read the
-// same.
+// delete CSR, renew, import, clean, revoke, generate (offline and through
+// POST /generate) and managed-certificate reconcile. Anything that issues or
+// mutates that subject's certificate takes it. Keep this list and the
+// Serialises cell of the Tier 1 table in docs/development/locking.md in step
+// — they are the same claim written twice, so they should read the same.
 func subjectLockName(subject string) string { return lockSubjectPrefix + subject }
 
 func (c *CA) Init(ctx context.Context) error {

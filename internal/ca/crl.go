@@ -242,11 +242,13 @@ func newEmptyCRL(cert *x509.Certificate, key crypto.Signer, validity time.Durati
 //
 // crlUpdateFailures is the right counter by its own definition -- "a CRL that
 // could not be re-signed, written or read, on any of the eight paths that
-// write one" -- and docs/metrics.md says so. Six of those writers take the CRL
-// lock through here; the superseded sweep and the crl_chain.file refresh take
-// it directly. Detecting the arm by whether fn ran, rather than by matching on
-// the error, keeps this independent of how the storage layer words its
-// wrapping.
+// write one" -- and docs/metrics.md says so. Three of those writers take the
+// CRL lock through here; expiry cleanup, the background CRL refresh and the
+// crl_chain.urls merge take it through withCRLLockYielding, which counts the
+// same way except when a shutdown ends the wait; the superseded sweep and the
+// crl_chain.file refresh take it directly. Detecting the arm by whether fn
+// ran, rather than by matching on the error, keeps this independent of how the
+// storage layer words its wrapping.
 func (c *CA) withCRLLockCounted(ctx context.Context, fn func() error) error {
 	ran := false
 	err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
@@ -371,7 +373,7 @@ func (c *CA) parseStoredCRL(ctx context.Context) (*storedCRL, error) {
 	}
 
 	// Block 0 being ours is not the same as block 0 being our *newest*. A blob
-	// holding a stale export ahead of the current one -- which the released
+	// holding a stale export ahead of the current one -- which a pre-alpha
 	// build's import stored verbatim -- passes the check above, and re-signing
 	// from the stale block advances from its number (regressing the sequence) and
 	// carries its entry list forward, while the chain assembly drops every block

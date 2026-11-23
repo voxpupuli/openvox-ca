@@ -51,8 +51,10 @@ const (
 //
 // For RSA, Size is the bit length: 2048, 3072, or 4096.
 // For ECDSA, Size selects the NIST curve: 256 (P-256), 384 (P-384), or 521 (P-521).
-// A zero Size uses the algorithm-specific default (RSA: 4096; ECDSA: 256).
-// A zero Algo defaults to RSA.
+// A zero Size takes the key role's default: resolveKeyConfig fills it for the
+// CA key (RSA: 4096) and leaf keys (RSA: 2048), and an ECDSA key of either role
+// gets P-256. generateKey falls back to RSA 4096 or P-256 for a config that
+// reaches it unresolved. A zero Algo defaults to RSA.
 type KeyConfig struct {
 	Algo KeyAlgo
 	Size int
