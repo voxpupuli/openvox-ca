@@ -294,9 +294,9 @@ func latestPerSubject(recs []indexedRecord, stored map[string]bool, ambiguous fu
 // perCall, what one whole call can remove, which the deferral log escalates to
 // a warning. Below that threshold a deferral is expected (a one-off backlog
 // draining over several calls) and logs at info. The CA's cleanup asks for at
-// most sweepStepEntries (internal/ca, 100) entries a call since #347, well
-// under either backend's cap, so it reaches neither branch; they guard a
-// caller that asks for more.
+// most sweepStepEntries (internal/ca) entries a call since #347, well under
+// either backend's cap (a spec in withlockyielding_test.go pins that), so it
+// reaches neither branch; they guard a caller that asks for more.
 func pruneBacklogGrowing(deferred, perCall int) bool {
 	return deferred > perCall
 }

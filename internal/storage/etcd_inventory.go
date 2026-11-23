@@ -438,7 +438,7 @@ func (b *EtcdBackend) pruneEntriesOnce(ctx context.Context, keep func(InventoryE
 		logFn := slog.Info
 		if pruneBacklogGrowing(starts[0], etcdPruneMaxBatchesPerCall*etcdPruneBatch) {
 			// More is deferred than a whole call can remove. The CA's cleanup
-			// asks for at most sweepStepEntries (internal/ca, 100) entries a
+			// asks for at most sweepStepEntries (internal/ca) entries a
 			// call since #347, so it never reaches this; the cap and its
 			// warning are a backstop for a caller that asks for more, and say
 			// so loudly when one does.

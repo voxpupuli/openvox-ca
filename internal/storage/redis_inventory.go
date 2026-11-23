@@ -764,7 +764,7 @@ func planRedisPrune(recs []indexedRecord, keep func(InventoryEntry) bool) redisP
 	}
 	if deferred := matched - len(plan.removed); deferred > 0 {
 		// Never silently: a short count must be explicable from the log. The
-		// CA's cleanup asks for at most sweepStepEntries (internal/ca, 100)
+		// CA's cleanup asks for at most sweepStepEntries (internal/ca)
 		// entries a call since #347, so it never reaches this; the cap is a
 		// backstop for a caller that asks for more, and a deferral bigger than
 		// a whole call warns.

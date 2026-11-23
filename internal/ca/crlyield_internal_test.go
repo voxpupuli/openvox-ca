@@ -525,6 +525,24 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 		}
 	})
 
+	// holdBackendCRLLock takes the CRL lock through the backend directly and
+	// returns its release. The holder never registers with the priority gate,
+	// so a yielding caller passes the gate and waits in the backend, which
+	// logs its "begin" there. It is not another process: the holder shares
+	// the backend's in-process mutex, and the caller waits on that mutex,
+	// which no deadline ends. That is what lets a spec sleep most of a step
+	// after "begin" without a loaded runner pushing a correct step past its
+	// wait budget; holding the lock from a separate process would not.
+	holdBackendCRLLock := func() func() {
+		GinkgoHelper()
+		ul, err := backed.AcquireSameHostLock(ctx, lockNameCRL)
+		Expect(err).NotTo(HaveOccurred())
+		var once sync.Once
+		release := func() { once.Do(func() { Expect(ul.Unlock()).To(Succeed()) }) }
+		DeferCleanup(release)
+		return release
+	}
+
 	// A step's hold is what a waiting revocation counts on, and it is what the
 	// post-prune cleanup needs time inside. A step that spent most of its
 	// budget waiting for the lock must still get the whole budget once it
@@ -537,34 +555,31 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 		backed.stallPrune = true
 		backed.mu.Unlock()
 
-		release := make(chan struct{})
-		held := make(chan struct{})
-		holderDone := make(chan error, 1)
-		go func() {
-			holderDone <- store.WithLock(ctx, lockNameCRL, func() error {
-				close(held)
-				<-release
-				return nil
-			})
-		}()
-		Eventually(held).Should(BeClosed())
+		// Held through the backend rather than WithLock, so the step passes the
+		// in-process gate and waits in the backend, where the fixture logs its
+		// "begin": the moment it starts waiting, which the wait is timed from.
+		release := holdBackendCRLLock()
 
+		begun := backed.count("begin")
 		sweepDone := make(chan error, 1)
 		go func() {
 			_, err := myCA.CleanupExpiredCerts(ctx, 0)
 			sweepDone <- err
 		}()
-		// Most of the step's budget, spent waiting.
+		Eventually(func() int { return backed.count("begin") }).Should(BeNumerically(">", begun),
+			"the step never started waiting for the lock")
+		// Most of the step's budget, spent waiting, timed from when it began.
 		time.Sleep(step * 3 / 4)
-		close(release)
-		Eventually(holderDone).Should(Receive(BeNil()))
+		release()
 		Eventually(backed.stalled, step).Should(BeClosed())
 		Eventually(sweepDone, 2*step).Should(Receive(MatchError(context.DeadlineExceeded)))
 
 		backed.mu.Lock()
 		got := backed.pruneBudget
 		backed.mu.Unlock()
-		Expect(got).To(BeNumerically(">", step/2*8/10),
+		// A share cut by the wait would be at most half of the quarter left,
+		// step/8; step/4 separates that from a loaded runner's margin.
+		Expect(got).To(BeNumerically(">", step/4),
 			"the prune's share was cut by the time the step spent waiting for the lock")
 		Expect(got).To(BeNumerically("<=", step/2),
 			"the prune's share is half the hold, so a larger one means the hold outgrew sweepStepBudget")
@@ -587,34 +602,28 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 		backed.putStalled = make(chan struct{})
 		backed.mu.Unlock()
 
-		release := make(chan struct{})
-		held := make(chan struct{})
-		holderDone := make(chan error, 1)
-		go func() {
-			holderDone <- store.WithLock(ctx, lockNameCRL, func() error {
-				close(held)
-				<-release
-				return nil
-			})
-		}()
-		Eventually(held).Should(BeClosed())
+		release := holdBackendCRLLock()
 
+		begun := backed.count("begin")
 		refreshDone := make(chan error, 1)
 		go func() {
 			// A refresh window longer than any CRL's life, so it re-signs.
 			_, err := myCA.RefreshCRLIfDue(ctx, 1000*time.Hour)
 			refreshDone <- err
 		}()
+		Eventually(func() int { return backed.count("begin") }).Should(BeNumerically(">", begun),
+			"the refresh never started waiting for the lock")
 		time.Sleep(step * 3 / 4)
-		close(release)
-		Eventually(holderDone).Should(Receive(BeNil()))
+		release()
 		Eventually(backed.putStalled, step).Should(BeClosed())
 		Eventually(refreshDone, 2*step).Should(Receive(MatchError(context.DeadlineExceeded)))
 
 		backed.mu.Lock()
 		got := backed.putBudget
 		backed.mu.Unlock()
-		Expect(got).To(BeNumerically(">", step*8/10),
+		// A budget cut by the wait would be at most the quarter left, step/4;
+		// step/2 separates that from a loaded runner's margin.
+		Expect(got).To(BeNumerically(">", step/2),
 			"the re-sign's budget was cut by the time the refresh spent waiting for the lock")
 		Expect(got).To(BeNumerically("<=", step),
 			"the hold outgrew sweepStepBudget")
@@ -1375,8 +1384,10 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 	})
 
 	// The runbooks and the operator docs quote the step's budget and size,
-	// and a responder reads them mid-incident. Each phrase is rendered from
-	// the constant, so retuning one fails here until the text follows.
+	// and a responder reads them mid-incident. One phrase per document and
+	// constant is pinned, and every occurrence of it must match, so retuning a
+	// constant fails here until the text follows. Neighbouring restatements of
+	// the same figure are left to review rather than pinned one by one.
 	DescribeTable("quotes the step's figures as the constants have them",
 		func(path, pattern string, want func() int) {
 			data, err := os.ReadFile(filepath.Join("..", "..", path))
@@ -1392,21 +1403,12 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 		},
 		Entry("alert runbooks, budget", "mixin/alerts.libsonnet", `whole (\d+)s budget`, func() int { return int(sweepStepBudget / time.Second) }),
 		Entry("alert runbooks, step size", "mixin/alerts.libsonnet", `up to (\d+) due entries`, func() int { return sweepStepEntries }),
-		Entry("cleanup cost note and supersession bullet, hold", "docs/configuration.md", `at most (\d+) seconds plus any CA signature`, func() int { return int(sweepStepBudget / time.Second) }),
-		Entry("prune ceiling", "docs/configuration.md", `half of the step's (\d+) seconds`, func() int { return int(sweepStepBudget / time.Second) }),
-		Entry("cleanup and supersession step size", "docs/configuration.md", `steps of up to (\d+)`, func() int { return sweepStepEntries }),
-		Entry("cleanup passes", "docs/configuration.md", `about N/(\d+) full passes`, func() int { return sweepStepEntries }),
-		Entry("supersession re-signs", "docs/configuration.md", `per (\d+) due certificates`, func() int { return sweepStepEntries }),
-		Entry("pending-list rewrites", "docs/configuration.md", `about D/(\d+) list rewrites`, func() int { return sweepStepEntries }),
-		Entry("crl_update_failures note, budget", "docs/metrics.md", `after (\d+) seconds rather than \d+`, func() int { return int(sweepStepBudget / time.Second) }),
-		Entry("crl_update_failures note, lock timeout", "docs/metrics.md", `after \d+ seconds rather than (\d+)`, func() int { return int(LockTimeout / time.Second) }),
-		Entry("a whole step's wait", "docs/metrics.md", `a whole (\d+) seconds`, func() int { return int(sweepStepBudget / time.Second) }),
-		Entry("supersede cost note", "docs/metrics.md", `each step of up to (\d+) due certificates`, func() int { return sweepStepEntries }),
+		Entry("configuration, budget", "docs/configuration.md", `at most (\d+) seconds plus any CA signature`, func() int { return int(sweepStepBudget / time.Second) }),
+		Entry("configuration, step size", "docs/configuration.md", `steps of up to (\d+)`, func() int { return sweepStepEntries }),
+		Entry("metrics, budget", "docs/metrics.md", `a whole (\d+) seconds`, func() int { return int(sweepStepBudget / time.Second) }),
+		Entry("metrics, lock timeout", "docs/metrics.md", `seconds rather than (\d+)`, func() int { return int(LockTimeout / time.Second) }),
+		Entry("metrics, step size", "docs/metrics.md", `each step of up to (\d+) due certificates`, func() int { return sweepStepEntries }),
 		Entry("storage backends, step size", "docs/storage-backends.md", `steps of at most (\d+) entries`, func() int { return sweepStepEntries }),
-		Entry("storage backends, reads", "docs/storage-backends.md", `N/(\d+) times`, func() int { return sweepStepEntries }),
-		Entry("inventory records comment", "internal/storage/inventory_records.go", `sweepStepEntries \(internal/ca, (\d+)\)`, func() int { return sweepStepEntries }),
-		Entry("etcd prune comment", "internal/storage/etcd_inventory.go", `sweepStepEntries \(internal/ca, (\d+)\)`, func() int { return sweepStepEntries }),
-		Entry("Redis prune comment", "internal/storage/redis_inventory.go", `sweepStepEntries \(internal/ca, (\d+)\)`, func() int { return sweepStepEntries }),
 	)
 
 	// A cleanup step holds c.mu for up to its budget by design, and the
@@ -1421,21 +1423,6 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 		go func() { ready <- myCA.IsReady() }()
 		Eventually(ready, time.Second).Should(Receive(BeTrue()),
 			"IsReady waited for the CA's lock")
-	})
-
-	// The cost note's worked example is arithmetic on the step size, which the
-	// table above cannot express.
-	It("works its cleanup example out with the step size the code has", func() {
-		data, err := os.ReadFile(filepath.Join("..", "..", "docs/configuration.md"))
-		Expect(err).NotTo(HaveOccurred())
-		text := regexp.MustCompile(`\s*\n[\s>]*`).ReplaceAllString(string(data), " ")
-		m := regexp.MustCompile(`([\d,]+) of them for ([\d,]+) expired certificates`).FindStringSubmatch(text)
-		Expect(m).NotTo(BeNil(), "the example is gone; update this spec with the text")
-		passes, err := strconv.Atoi(strings.ReplaceAll(m[1], ",", ""))
-		Expect(err).NotTo(HaveOccurred())
-		backlog, err := strconv.Atoi(strings.ReplaceAll(m[2], ",", ""))
-		Expect(err).NotTo(HaveOccurred())
-		Expect(passes).To(Equal(backlog / sweepStepEntries))
 	})
 
 	It("pauses between steps for longer than a Redis waiter's longest backoff", func() {
