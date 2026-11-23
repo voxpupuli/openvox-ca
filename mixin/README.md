@@ -333,3 +333,35 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `supersedeWindow` | `1h` | Window over which supersession failures — immediate or delayed — are counted (the metric is a restart-resetting counter). |
 | `supersedeFor` | `30m` | `for:` debounce for the supersession-failure alert. Longer than the CRL ones because the sweep retries on its own interval; raise it if you have raised `superseded_cert_sweep_interval_sec`. An immediate revocation is not retried, but one failure still holds the alert for the whole `supersedeWindow`, so it fires all the same. |
 | `expiryFor` / `scrapeFor` / `readyFor` / `downFor` | `1h` / `15m` / `10m` / `5m` | `for:` debounce durations. Below `1h`, `expiryFor` lets an expiry alert fire on data the exporter is holding after a failed gather — see [When a gather fails](../docs/metrics.md#when-a-gather-fails). |
+
+### How the upstream CRL expiry warning combines its two keys
+
+`upstreamCRLExpiryWarningFraction` and `upstreamCRLExpiryWarningSeconds` meet
+in one expression. At the defaults, `OpenVoxCAUpstreamCRLExpiringSoon` renders
+as:
+
+```promql
+openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca"} - time()
+  < (
+      0.1 * (
+        openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca"}
+        - openvoxca_crl_chain_this_update_timestamp_seconds{job="openvox-ca"}
+      ) > 0
+    or
+      0 * openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca"} + 0
+  )
+and
+openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca"} - time() > 0
+```
+
+The bracket is max(fraction × lifetime, floor) in PromQL. A floor of N replaces
+the `0` the first arm is compared against and the `0` added in the second; the
+`0 *` only gives the floor each issuer's labels. The first arm keeps the
+fraction's window for every issuer where that window is larger than the floor.
+`or` supplies the floor for every other issuer: where the window is smaller, and
+where it cannot be worked out because the issuer has no
+`openvoxca_crl_chain_this_update_timestamp_seconds` series. So if the warning
+stays silent where you expect it, check that the server exports that series for
+the issuer: without it only the floor applies, and at its default of 0 the
+warning never fires. The last line keeps an expired CRL to
+`OpenVoxCAUpstreamCRLExpired`.
