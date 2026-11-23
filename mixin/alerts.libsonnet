@@ -132,7 +132,8 @@
             // no runtime is a signer that is alive and not responding, which
             // nothing else reports: readiness does not consult the signer, a
             // stalled signature fails only after two minutes and no alert
-            // reads that failure, and the CRL refresh notices hours later. A signer that
+            // reads that failure, and the CRL refresh signs only when the CRL
+            // is due, about every 20 days at the defaults. A signer that
             // exits takes the frontend with it, which is the launcher's to
             // report, not this rule's.
             //
@@ -266,7 +267,7 @@
             // The "> floor or floor" pair is that max: the first arm keeps the
             // fraction where it is larger, and the second supplies the floor
             // for every series the first dropped, including one with no
-            // thisUpdate series beside it (a CA from before it was exported).
+            // thisUpdate series beside it.
             expr: |||
               openvoxca_crl_chain_next_update_timestamp_seconds{%(selector)s} - time()
                 < (

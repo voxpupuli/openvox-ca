@@ -2247,7 +2247,7 @@ tests:
         exp_alerts: []
 
   # At the default floor of 0, a lifetime that cannot be worked out gets no
-  # warning, only the Expired page: a CA too old to export thisUpdate, and a
+  # warning, only the Expired page: an issuer with no thisUpdate series, and a
   # non-conforming CRL whose thisUpdate is after its nextUpdate. Pinned so
   # that it stays a documented choice rather than an accident; tests-floor.yaml
   # shows a set floor taking over for both.
