@@ -12,7 +12,8 @@ chart; pass `--version X.Y.Z` to pin one.
 
 A server TLS certificate is **required**: openvox-ca refuses to serve plain
 HTTP on a non-loopback address, so the chart refuses to render an install that
-has none rather than handing you a crash-looping pod.
+has none rather than handing you a crash-looping pod — wherever it can see the
+whole configuration (see [How configuration works](#how-configuration-works)).
 
 ```console
 $ helm install openvox-ca \
@@ -48,7 +49,11 @@ mirror it key by key. Instead:
   an override that would leave that object behind: a `port` other than
   `listen.port`, a `cadir` outside `persistence.mountPath` (the mount point or
   any directory under it is fine), or a `metrics_listen` without
-  `metrics.enabled` or on a port other than `metrics.port`.
+  `metrics.enabled` or on a port other than `metrics.port`. These refusals, and
+  the TLS and `serving_cert` ones, apply only where the chart can see the whole
+  configuration: `existingConfigMap`, `args`, `envFrom` and a `--config` in
+  `extraArgs` each put settings where it cannot read them, and it then skips the
+  check rather than refuse an install it cannot judge.
 - **`env`, `extraEnv` and `envFrom`** are the escape hatch for settings that
   must come from a Secret at runtime, such as a database DSN. Backend
   credentials have to come from a Secret, this way or, for a DSN, as a mounted
@@ -83,7 +88,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 | --- | --- | --- |
 | `image.registry` | `ghcr.io` | Registry hosting the image |
 | `image.repository` | `voxpupuli/openvox-ca` | Image repository |
-| `image.tag` | `""` | Empty resolves to `<appVersion>`, the unsuffixed tag: the distroless image, which has no shell. An explicit tag is used verbatim — this is how you select the Alpine variant (`tag: "0.9.0-alpine"`), which has one |
+| `image.tag` | `""` | Empty resolves to `<appVersion>`, the unsuffixed tag: the distroless image, which has no shell. A development chart (a `-dev` appVersion) resolves it to the rolling `edge` tag instead. An explicit tag is used verbatim — this is how you select the Alpine variant (`tag: "0.9.0-alpine"`), which has one |
 | `image.digest` | `""` | `sha256:…` digest; takes precedence over `tag` |
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | |
@@ -117,7 +122,7 @@ tested floor rather than a ceiling; naming them here would go stale on its own.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `tls.existingSecret` | `""` | Secret holding the server certificate; sets `tls_cert`/`tls_key`. The server re-reads the keypair on `SIGHUP`, but nothing sends one, so a renewal needs a signal (`kubectl debug --target` running `kill -HUP 1`, since the default image has no `kill`; `kubectl exec <pod> -- kill -HUP 1` on `-alpine`) or a restart. Mutually exclusive with `config.serving_cert`, which the chart refuses at install time — see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) |
+| `tls.existingSecret` | `""` | Secret holding the server certificate; sets `tls_cert`/`tls_key`. The server re-reads the keypair on `SIGHUP`, but nothing sends one, so a renewal needs a signal (`kubectl debug --target` running `kill -HUP 1`, since the default image has no `kill`; `kubectl exec <pod> -- kill -HUP 1` on `-alpine`) or a restart. Mutually exclusive with `config.serving_cert`, which the chart refuses at install time where it can see the whole configuration ([How configuration works](#how-configuration-works)) — see [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) |
 | `tls.certKey` / `tls.keyKey` | `tls.crt` / `tls.key` | Data keys within that Secret |
 | `tls.mountPath` | `/run/secrets/openvox-ca-tls` | |
 | `ca.existingSecret` | `""` | Secret holding the CA certificate and key; sets `ca_cert_file`/`ca_key_file` |
@@ -190,7 +195,7 @@ and [the CA's own serving certificate](https://github.com/voxpupuli/openvox-ca/b
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `replicaCount` | `1` | More than one requires an external storage backend; the chart refuses it on filesystem or sqlite |
+| `replicaCount` | `1` | More than one requires an external storage backend; the chart refuses it on filesystem or sqlite where it can see the backend, and warns in the notes where it cannot (see [Storage and replicas](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md#storage-and-replicas)) |
 | `strategy` | `{}` | Empty follows `persistence.enabled`: Recreate while the cadir is a ReadWriteOnce PVC, RollingUpdate (maxUnavailable 0, maxSurge 1) once the state is external. Set it explicitly to override either way — a map without `type` is refused, because Kubernetes would read it as RollingUpdate |
 | `revisionHistoryLimit` | `10` | |
 | `command` | `[]` | Overrides the container entrypoint |
@@ -213,12 +218,12 @@ and [the CA's own serving certificate](https://github.com/voxpupuli/openvox-ca/b
 | `priorityClassName` / `runtimeClassName` / `schedulerName` | `""` | |
 | `dnsPolicy` / `dnsConfig` / `hostAliases` | `""` / `{}` / `[]` | |
 | `enableServiceLinks` | `false` | Keep false: a Service named `openvox-ca` would set `OPENVOX_CA_PORT=tcp://…`, which the server refuses as a port. Refused at install when it is this release's own Service |
-| `automountServiceAccountToken` | `null` | `null` mounts the token when the pod needs the API — Kubernetes export (`kubernetesExport.enabled` or `config.kubernetes_export.targets`), a managed certificate or the CA's own serving certificate in a Secret (`config.managed_certs` or `config.serving_cert` with a `store.secret`), or OpenBao Kubernetes auth (`config.openbao.auth_method`, `OPENVOX_CA_OPENBAO_AUTH_METHOD` in `env`/`extraEnv`, or `--openbao-auth-method=kubernetes` in `extraArgs`) — and whenever the chart cannot tell: `existingConfigMap`, `args`, `envFrom`, an `extraEnv` `valueFrom` for that variable, or a bare `--openbao-auth-method` in `extraArgs`. See [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) for the full table |
+| `automountServiceAccountToken` | `null` | `null` mounts the token when the pod needs the API — Kubernetes export (`kubernetesExport.enabled` or `config.kubernetes_export.targets`), a managed certificate or the CA's own serving certificate in a Secret (`config.managed_certs` or `config.serving_cert` with a `store.secret`), or OpenBao Kubernetes auth (`config.openbao.auth_method`, `OPENVOX_CA_OPENBAO_AUTH_METHOD` in `env`/`extraEnv`, or `--openbao-auth-method=kubernetes` in `extraArgs`) — and whenever the chart cannot tell: `existingConfigMap`, `args`, `envFrom`, a `--config` in `extraArgs`, an `extraEnv` `valueFrom` for that variable, or a bare `--openbao-auth-method` in `extraArgs`. See [the guide](https://github.com/voxpupuli/openvox-ca/blob/main/docs/helm-chart.md) for the full table |
 | `initContainers` / `extraContainers` | `[]` | Templated, so they can reference `.Values` |
 | `extraVolumes` | `[]` | Templated |
 | `extraVolumeMounts` | `[]` | Passed through as written |
 | `serviceAccount.create` | `true` | |
-| `serviceAccount.name` | `""` | Required when `create` is false and `kubernetesExport.rbac.create` or `managedCerts.rbac.create` is on — the chart refuses to bind either Role to the namespace's `default` account |
+| `serviceAccount.name` | `""` | Required when `create` is false and the chart renders the export Role (export configured, with `kubernetesExport.rbac.create`) or the managed-certificate Role (a Secret store, with `managedCerts.rbac.create`) — the chart refuses to bind either Role to the namespace's `default` account |
 | `serviceAccount.annotations` / `.labels` | `{}` | |
 
 ### Service
@@ -287,7 +292,7 @@ certificate, so the controller **must** pass TLS through untouched.
 | `podDisruptionBudget.minAvailable` | `1` | Ignored when `maxUnavailable` is set |
 | `podDisruptionBudget.maxUnavailable` | `""` | `0` is honoured (block every voluntary eviction), not treated as unset |
 | `podDisruptionBudget.unhealthyPodEvictionPolicy` | `""` | `IfHealthyBudget` or `AlwaysAllow` |
-| `autoscaling.enabled` | `false` | Requires an external storage backend (the chart refuses a `maxReplicas` above 1 on filesystem or sqlite), and at least one of `targetCPUUtilizationPercentage`, `targetMemoryUtilizationPercentage` or `metrics` — the chart refuses an install with none set |
+| `autoscaling.enabled` | `false` | Requires an external storage backend (the chart refuses a `maxReplicas` above 1 on filesystem or sqlite where it can see the backend, and warns in the notes where it cannot), and at least one of `targetCPUUtilizationPercentage`, `targetMemoryUtilizationPercentage` or `metrics` — the chart refuses an install with none set |
 | `autoscaling.minReplicas` / `.maxReplicas` | `2` / `6` | The chart refuses a `minReplicas` above `maxReplicas` |
 | `autoscaling.targetCPUUtilizationPercentage` | `80` | |
 | `autoscaling.targetMemoryUtilizationPercentage` | `""` | |

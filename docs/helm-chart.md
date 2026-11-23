@@ -95,7 +95,11 @@ openvox-ca has a large configuration surface, and the chart deliberately does
   the value to set named instead: a `port` other than `listen.port`, a `cadir`
   outside `persistence.mountPath` (a directory under it is fine), or a
   `metrics_listen` without `metrics.enabled` or on a port other than
-  `metrics.port`.
+  `metrics.port`. These refusals, and the TLS and `serving_cert` ones below,
+  apply only where the chart can see the whole configuration:
+  `existingConfigMap`, `args`, `envFrom` and a `--config` in `extraArgs` each
+  put settings where it cannot read them, and it then skips the check rather
+  than refuse an install it cannot judge.
   This is why `verbosity` is written into the config file rather than passed as
   `--verbosity`: a flag would outrank the file unconditionally, leaving
   `config.verbosity` silently ineffective. The only argument the chart passes is
@@ -304,14 +308,14 @@ The alternatives, in the same message:
 | Setting | When |
 | --- | --- |
 | `config.tls_cert` / `config.tls_key` | A certificate you mount yourself, via `extraVolumes` |
-| `config.serving_cert` | The CA issues and renews its own, into a Secret or a file pair. The way out of the bootstrap deadlock when the CA key is held at a provider, and the only route that also renews it unattended. Mutually exclusive with every route that sets `tls_cert`/`tls_key` — the two rows around this one, and `tls.existingSecret` — and the chart refuses the combination at install time. A file store must live under `persistence.mountPath` and outside `config.cadir` (both refused at install), in a directory that already exists (discovered at startup, and fatal) — see [Managed certificates](#managed-certificates) |
+| `config.serving_cert` | The CA issues and renews its own, into a Secret or a file pair. The way out of the bootstrap deadlock when the CA key is held at a provider, and the only route that also renews it unattended. Mutually exclusive with every route that sets `tls_cert`/`tls_key` — the two rows around this one, and `tls.existingSecret` — and the chart refuses the combination at install time. A file store must live under `persistence.mountPath` and outside `config.cadir` (both refused at install), in a directory that already exists (discovered at startup, and fatal) — see [Managed certificates](#managed-certificates). The install-time refusals need a configuration the chart can see whole — see [How the chart is configured](#how-the-chart-is-configured) |
 | `env` / `extraEnv` — `OPENVOX_CA_TLS_CERT` and `OPENVOX_CA_TLS_KEY` | The paths come from a Secret at runtime. Environment variables outrank the config file, and the chart counts them |
-| `config.no_tls_required: true` | Only behind a trusted proxy that terminates TLS. The pod then serves plain HTTP, and without TLS the server installs no client authentication at all: every endpoint, the admin API included, answers anything that reaches the pod's port. The proxy and a [network policy](#network-policy) are the only gate |
+| `config.no_tls_required: true` | Only behind a trusted proxy that terminates TLS, and only with every certificate route above, and `tls.existingSecret`, removed: while any of them is set the listener keeps serving HTTPS and the server only warns at startup. Without them the pod serves plain HTTP, and without TLS the server installs no client authentication at all: every endpoint, the admin API included, answers anything that reaches the pod's port. The proxy and a [network policy](#network-policy) are the only gate |
 | `listen.host: 127.0.0.1` or `localhost` | A sidecar-only deployment. Any address in `127.0.0.0/8`, or `localhost`, and no IPv6 spelling: the server tests `net.ParseIP(host).IsLoopback()`, which rejects the bracketed `[::1]`, and it builds its listen address as `host + ":" + port`, which turns a bare `::1` into the unparseable `::1:8140` |
 
-With `no_tls_required` the chart also switches the health probes to HTTP, since
-the kubelet has to speak whatever the server speaks. Set `httpGet.scheme` on a
-probe explicitly to override that.
+With no certificate configured the chart switches the health probes to HTTP,
+since the kubelet has to speak whatever the server speaks. Set `httpGet.scheme`
+on a probe explicitly to override that.
 
 `POST /generate` refuses under `no_tls_required`, as it does wherever the
 server has no TLS of its own, unless `config.insecure_allow_plain_http_generate`
@@ -634,9 +638,13 @@ budget shared by every client, and `rate_limit_ipv6_prefix_length` has no
 effect; see [Rate limit](configuration.md#rate-limit) to size them.
 
 If you deliberately terminate TLS at the edge, set `config.no_tls_required:
-true`, and understand what it costs: the pod serves plain HTTP with no client
-authentication, so the admin API answers anything that reaches the pod's port.
-Restrict that with a [network policy](#network-policy).
+true` and remove every TLS source: `tls.existingSecret`,
+`config.tls_cert`/`config.tls_key`, `config.serving_cert` and the
+`OPENVOX_CA_TLS_CERT`/`OPENVOX_CA_TLS_KEY` variables. While any of them is set
+the listener keeps serving HTTPS and the server only warns, so every plain-HTTP
+request from the proxy fails. Understand what it costs: the pod serves plain
+HTTP with no client authentication, so the admin API answers anything that
+reaches the pod's port. Restrict that with a [network policy](#network-policy).
 
 ### Gateway API
 
@@ -1039,9 +1047,10 @@ to must be a writable volume you mount yourself through `extraVolumes` and
 `extraVolumeMounts`. In Kubernetes a Secret store is almost always the better
 fit — it needs no volume, and something else in the cluster can consume it.
 
-**That paragraph is about `config.managed_certs` only.** A
-`config.serving_cert` file store is checked at install time and has to satisfy
-three rules — and the chart can enforce only the first two.
+**That paragraph is about `config.managed_certs` only.** A `config.serving_cert`
+file store is checked at install time and has to satisfy three rules — and the
+chart can enforce only the first two, and those only where it can see the whole
+configuration (see [How the chart is configured](#how-the-chart-is-configured)).
 
 1. **Under `persistence.mountPath`**, which is the volume it can see. Refused at
    install.
