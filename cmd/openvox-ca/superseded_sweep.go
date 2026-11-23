@@ -43,11 +43,12 @@ import (
 // that the deployments which never enable a window do not take a cluster-wide
 // lock four times an hour forever to discover there is nothing to do.
 //
-// Replica safety: CA.ReconcileSuperseded does its list read-modify-write and
-// its revocations under the shared cluster CRL lock, so when this runs on
-// multiple replicas only the first to acquire the lock revokes; the others
-// observe an already-drained list and revoke nothing. No leader election is
-// required.
+// Replica safety: CA.ReconcileSuperseded does each step's list
+// read-modify-write and revocations under the shared cluster CRL lock,
+// releasing it between steps, so when this runs on multiple replicas they share
+// a large backlog step by step without revoking any entry twice, and a replica
+// that arrives once it is gone observes an already-drained list and revokes
+// nothing. No leader election is required.
 //
 // It returns when ctx is cancelled (i.e. on shutdown).
 func runSupersededSweeper(ctx context.Context, c *ca.CA, interval time.Duration) {
@@ -82,9 +83,16 @@ func runSupersededSweeper(ctx context.Context, c *ca.CA, interval time.Duration)
 func sweepSupersededOnce(ctx context.Context, c *ca.CA) {
 	revoked, err := c.ReconcileSuperseded(ctx)
 	switch {
+	case ca.StoppedByShutdown(ctx, err):
+		// Not a failure, and not worded like one: the runbook for
+		// OpenVoxCASupersedeFailing reads the warning below as a storage
+		// fault. A pass the shutdown ended left every entry it did not reach on
+		// the list, and ReconcileSuperseded does not count it either.
+		slog.Info("Superseded-certificate revocation sweep stopped by shutdown; "+
+			"the next pass resumes it", "revoked", revoked)
 	case err != nil:
-		// revoked can be non-zero here: entries are revoked one at a time and
-		// the pass reports what it managed before the failure.
+		// revoked can be non-zero here: a pass works in steps, and reports
+		// what the steps before the failing one revoked.
 		slog.Warn("Superseded-certificate revocation sweep failed", "revoked", revoked, "error", err)
 	case revoked > 0:
 		slog.Info("Superseded certificates revoked", "revoked", revoked)

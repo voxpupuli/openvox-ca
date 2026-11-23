@@ -62,7 +62,7 @@ const (
 // inventory-HMAC step — the `hmac-key` lock EnsureHMACKey may wait on, plus the
 // verification scan that follows it. Other budgets are derived from this
 // constant (the shipped unit's WatchdogSec below, the chart's startupProbe,
-// CleanupExpiredCerts' LockTimeout/2), so that second job is named here and not
+// sweepStepBudget in crlyield.go), so that second job is named here and not
 // only at the call site.
 //
 // Read "distributed" strictly: it bounds the cross-node half of an acquisition
@@ -437,6 +437,7 @@ func (c *CA) loadCA(ctx context.Context) error {
 	}
 
 	c.CACert = cert
+	c.markReadyLocked()
 	return nil
 }
 
@@ -579,6 +580,7 @@ func (c *CA) bootstrapCA(ctx context.Context) error {
 	}
 	c.CAKey = key
 	c.CACert = parsedCert
+	c.markReadyLocked()
 
 	// Save private key. Skipped entirely when KeyProvider is set: the key
 	// lives at its provider (e.g. an OpenBao Transit key) and there is no

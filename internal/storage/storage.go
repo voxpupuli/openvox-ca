@@ -57,6 +57,11 @@ type StorageService struct {
 	// underlying backend does not implement Locker. One sync.Mutex per
 	// lock name, lazily created.
 	localLocks sync.Map
+
+	// priority records, per lock name, the WithLock callers in this process
+	// that are waiting for or holding that name, so WithLockYielding can stand
+	// aside for them. See WithLockYielding.
+	priority priorityGates
 }
 
 // WithLock runs fn while holding the named lock, taking the strongest lock the
@@ -79,9 +84,9 @@ type StorageService struct {
 // same lock.
 //
 // ctx bounds only the *other-process* half of an acquisition. Callers inside
-// one process serialise on a plain mutex first — the tier-3 fallback below, and
-// inside each tier-1/tier-2 implementation's own acquisition — and
-// sync.Mutex.Lock takes no context. A deadline therefore caps how long this
+// one process serialise on a plain mutex first — the tier-3 fallback in
+// acquireLock, and inside each tier-1/tier-2 implementation's own acquisition —
+// and sync.Mutex.Lock takes no context. A deadline therefore caps how long this
 // waits for another replica or another process, not for another goroutine here,
 // which is why an inverted lock order deadlocks rather than timing out. See
 // docs/development/locking.md.
@@ -92,19 +97,99 @@ type StorageService struct {
 // Work that must run under a lock the caller may already hold belongs in a
 // ...Locked variant the caller selects — CA.finishLoadExisting takes its
 // seeding function from its caller for exactly this reason (issue #201).
+//
+// Every WithLock caller has priority over WithLockYielding for the same name,
+// for as long as it is waiting or holding: a yielding caller in this process
+// does not queue while one is registered. Nothing has to opt in to that.
 func (s *StorageService) WithLock(ctx context.Context, name string, fn func() error) error {
+	s.priority.enter(name)
+	defer s.priority.leave(name)
+	release, err := s.acquireLock(ctx, name)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return fn()
+}
+
+// WithLockYielding runs fn while holding the named lock, exactly as WithLock
+// does, except that it stands aside for WithLock. It does not queue for name
+// while any WithLock caller in this process is waiting for or holding it, and
+// if one arrived while it was queueing it releases what it acquired and waits
+// again rather than running fn.
+//
+// It exists for background work that must never delay the operation an
+// operator is waiting on, so that a revocation always goes before a background
+// sweep of the CRL (issue #347). It is not a second lock. Both
+// methods acquire the same name through the same tiers, so they exclude each
+// other exactly as two WithLock calls do, and nothing about the name or its
+// key changes for other replicas.
+//
+// What it promises is scoped to this process. WithLock callers here are
+// visible to it; a caller on another replica or in another process is not, and
+// contends with it on the backend's own terms. A caller bounds that wait by
+// keeping each WithLockYielding hold short, as the CA's background CRL jobs do
+// in bounded steps; see docs/development/locking.md, rule 13.
+//
+// Nor is it pre-emptive. A WithLock caller that arrives after fn has started
+// waits for fn to return; standing aside happens only before fn runs.
+//
+// ctx bounds the wait to stand aside as well as the acquisition, so a caller
+// that keeps yielding past its deadline gets ctx's error, wrapped like an
+// acquisition failure.
+func (s *StorageService) WithLockYielding(ctx context.Context, name string, fn func() error) error {
+	for {
+		if err := s.priority.waitClear(ctx, name); err != nil {
+			return fmt.Errorf("waiting to acquire lock %q behind a priority caller: %w", name, err)
+		}
+		release, err := s.acquireLock(ctx, name)
+		if err != nil {
+			return err
+		}
+		// Re-checked once the lock is held: a WithLock caller that registered
+		// while this one was queueing would otherwise wait out all of fn.
+		// Queueing takes time whenever another caller holds the name, so the
+		// window is not a narrow one.
+		if s.priority.waiting(name) {
+			release()
+			continue
+		}
+		defer release()
+		return fn()
+	}
+}
+
+// WithLockNeutral runs fn while holding the named lock, as WithLock does, but
+// without WithLock's priority. It does not register, so a WithLockYielding
+// caller does not stand aside for it, and it does not stand aside for one: it
+// queues for name on the terms every caller had before the priority existed.
+//
+// It is for foreground work a client waits on that has no claim to go before
+// background work. A steady stream of such callers with priority could hold the
+// background work off for as long as it lasted (issue #347).
+func (s *StorageService) WithLockNeutral(ctx context.Context, name string, fn func() error) error {
+	release, err := s.acquireLock(ctx, name)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return fn()
+}
+
+// acquireLock takes the named lock at the strongest tier the backend offers,
+// as WithLock's godoc describes, and returns the function that releases it.
+func (s *StorageService) acquireLock(ctx context.Context, name string) (func(), error) {
 	if lk, ok := s.backend.(Locker); ok {
 		ul, err := lk.AcquireLock(ctx, name)
 		if err == nil {
-			defer func() {
+			return func() {
 				if err := ul.Unlock(); err != nil {
 					slog.Warn("Failed to release distributed lock", "name", name, "error", err)
 				}
-			}()
-			return fn()
+			}, nil
 		}
 		if !errors.Is(err, ErrDistributedLockingUnsupported) {
-			return fmt.Errorf("acquiring distributed lock %q: %w", name, err)
+			return nil, fmt.Errorf("acquiring distributed lock %q: %w", name, err)
 		}
 		// Backend advertises Locker but cannot actually provide one (SQLite;
 		// OverlayBackend wrapping a base without one). Try the same-host tier,
@@ -113,26 +198,24 @@ func (s *StorageService) WithLock(ctx context.Context, name string, fn func() er
 	if hl, ok := s.backend.(SameHostLocker); ok {
 		ul, err := hl.AcquireSameHostLock(ctx, name)
 		if err == nil {
-			defer func() {
+			return func() {
 				if err := ul.Unlock(); err != nil {
 					slog.Warn("Failed to release same-host lock", "name", name, "error", err)
 				}
-			}()
-			return fn()
+			}, nil
 		}
 		if !errors.Is(err, ErrSameHostLockingUnsupported) {
 			// A contended lock that outlasts ctx arrives here, and failing is
 			// the point of the tier: an operator running a second process
 			// against a live store gets told so, instead of both writing.
-			return fmt.Errorf("acquiring same-host lock %q: %w", name, err)
+			return nil, fmt.Errorf("acquiring same-host lock %q: %w", name, err)
 		}
 		// No same-host lock either (an in-memory SQLite database, a platform
 		// without flock(2), an overlay over a base with neither): fall through.
 	}
 	m := s.localNamedLock(name)
 	m.Lock()
-	defer m.Unlock()
-	return fn()
+	return m.Unlock, nil
 }
 
 // lockProbeName is the throwaway lock SupportsDistributedLocking acquires and

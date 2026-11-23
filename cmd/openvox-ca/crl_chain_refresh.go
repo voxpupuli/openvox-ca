@@ -79,6 +79,10 @@ func runCRLChainRefresher(ctx context.Context, c *ca.CA, path string, interval t
 func refreshCRLChainOnce(ctx context.Context, c *ca.CA, path string) {
 	rewritten, err := c.RefreshCRLChainFile(ctx)
 	switch {
+	case ca.StoppedByShutdown(ctx, err):
+		// Not a failure, as for the sibling jobs: nothing was read or written,
+		// and RefreshCRLChainFile does not count it.
+		slog.Info("CRL chain refresh stopped by shutdown; the next pass retries it", "path", path)
 	case err != nil:
 		slog.Error("Could not refresh the upstream CRL chain", "path", path, "error", err)
 	case rewritten:

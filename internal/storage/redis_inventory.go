@@ -763,9 +763,11 @@ func planRedisPrune(recs []indexedRecord, keep func(InventoryEntry) bool) redisP
 		return plan
 	}
 	if deferred := matched - len(plan.removed); deferred > 0 {
-		// Never silently: a short count must be explicable from the log, and
-		// a backlog bigger than a whole call can remove is growing rather
-		// than draining at the current cleanup cadence.
+		// Never silently: a short count must be explicable from the log. The
+		// CA's cleanup asks for at most sweepStepEntries (internal/ca, 100)
+		// entries a call since #347, so it never reaches this; the cap is a
+		// backstop for a caller that asks for more, and a deferral bigger than
+		// a whole call warns.
 		logFn := slog.Info
 		if pruneBacklogGrowing(deferred, redisPruneMaxPerCall) {
 			logFn = slog.Warn

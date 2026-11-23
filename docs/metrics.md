@@ -305,10 +305,22 @@ query, and `openvoxca_crl_sync_failures_total` for why it is stuck.
 > until a replacement is issued.
 >
 > It also counts a write path that could not take the CRL lock at all, on the
-> five writers that go through `withCRLLockCounted` — revoke by subject, revoke
-> by serial, reissue, refresh and cleanup. The closure never runs in that case,
-> so nothing beneath it could count anything. The `crl_chain_file` refresh counts a lock it could not take on this same counter
-> itself rather than through the helper (a failure there is not the file's
+> five writers that go through `withCRLLockCounted` or its background twin
+> `withCRLLockYielding` — revoke by subject, revoke by serial and reissue
+> through the first, refresh and cleanup through the second. The closure never
+> runs in that case, so nothing beneath it could count anything. Refresh and
+> cleanup are background jobs: they stand aside while any foreground CRL work
+> is waiting for the lock (a revocation, a clean or a reissue) and give up
+> after 15 seconds rather than 60. So a run of foreground CRL work lasting a
+> whole 15 seconds counts here too, as a refresh or cleanup step that did not
+> happen, and the server logs it as
+> `waiting to acquire lock "crl" behind a priority caller` (see
+> [locking](development/locking.md#revocations-go-before-background-work)).
+> A wait that a shutdown ends is not counted: the process is stopping, and the
+> pass did not fail.
+> The `crl_chain_file` refresh is a background job on the same terms, and
+> counts a lock it could not take on this same counter itself rather than
+> through the helper (a failure there is not the file's
 > fault, so it does not touch `openvoxca_crl_chain_refresh_failures_total`). The
 > revoke step inside `Clean` and `GenerateWithOptions`, the retire step inside
 > `Renew`, `AutoRenew`, `RenewStored` and `ReconcileManaged` — whether it
@@ -628,9 +640,14 @@ sweep is not completing — check the failure counter.
 > become a counter storm on a busy CA; a sweep pass that could not take the CRL
 > lock or write the list back; a predecessor a subject revocation could not
 > retire; and each pass that left an entry unrevoked or discarded one whose
-> serial it could never revoke. A pass counts
-> once however many entries it failed on, so this is a count of bad passes
-> rather than of lost certificates.
+> serial it could never revoke. A pass counts once however many entries it
+> failed on, so this is a count of bad passes rather than of lost certificates.
+> The sweep stands aside for foreground CRL work as the refresh and cleanup do,
+> so a pass that could not take the lock includes one that waited behind
+> revocations, cleans or reissues for its whole 15 seconds; its warning then
+> contains `behind a priority caller` (see
+> [locking](development/locking.md#revocations-go-before-background-work)). A
+> pass that a shutdown ends is not counted.
 >
 > The cases differ in what you have to do about them, and the log line is what
 > tells them apart. `Could not revoke superseded certificates` retries on the
@@ -647,11 +664,12 @@ sweep is not completing — check the failure counter.
 > `openvoxca_supersede_pending` rather than reporting zero, so the two signals
 > cannot both read clean while the list stops draining. A sweep that *can* read
 > it but cannot amend the CRL counts once per pass too, not once per entry: the
-> re-sign covers the whole pass, so every certificate that pass attempted stays
-> on the list and is retried together. A pending gauge that does not fall while
-> this counter rises is a sweep failing outright rather than one falling behind
-> — the sweep does not pace itself, so there is no backlog it declines to
-> attempt.
+> sweep amends the CRL once for each step of up to 100 due certificates, and
+> stops the pass at the first step it cannot write, so every certificate still
+> due stays on the list and the next pass retries them. A pending gauge that
+> does not fall while this counter rises is a sweep failing outright rather than
+> one falling behind — a pass that is not failing works through the whole
+> backlog, so there is none it declines to attempt.
 
 ### Client trust domains
 

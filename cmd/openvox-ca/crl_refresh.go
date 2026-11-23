@@ -63,6 +63,11 @@ func runCRLRefresher(ctx context.Context, c *ca.CA, interval, refreshBefore time
 func refreshCRLOnce(ctx context.Context, c *ca.CA, refreshBefore time.Duration) {
 	reissued, err := c.RefreshCRLIfDue(ctx, refreshBefore)
 	switch {
+	case ca.StoppedByShutdown(ctx, err):
+		// Not a failure: the refresh was waiting for the CRL lock behind
+		// foreground work when the shutdown came, and RefreshCRLIfDue does
+		// not count it either.
+		slog.Info("CRL refresh check stopped by shutdown; the next pass retries it")
 	case err != nil:
 		slog.Warn("CRL refresh check failed", "error", err)
 	case reissued:

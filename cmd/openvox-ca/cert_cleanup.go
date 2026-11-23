@@ -32,10 +32,12 @@ import (
 // without bound. It runs in the frontend process, which signs the rebuilt CRL
 // via the isolated signer over IPC.
 //
-// Replica safety: CA.CleanupExpiredCerts does its inventory prune and CRL
-// re-sign under the shared cluster CRL lock, so when this runs on multiple
-// replicas only the first to acquire the lock prunes; the others observe an
-// already-clean inventory and remove nothing. No leader election is required.
+// Replica safety: CA.CleanupExpiredCerts does each step's inventory prune and
+// CRL re-sign under the shared cluster CRL lock, releasing it between steps, so
+// when this runs on multiple replicas they share a large backlog step by step
+// without pruning any entry twice, and a replica that arrives once it is gone
+// observes an already-clean inventory and removes nothing. No leader election
+// is required.
 //
 // It returns when ctx is cancelled (i.e. on shutdown).
 func runCertCleaner(ctx context.Context, c *ca.CA, interval, retain time.Duration) {
@@ -64,10 +66,16 @@ func runCertCleaner(ctx context.Context, c *ca.CA, interval, retain time.Duratio
 func cleanupExpiredOnce(ctx context.Context, c *ca.CA, retain time.Duration) {
 	removed, err := c.CleanupExpiredCerts(ctx, retain)
 	switch {
+	case ca.StoppedByShutdown(ctx, err):
+		// Not a failure: each step is complete on its own, so what this pass
+		// did not reach waits for the next.
+		slog.Info("Expired-certificate cleanup stopped by shutdown; the next pass resumes it",
+			"removed", removed)
 	case err != nil:
-		// removed can be non-zero here: a batched backend (etcd) may have
-		// durably pruned entries before failing, and the operator needs to
-		// know state changed permanently despite the error.
+		// removed can be non-zero here: a pass works in steps and reports
+		// what the steps before the failing one pruned, and a batched backend
+		// (etcd) may also have durably pruned part of the failing step. The
+		// operator needs to know state changed permanently despite the error.
 		slog.Warn("Expired-certificate cleanup failed", "removed", removed, "error", err)
 	case removed > 0:
 		slog.Info("Expired certificates cleaned up", "removed", removed)

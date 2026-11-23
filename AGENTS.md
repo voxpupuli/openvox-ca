@@ -256,6 +256,19 @@ the inventory, in-memory caches) must follow
   must run inside the same lock as the mutation. Backend-internal locks taken
   directly via `Backend.AcquireLock` (e.g. etcd's `inventory-decompose`) are a
   second recognised pattern — see locking.md for when each applies.
+- **A revocation always goes before background work on `crl`** (#347).
+  Scheduled work whose timing is approximate — expiry pruning, the CRL and
+  chain refreshes, the delayed-supersession sweep — takes `crl` through
+  `StorageService.WithLockYielding` (in the CA, `withCRLLockYielding` or
+  `CA.sweepStep`), in holds bounded by `sweepStepBudget`, and never derives a
+  detached context inside the lock. Work an operator or a correctness path is
+  waiting on keeps plain `WithLock` however it is scheduled; the managed
+  certificate rollback runs on a timer and is one, and operator calls such as
+  `ReissueCRL` keep it even though they revoke nothing. Work a client waits on
+  at request volume that revokes nothing (recording a supersession, which every
+  agent renewal does) takes `WithLockNeutral`, neither going first nor
+  yielding. The priority holds within one process only. Rule 13 in locking.md
+  has the detail.
 - **One running instance, unless the backend has distributed locking.** A
   backend without it permits exactly one, because nothing reconciles the serial
   index, OCSP cache and cached CRL each process holds. `StorageService.

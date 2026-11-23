@@ -65,10 +65,12 @@ alerting rules for the openvox-ca exporter. It alerts on:
   certificate **requests that stay pending** too long;
 - **CRL update failures** — the CA failing to amend its CRL (a revocation it
   could not record, or a CRL it could not re-sign, write or read), which can
-  leave revoked or superseded certificates still valid. On filesystem and
-  SQLite a revocation that merely queued too long for its subject's lock is
-  counted here too, so the alert distinguishes the two by log line — see
-  [metrics](../docs/metrics.md). It fires on two failures within three hours,
+  leave revoked or superseded certificates still valid. Some counts are not
+  faults: on filesystem and SQLite a revocation that merely queued too long for
+  its subject's lock, and a CRL refresh, `crl_chain_file` refresh or cleanup
+  step that stood aside for foreground CRL work for its whole step budget
+  (logged with `behind a priority caller`), are counted here too, so the alert
+  tells them apart by log line — see [metrics](../docs/metrics.md). It fires on two failures within three hours,
   not one: a backend restart that catches a single amendment stays silent,
   while a CRL that stays unreadable, or whose lock cannot be taken, fails on
   every hourly refresh pass and warns by the second, 15 minutes after it. A

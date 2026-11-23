@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -55,6 +56,31 @@ var _ = Describe("cleanupExpiredOnce", func() {
 
 		cleanupExpiredOnce(ctx, c, time.Hour)
 		Expect(inventoryHas(store, "/CN=expired-node")).To(BeFalse(), "expired-node should have been removed from the inventory")
+	})
+
+	// The twin of the shutdown spec below: a pass that fails with its context
+	// alive still logs the warning, which keeps that spec's absence check
+	// pointed at a line that exists.
+	It("logs a pass that failed as failed", func() {
+		c, store, be := newPutFailingTestCA(storage.KeyInventory)
+		seedExpiredInventoryEntry(store, "expired-node")
+		be.fail.Store(true)
+
+		out := captureLogs(slog.LevelInfo, func() { cleanupExpiredOnce(context.Background(), c, time.Hour) })
+		Expect(out).To(ContainSubstring("Expired-certificate cleanup failed"))
+		Expect(out).NotTo(ContainSubstring("stopped by shutdown"))
+	})
+
+	Context("when a shutdown ends the pass", func() {
+		It("logs it as stopped, not failed", func() {
+			c, _ := newRefresherTestCA()
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			out := captureLogs(slog.LevelInfo, func() { cleanupExpiredOnce(ctx, c, time.Hour) })
+			Expect(out).To(ContainSubstring("stopped by shutdown"))
+			Expect(out).NotTo(ContainSubstring("cleanup failed"))
+		})
 	})
 })
 

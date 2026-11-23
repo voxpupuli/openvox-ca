@@ -21,6 +21,10 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
+	"log/slog"
+	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -34,10 +38,59 @@ import (
 // seeded with a freshly generated test CA and CRL.
 func newRefresherTestCA() (*ca.CA, *storage.StorageService) {
 	GinkgoHelper()
+	store := storage.New(GinkgoT().TempDir())
+	return initRefresherTestCA(store), store
+}
+
+// putFailingBackend fails every write of key once fail is set, so a driver can
+// be shown a pass that fails while its context is still alive.
+type putFailingBackend struct {
+	*storage.FilesystemBackend
+	key  string
+	fail atomic.Bool
+}
+
+func (b *putFailingBackend) Put(ctx context.Context, key string, data []byte, kind storage.BlobKind) error {
+	if key == b.key && b.fail.Load() {
+		return errors.New("simulated write failure")
+	}
+	return b.FilesystemBackend.Put(ctx, key, data, kind)
+}
+
+func newPutFailingTestCA(key string) (*ca.CA, *storage.StorageService, *putFailingBackend) {
+	GinkgoHelper()
+	dir := GinkgoT().TempDir()
+	be := &putFailingBackend{FilesystemBackend: storage.NewFilesystemBackend(dir), key: key}
+	store := storage.NewWithBackend(be, filepath.Join(dir, "private"))
+	return initRefresherTestCA(store), store, be
+}
+
+// holdCRLLock holds the CRL lock as a foreground caller would until the spec
+// ends, so a background job that wants it has to wait.
+func holdCRLLock(store *storage.StorageService) {
+	GinkgoHelper()
+	release := make(chan struct{})
+	held := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- store.WithLock(context.Background(), "crl", func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	Eventually(held).Should(BeClosed())
+	DeferCleanup(func() {
+		close(release)
+		Eventually(done).Should(Receive(BeNil()))
+	})
+}
+
+func initRefresherTestCA(store *storage.StorageService) *ca.CA {
+	GinkgoHelper()
 	keyPEM, crtPEM, crlPEM, err := testutil.GenerateTestCA()
 	Expect(err).NotTo(HaveOccurred(), "GenerateTestCA")
 
-	store := storage.New(GinkgoT().TempDir())
 	c := ca.New(store, ca.AutosignConfig{Mode: "off"}, "puppet.test")
 	ctx := context.Background()
 	Expect(store.EnsureDirs(ctx)).To(Succeed(), "EnsureDirs")
@@ -47,7 +100,7 @@ func newRefresherTestCA() (*ca.CA, *storage.StorageService) {
 	Expect(store.WriteSerial(ctx, "0001")).To(Succeed(), "WriteSerial")
 	Expect(store.TouchInventory(ctx)).To(Succeed(), "TouchInventory")
 	Expect(c.Init(ctx)).To(Succeed(), "Init")
-	return c, store
+	return c
 }
 
 func storedCRLNumber(store *storage.StorageService) int64 {
@@ -79,6 +132,33 @@ var _ = Describe("refreshCRLOnce", func() {
 		refreshCRLOnce(ctx, c, time.Hour)
 		afterFresh := storedCRLNumber(store)
 		Expect(afterFresh).To(Equal(afterDue), "expected CRL number to stay at %d, got %d", afterDue, afterFresh)
+	})
+
+	// The twin of the shutdown spec below, which keeps its absence check
+	// pointed at a line that exists.
+	It("logs a pass that failed as failed", func() {
+		c, _, be := newPutFailingTestCA(storage.KeyCRL)
+		be.fail.Store(true)
+
+		out := captureLogs(slog.LevelInfo, func() { refreshCRLOnce(context.Background(), c, 3650*24*time.Hour) })
+		Expect(out).To(ContainSubstring("CRL refresh check failed"))
+		Expect(out).NotTo(ContainSubstring("stopped by shutdown"))
+	})
+
+	// A refresh waiting behind foreground CRL work when the shutdown comes has
+	// not failed, and must not log as though it had.
+	It("logs a pass that a shutdown ended as stopped, not failed", func() {
+		c, store := newRefresherTestCA()
+		holdCRLLock(store)
+
+		out := captureLogs(slog.LevelInfo, func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			time.AfterFunc(100*time.Millisecond, cancel)
+			refreshCRLOnce(ctx, c, 3650*24*time.Hour)
+		})
+		Expect(out).To(ContainSubstring("CRL refresh check stopped by shutdown"))
+		Expect(out).NotTo(ContainSubstring("CRL refresh check failed"))
 	})
 })
 

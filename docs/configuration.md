@@ -193,7 +193,9 @@ inventory_verify_interval_sec: 0  # how often to verify; 0 = built-in default (5
 # Background expired-certificate cleanup (opt-in). When enabled, a job removes
 # certificates that expired more than the retention grace period ago from the
 # inventory and the CRL, and deletes their stored signed certificate. Safe to run
-# on every replica (serialised on the shared CRL lock).
+# on every replica (serialised on the shared CRL lock). It works in steps, and an
+# inventory past a size ceiling cannot be pruned; see "OCSP status across
+# replicas" below.
 enable_expired_cert_cleanup: false       # true = run the cleanup job
 expired_cert_retention_sec: 0            # grace period after a cert's NotAfter before removal; 0 = built-in default (30d)
 expired_cert_cleanup_interval_sec: 0     # how often to run; 0 = built-in default (24h)
@@ -1105,7 +1107,33 @@ knob that bounds it is `enable_expired_cert_cleanup`, which is off by default �
 it prunes rows for certificates that expired more than
 `expired_cert_retention_sec` ago, and so caps what this job (and the startup
 index build) has to read. Worth turning on before the inventory is large rather
-than after.
+than after, and the cleanup's own cost is the reason. It prunes in steps of up
+to 100 certificates, so that a revocation never waits long behind it, and each
+step reads the whole inventory. On the filesystem backend, the default, each
+step also rewrites the whole inventory file and its integrity value; on SQLite,
+PostgreSQL and MySQL it rebuilds the integrity chain over every surviving row.
+So a first pass over a backlog of N expired certificates in an inventory of I
+rows does about N/100 full passes over I where it used to do one — 1,500 of them
+for 150,000 expired certificates. A step that drops entries from the CRL also
+re-signs it, which re-runs the Kubernetes export for any `kubernetes_export`
+target carrying the CRL and, on etcd, writes a new revision of the CRL until
+compaction. Each step also holds the CA's in-memory lock for its whole length
+(the prune, the CRL re-sign and the deletions after it), at most 15 seconds plus
+any CA signature in flight, and that lock is not only issuance's: OCSP answers,
+cached ones included, wait on it too, once a step for as long as the pass
+lasts. The readiness check (`/healthz/ready`) takes no lock, so a long step
+cannot take a replica out of its Service.
+
+The prune has a ceiling of its own. A step's prune gets half of the step's 15
+seconds, about 7.5, to read, verify and rewrite the whole inventory, and no
+setting lengthens it: the step's length is what bounds a revocation's wait. A
+prune that does not fit removes nothing, the pass fails with `the inventory
+prune ran out of its share of a sweep step`, and every later pass fails the
+same way until the inventory is read faster. As a guide, on a local NVMe disk
+one step took about 1 second over a 2-million-row filesystem inventory and
+about 3 seconds per million rows on SQLite; slower storage lowers the ceiling
+in proportion. Turning the cleanup on before the inventory is large keeps it
+well clear (see [locking](development/locking.md#known-gaps)).
 
 Watch `openvoxca_ocsp_index_serials` across replicas to confirm they agree, and
 `openvoxca_ocsp_index_sync_failures_total` for a replica that cannot catch up.
@@ -1333,18 +1361,29 @@ Some things worth knowing before you rely on it:
   operator set the window to 0. On a CA that has never recorded a supersession
   each pass is a single absent-key read taking no cluster lock: the sweep rules
   the work out before acquiring one.
-- **A pass costs one CRL re-sign, whatever the backlog.** The sweep collects
-  every due entry and amends the CRL once — one read, one signature, one write —
-  however many certificates come due together, and holds the shared CRL lock
-  that every revocation on every replica needs for that single amendment rather
-  than for one per entry. Under
+- **A pass costs one CRL re-sign per 100 due certificates.** The sweep
+  collects due entries in steps of up to 100 and amends the CRL once per step —
+  one read, one signature, one write — rather than once per entry. Under
   [`ca_key_provider: openbao`](openbao-transit.md) it is likewise one remote
-  Transit round trip rather than one per entry. That matters most in the case
-  a per-entry sweep would handle worst: a large backlog coming due at once, after a
-  fleet-wide outage or a passphrase rotation. A pass that cannot amend the CRL
-  fails as a whole — it leaves every entry it attempted on the list, raises
-  `openvoxca_supersede_failures_total`, and the next pass retries them
-  together.
+  Transit round trip per step. That matters most in the case a per-entry sweep
+  would handle worst: a large backlog coming due at once, after a fleet-wide
+  outage or a passphrase rotation. Each step holds the shared CRL lock on its
+  own, for at most 15 seconds plus any CA signature already in flight
+  (normally milliseconds; about 10 seconds for a slow OpenBao signer, see
+  [locking](development/locking.md#known-gaps)), and the sweep pauses for a
+  second between steps.
+  On the replica running the sweep a revocation goes first: a step does not
+  start while one is waiting. On another replica it waits for the step in
+  progress and for any steps other replicas already have queued, and on Redis,
+  whose lock is polled, it can miss the pause and wait for one more; see
+  [locking](development/locking.md#known-gaps). A step that cannot amend the
+  CRL ends the pass — it leaves every entry still due on the list, raises
+  `openvoxca_supersede_failures_total`, and the next pass retries them. Each
+  step also reads and rewrites the whole pending-supersession list, so a
+  backlog of D due entries costs about D/100 list rewrites where a pass used to
+  write it once; on etcd each rewrite is a new revision until compaction. Each
+  step's CRL re-sign likewise re-runs the Kubernetes export for targets
+  carrying the CRL and, on etcd, adds a revision of the CRL.
 - **Revoking a subject retires its pending predecessor too.** `revoke --certname`
   and `DELETE /certificate_status` retire the subject's current certificate
   *and* anything of that subject's still inside its window, in the same call —
@@ -1364,9 +1403,11 @@ Some things worth knowing before you rely on it:
   window. The server warns at startup when it is not shorter than the window,
   naming the worst-case effective window — with the default interval, any window
   of 15 minutes or less trips it.
-- **Safe on every replica.** The list rewrite and the revocations it drives run
-  under the shared cluster CRL lock, so only the first replica to take it
-  revokes and the others find the list already drained. No leader election.
+- **Safe on every replica.** Each step's list rewrite and the revocations it
+  drives run under the shared cluster CRL lock, which is released between
+  steps, so replicas running the sweep at once share a large backlog without
+  revoking any entry twice, and a replica that arrives once it is gone finds the
+  list already drained. No leader election.
 - **Watch `openvoxca_supersede_pending`** for how many certificates are inside
   their window right now, and `openvoxca_supersede_failures_total` for
   supersessions that were lost or could not be carried out — see

@@ -1202,9 +1202,9 @@ func (c *CA) issueManagedUnderSubjectLock(ctx context.Context, m ManagedCert, re
 			// store write fails is that it hung, and by then the deadline this
 			// pass started with is spent -- so a rollback sharing it would find
 			// the context already done, fail to take the CRL lock, and leave
-			// exactly the orphan it exists to prevent. The same reasoning, and
-			// the same shape, as CleanupExpiredCerts and the superseded
-			// write-back.
+			// exactly the orphan it exists to prevent. It is detached before
+			// the CRL lock is taken, never inside it, so it bounds this
+			// revocation's wait rather than extending anyone's hold (#347).
 			revokeCtx, cancelRevoke := context.WithTimeout(
 				context.WithoutCancel(ctx), LockTimeout/2)
 			defer cancelRevoke()

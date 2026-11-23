@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"time"
@@ -40,29 +41,79 @@ import (
 // eligible only once now-retain has passed its expiry. retain may be zero (purge
 // as soon as expired); negative values are treated as zero.
 //
-// Replica safety: the whole operation runs under the cluster-wide CRL lock, so
-// it serialises with Revoke and the CRL refresher across replicas. The
-// inventory rewrite keeps entries and integrity head consistent at every
-// observable point, but on backends that prune in batches (etcd) it may
-// partially complete on error; the entries PruneInventory returns are always
-// exactly the ones removed, so the CRL/blob cleanup below runs even when the
-// prune itself reports an error — on its own small context, so in the worst
-// case (a prune that exhausted its deadline) the CRL lock is held for up to
-// LockTimeout plus that cleanup budget. An entry that cannot be time-parsed
+// Replica safety: each step runs under the cluster-wide CRL lock, so it
+// serialises with Revoke and the CRL refresher across replicas, and replicas
+// running this at once share a large backlog step by step without pruning any
+// entry twice. The inventory rewrite keeps entries and integrity head
+// consistent at every observable point, but on backends that prune in batches
+// (etcd) it may partially complete on error; the entries PruneInventory returns
+// are always exactly the ones removed, so the CRL/blob cleanup below runs even
+// when the prune itself reports an error. An entry that cannot be time-parsed
 // is conservatively kept, never dropped.
+//
+// It works in steps of at most sweepStepEntries certificates, each a separate
+// acquisition of the CRL lock taken through withCRLLockYielding and held for at
+// most sweepStepBudget, plus any CA signature in flight (#347). A revocation in
+// this process does not queue behind a step that has not taken the lock, unless
+// that step is already waiting on another process, and waits for at most the
+// step in progress. One on another replica waits for that step and for any step
+// another replica already has queued; locking.md's known gaps say what each of
+// those leaves. Each step is complete on its own: what it prunes it also drops
+// from the CRL and deletes, so stopping between steps loses nothing, and the
+// next pass carries on where this one stopped. ctx ends the pass between steps
+// and ends a step's wait for the lock, but never a step that holds it; see
+// sweepStep.
 func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int, error) {
 	if retain < 0 {
 		retain = 0
 	}
 	cutoff := time.Now().Add(-retain)
 
-	ctx, cancel := context.WithTimeout(ctx, LockTimeout)
-	defer cancel()
-
+	// Every step's prune reads the whole inventory, so an entry it cannot
+	// parse would be warned about once a step; once a pass is the signal.
+	warned := make(map[string]bool)
+	progress := newSweepProgress("Expired-certificate cleanup", "removed")
 	var removed int
-	err := c.withCRLLockCounted(ctx, func() error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return removed, err
+		}
+		n, more, err := c.cleanupExpiredStep(ctx, cutoff, warned)
+		removed += n
+		// n == 0 as well as !more: a step that pruned nothing has nothing to
+		// show for itself, and taking another would only repeat it.
+		if err != nil || !more || n == 0 {
+			return removed, err
+		}
+		progress.step(removed)
+		if err := c.pauseBetweenSweepSteps(ctx); err != nil {
+			return removed, err
+		}
+	}
+}
+
+// cleanupExpiredStep is one step of CleanupExpiredCerts: it prunes at most
+// sweepStepEntries certificates that expired before cutoff, and cleans up after
+// exactly the ones it pruned. more reports that it left eligible certificates
+// for a further step. warned carries the serials already warned about as
+// unparseable across the pass's steps.
+func (c *CA) cleanupExpiredStep(parent context.Context, cutoff time.Time,
+	warned map[string]bool) (removed int, more bool, err error) {
+	limit := c.sweepStepEntries()
+
+	err = c.sweepStep(parent, c.withCRLLockYielding, func(ctx context.Context) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
+
+		// The prune gets half of the hold's budget, and the cleanup after it
+		// the rest. A prune that runs out of time is exactly when a partial
+		// prune is most likely, and the cleanup below must still run for the
+		// entries it durably removed. Splitting the budget gives it time to
+		// run without holding the lock any longer than the budget, which is
+		// what a concurrent revocation waiting on this lock is counting on.
+		pruneCtx, cancelPrune := shareOfStep(ctx)
+		defer cancelPrune()
+		pruneStart := time.Now()
 
 		// Prune the inventory first; the returned entries tell us exactly which
 		// serials to drop from the CRL and which caches/blobs to clean up. A
@@ -71,16 +122,47 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 		// up NOW: the inventory no longer names them, so a later run could
 		// never rediscover them and their CRL entries and cert blobs would be
 		// orphaned forever. Hold the prune error and surface it at the end.
-		dropped, pruneErr := c.Storage.PruneInventory(ctx, func(e storage.InventoryEntry) bool {
+		//
+		// The cap is applied by serial and remembered, rather than counted,
+		// because every structured backend calls the predicate again when it
+		// retries a prune that lost a race with an append. A counter would
+		// already stand at the cap on the retry, keep every entry, and end the
+		// pass with nothing removed; a set picks the same entries again.
+		selected := make(map[string]bool, limit)
+		dropped, pruneErr := c.Storage.PruneInventory(pruneCtx, func(e storage.InventoryEntry) bool {
 			notAfter, perr := time.Parse(storage.InventoryTimeFormat, e.NotAfter)
 			if perr != nil {
-				slog.Warn("Cleanup: keeping inventory entry with unparseable NotAfter",
-					"serial", e.Serial, "subject", e.Subject, "not_after", e.NotAfter, "error", perr)
+				if !warned[e.Serial] {
+					warned[e.Serial] = true
+					slog.Warn("Cleanup: keeping inventory entry with unparseable NotAfter",
+						"serial", e.Serial, "subject", e.Subject, "not_after", e.NotAfter, "error", perr)
+				}
 				return true
 			}
-			return !notAfter.Before(cutoff)
+			if !notAfter.Before(cutoff) {
+				return true
+			}
+			if selected[e.Serial] {
+				return false
+			}
+			if len(selected) >= limit {
+				more = true
+				return true
+			}
+			selected[e.Serial] = true
+			return false
 		})
 		if len(dropped) == 0 {
+			// A prune that ran out of its share and removed nothing will do so
+			// on every later pass too: it reads and verifies the whole
+			// inventory however few entries the step takes, and no setting
+			// lengthens the share. Say so, or the operator sees only a deadline.
+			if errors.Is(pruneErr, context.DeadlineExceeded) && pruneCtx.Err() != nil {
+				return fmt.Errorf("the inventory prune ran out of its share of a sweep step after %s; "+
+					"every step reads the whole inventory, so the inventory's size, not the backlog, "+
+					"is the limit (see docs/configuration.md, enable_expired_cert_cleanup): %w",
+					time.Since(pruneStart).Round(time.Millisecond), pruneErr)
+			}
 			return pruneErr
 		}
 		// The entries below are durably gone whatever else happens, so report
@@ -88,18 +170,6 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 		// otherwise a partial run logs "failed" with no hint that state
 		// changed permanently.
 		removed = len(dropped)
-
-		// The prune may have consumed most (or, on a deadline error, all) of
-		// ctx's budget, and the deadline case is exactly when a partial prune
-		// is most likely. The cleanup below must still run for the durably
-		// removed entries, so give it its own bounded context that survives
-		// the prune's. The CRL lock (and c.mu) is still held throughout, so
-		// keep the extra budget modest — one CRL re-sign plus at most a
-		// bounded batch of blob deletions — rather than granting a second
-		// full LockTimeout: a concurrent Revoke waits on the same lock with a
-		// LockTimeout budget of its own.
-		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), LockTimeout/2)
-		defer cancelCleanup()
 
 		// Collect the removed serials (normalised) and refresh in-memory caches.
 		removedSerials := make(map[string]*big.Int, len(dropped))
@@ -118,18 +188,18 @@ func (c *CA) CleanupExpiredCerts(ctx context.Context, retain time.Duration) (int
 		// A CRL failure must not abort the rest: the "clean up NOW" rule above
 		// applies to the cert blobs just as much, and the deletion loop
 		// already logs-and-swallows its own per-subject failures.
-		crlErr := c.dropCRLEntriesLocked(cleanupCtx, removedSerials)
+		crlErr := c.dropCRLEntriesLocked(ctx, removedSerials)
 
 		// Delete the stored signed cert for each removed subject, but only when
 		// the cert still on file carries the expired serial (otherwise the
 		// subject has been renewed and the current cert must be preserved).
 		for _, e := range dropped {
-			c.deleteStoredCertIfSerialMatches(cleanupCtx, e.Subject, e.Serial)
+			c.deleteStoredCertIfSerialMatches(ctx, e.Subject, e.Serial)
 		}
 
 		return errors.Join(pruneErr, crlErr)
 	})
-	return removed, err
+	return removed, more, err
 }
 
 // dropCRLEntriesLocked re-signs the CRL with every revocation entry whose serial
