@@ -162,7 +162,7 @@ var _ = Describe("Admin allow list construction", func() {
 
 var _ = Describe("diffAllowList", func() {
 	It("names the CNs that gained and lost admin access", func() {
-		// The audit record: a count alone cannot distinguish "unchanged" from
+		// The log record: a count alone cannot distinguish "unchanged" from
 		// "one compile server swapped for another".
 		added, removed := diffAllowList(
 			map[string]bool{"stays.example.com": true, "goes.example.com": true},
@@ -627,7 +627,7 @@ var _ = Describe("Configuration reloading", func() {
 		// Exercised through the live call site, not just diffAllowList's own
 		// arguments: transposing the two would still leave the allow list
 		// correct (so IsAdminCN specs stay green) while attributing every
-		// grant as a withdrawal in the security audit log.
+		// grant as a withdrawal in the reload's log record.
 		var buf bytes.Buffer
 		orig := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))

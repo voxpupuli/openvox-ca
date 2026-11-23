@@ -75,7 +75,7 @@ type opaqueBackend struct {
 
 // writeLoggingConfig points the next command at a config naming a logfile that
 // exists, and returns its path. Asserting through the configured logfile rather
-// than a captured handler also pins the applySubcommandLogging wiring the audit
+// than a captured handler also pins the applySubcommandLogging wiring the log
 // records depend on -- without it a record exists only in the terminal that ran
 // the command.
 func writeLoggingConfig() string {
@@ -339,7 +339,7 @@ var _ = Describe("headFingerprint", func() {
 })
 
 var _ = Describe("fullHead", func() {
-	// The audit record's rendering, and the durable account of what a rebuild
+	// The log record's rendering, and the durable account of what a rebuild
 	// replaced. It renders in full rather than truncating, because a log line
 	// has no width to save and eight of thirty-two bytes does not answer "what
 	// was signed over".
@@ -475,7 +475,7 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 		})
 	})
 
-	Describe("the durable audit record", func() {
+	Describe("the durable log record", func() {
 		It("writes what was signed over to the configured logfile", func() {
 			logFile := writeLoggingConfig()
 			issueInDir(caDir, "web01.example.com")
@@ -559,7 +559,7 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 		})
 
 		It("records the unverified baseline the next start will establish", func() {
-			// The third audit record, and the only one outside this Describe
+			// The third durable record, and the only one outside this Describe
 			// until now: deleting it, or demoting it to Info, passed the suite.
 			logFile := writeLoggingConfig()
 			issueInDir(caDir, "web01.example.com")
@@ -664,7 +664,7 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 			// The record parameter threaded through applySubcommandLogging: the
 			// only prior assertion matched "terminal-only", which passes for any
 			// value including the other caller's.
-			Expect(stdout).To(ContainSubstring("the audit record for this rebuild is terminal-only"))
+			Expect(stdout).To(ContainSubstring("the log record of this rebuild is terminal-only"))
 			Expect(stdout).NotTo(ContainSubstring("safe to run alongside a live server"))
 
 			// The fixture's count is known, so assert it rather than "some
@@ -1073,7 +1073,7 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 
 			logged, readErr := os.ReadFile(logFile)
 			Expect(readErr).NotTo(HaveOccurred())
-			// Per record and by value, as the sibling audit specs are: this
+			// Per record and by value, as the sibling log-record specs are: this
 			// logfile also holds the mutation record and the instance-lock
 			// warning, and a file-wide match is satisfied by any of them.
 			rec := logRecord(logged,
@@ -1203,7 +1203,7 @@ var _ = Describe("openvox-ca rebuild-inventory-hmac", func() {
 			// the wrap has to name the later read: an operator told "reading the
 			// inventory integrity state" would look for a failure before any
 			// write, when in fact the value was replaced and then could not be
-			// confirmed. The audit record survives either way, which is why this
+			// confirmed. The log record survives either way, which is why this
 			// is wording rather than correctness.
 			logFile := writeLoggingConfig()
 			breakInventoryIntegrity(caDir)

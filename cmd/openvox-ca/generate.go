@@ -125,8 +125,13 @@ before a server exists.`,
 			// Honour the configured logfile so the authorisation-grant audit
 			// line in internal/ca reaches it. Non-fatal and non-creative, for
 			// reasons setupLogger's other callers do not share: see
-			// applySubcommandLogging.
-			closeLog := applySubcommandLogging(cfg, out, "this mint", cmd.Name())
+			// applySubcommandLogging. Only a --pp-cli-auth mint writes that
+			// audit record, so a plain one is not told it has one.
+			record := "any log record of this mint"
+			if ppCliAuth {
+				record = "the audit record for this mint"
+			}
+			closeLog := applySubcommandLogging(cfg, out, record, cmd.Name())
 			defer closeLog()
 
 			// The frontend role proxies signing to an isolated signer and never
@@ -540,9 +545,10 @@ func probeBackendCapabilities(ctx context.Context, store *storage.StorageService
 // takes to withdraw it.
 //
 // The withdrawal half is the part an operator cannot infer. Unlike an allow-list
-// entry, which is a file edit and a restart, this grant is baked into a
-// certificate, and revoking it does not take effect on a running server until
-// that server reloads its CRL.
+// entry, which is a file edit and a reload (or a restart, for a CN given in
+// puppet_server), this grant is baked into a certificate, and revoking it does
+// not take effect on a running server until that server reloads its CRL, which
+// each replica does within crl_sync_interval_sec unless its sync is failing.
 func warnAdminCredential(w io.Writer, certname, keyPath string) {
 	_, _ = fmt.Fprintf(w, `
 WARNING: --pp-cli-auth mints a full CA administrator credential.
@@ -551,14 +557,16 @@ WARNING: --pp-cli-auth mints a full CA administrator credential.
     %s
   will be able to sign any pending request, sign all of them, generate a
   certificate for any name, revoke and clean any certificate, import
-  certificates, and replace the CRL -- on this CA, without being listed in the
+  certificates, and re-sign the CRL -- on this CA, without being listed in the
   admin allow list.
 
   Withdrawing it is not one step:
     1. openvox-ca-ctl revoke --certname %s
-    2. restart every replica. Waiting for the CRL to refresh on its own can take
-       roughly two-thirds of crl_validity_days, and even then a pre-signed OCSP
-       response can vouch for the revoked serial for up to another 4 hours.
+    2. wait for every replica to reload the CRL, which each does within
+       crl_sync_interval_sec (60 seconds by default). A replica whose
+       openvoxca_crl_sync_failures_total keeps rising keeps the CRL it already
+       holds: restart it. Even then a pre-signed OCSP response can vouch for
+       the revoked serial for up to another 4 hours.
     3. check the inventory for other live serials for this name. If renewal
        replaced it and revoke_on_auto_renew is off -- or a renewal's best-effort
        revoke failed -- there may be more than one. Step 1 retires only the
@@ -664,12 +672,13 @@ func describeIssued(result *ca.GenerateResult) (string, time.Time, error) {
 // subcommand, so what it records lands where the server's own records do rather
 // than only in the terminal that ran it, and returns a closer.
 //
-// Two callers with two different audit obligations. generate mints a
-// certificate, and the authorisation-grant line internal/ca emits says an
-// administrator credential was created; rebuild-inventory-hmac re-asserts
-// inventory integrity, and its re-assertion records are the only lasting
-// evidence that a CA's baseline was reset. Both are asked about after the fact,
-// and neither is answerable from a terminal that has closed.
+// Two callers with two different record-keeping obligations. generate mints a
+// certificate, and for a --pp-cli-auth mint the authorisation-grant line
+// internal/ca emits says an administrator credential was created;
+// rebuild-inventory-hmac re-asserts inventory integrity, and its re-assertion
+// records are the only lasting evidence that a CA's baseline was reset. Both
+// are asked about after the fact, and neither is answerable from a terminal
+// that has closed.
 //
 // Two departures from how the root command uses setupLogger, both deliberate.
 //
@@ -683,11 +692,13 @@ func describeIssued(result *ca.GenerateResult) (string, time.Time, error) {
 // fatal; runSignerMode falls back to stderr. An interactive mint should follow
 // the signer: refusing to issue because a log file is unwritable helps nobody.
 //
-// record names what the audit line would describe ("this mint", "this
-// rebuild"), because the no-logfile notice below is read by an operator of
-// whichever subcommand called this, and a shared helper that says "mint" to the
-// operator of a repair command is the same defect as a capability report that
-// calls a refused backend safe.
+// record names the record the subcommand writes ("the audit record for this
+// mint" for a --pp-cli-auth mint, "the log record of this rebuild"), because
+// the no-logfile notice below is read by an operator of whichever subcommand
+// called this, and a shared helper that says "mint" to the operator of a
+// repair command is the same defect as a capability report that calls a
+// refused backend safe. Only the --pp-cli-auth mint's record is an audit
+// record: the rebuild's carries no event.
 //
 // role is the subcommand's own name, and every record it logs carries it. These
 // records land in the running server's logfile, so the role is what tells an
@@ -697,7 +708,7 @@ func applySubcommandLogging(cfg *serverConfig, w io.Writer, record, role string)
 
 	if effective.LogFile != "" {
 		if _, err := os.Stat(effective.LogFile); err != nil {
-			_, _ = fmt.Fprintf(w, "Audit log: %s is not present and will not be created by this "+
+			_, _ = fmt.Fprintf(w, "Log file: %s is not present and will not be created by this "+
 				"command; logging to stderr instead.\n", effective.LogFile)
 			effective.LogFile = ""
 		}
@@ -705,7 +716,7 @@ func applySubcommandLogging(cfg *serverConfig, w io.Writer, record, role string)
 
 	f, err := setupLogger(&effective, role)
 	if err != nil {
-		_, _ = fmt.Fprintf(w, "Audit log: could not open %s (%v); logging to stderr instead.\n",
+		_, _ = fmt.Fprintf(w, "Log file: could not open %s (%v); logging to stderr instead.\n",
 			effective.LogFile, err)
 		stderrOnly := effective
 		stderrOnly.LogFile = ""
@@ -717,10 +728,10 @@ func applySubcommandLogging(cfg *serverConfig, w io.Writer, record, role string)
 
 	switch {
 	case f != nil:
-		_, _ = fmt.Fprintf(w, "Audit log: %s\n", effective.LogFile)
+		_, _ = fmt.Fprintf(w, "Log file: %s\n", effective.LogFile)
 		return func() { _ = f.Close() }
 	case cfg.LogFile == "":
-		_, _ = fmt.Fprintf(w, "No logfile configured: the audit record for %s is terminal-only.\n", record)
+		_, _ = fmt.Fprintf(w, "No logfile configured: %s is terminal-only.\n", record)
 	}
 	return func() {}
 }
