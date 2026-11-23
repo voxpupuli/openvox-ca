@@ -11682,12 +11682,32 @@ var _ = Describe("verifyAttestations", func() {
 	)
 
 	It("covers every workflow README.md verifies against", func() {
-		// The floor under the table: the three identities README.md pins
-		// are all rows, so a row dropped from attestationIdentities fails.
-		var workflows []string
-		for _, id := range attestationIdentities {
-			workflows = append(workflows, id.workflow)
+		// The floor under the table. verifyAttestations checks each row is
+		// still pinned in README.md, not that each pin there has a row, so a
+		// row dropped from attestationIdentities would pass it. Read the pins
+		// from README.md's verify commands instead of restating the table.
+		readme, err := os.ReadFile("README.md")
+		Expect(err).NotTo(HaveOccurred())
+		pin := regexp.MustCompile(`workflows/([A-Za-z0-9_-]+)\\?\.yml`)
+		var pinned []string
+		for _, line := range strings.Split(string(readme), "\n") {
+			if !strings.Contains(line, "--signer-workflow") && !strings.Contains(line, "--certificate-identity") {
+				continue
+			}
+			for _, m := range pin.FindAllStringSubmatch(line, -1) {
+				pinned = append(pinned, m[1]+".yml")
+			}
 		}
-		Expect(workflows).To(ConsistOf("release.yml", "container-images.yml", "helm-chart.yml"))
+		// Its own floor: README.md verifies the release, the images and the
+		// chart, so a pattern that matches nothing cannot pass.
+		Expect(len(pinned)).To(BeNumerically(">=", 3), "found too few verify commands in README.md")
+		var rows []string
+		for _, id := range attestationIdentities {
+			rows = append(rows, id.workflow)
+		}
+		for _, w := range pinned {
+			Expect(rows).To(ContainElement(w), "README.md verifies attestations from "+w+
+				", which attestationIdentities has no row for")
+		}
 	})
 })
