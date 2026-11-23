@@ -1,0 +1,118 @@
+# promtool rule tests for the mixin rendered with a non-zero
+# upstreamCRLExpiryWarningSeconds, the absolute floor on
+# OpenVoxCAUpstreamCRLExpiringSoon, and a non-default
+# upstreamCRLExpiryWarningFraction.
+#
+# Run with `mage test:mixin` from the repository root, which renders the mixin
+# with `_config+:: { upstreamCRLExpiryWarningSeconds: 86400,
+# upstreamCRLExpiryWarningFraction: 0.2 }` (see mixinRenderings in magefile.go)
+# to the path below and runs these cases against it, beside tests.yaml's
+# default rendering.
+#
+# The floor defaults to 0, where it changes nothing a default rendering can
+# show: every series it would catch is already held silent by the rule's
+# "nextUpdate - time() > 0" clause. These cases pin what it does once set:
+# the warning fires once less than max(a fifth of the CRL's lifetime, one day)
+# remains, and the floor alone applies wherever the lifetime is unknown or
+# nonsensical. A fifth rather than the default tenth, so that the 30-day case
+# also shows the rule reads the fraction from the configuration.
+
+rule_files:
+  # Relative to this file; written by mage test:mixin.
+  - ../.test-output/mixin-alerts-floor.yaml
+
+evaluation_interval: 1m
+
+tests:
+
+  # A 30-day CRL: a fifth of its life is 6 days, more than the 1-day floor, so
+  # the fraction sets the boundary, crossed at 24 days. A rule taking the
+  # smaller of the two, or the floor alone, would stay silent until 29 days,
+  # and one ignoring the configured fraction for the default tenth until 27.
+  # Five-minute samples, as elsewhere: an hourly series goes stale between
+  # samples under Prometheus's five-minute lookback, and reads as absent.
+  - interval: 5m
+    name: the fraction decides where it is larger than the floor
+    input_series:
+      - series: 'openvoxca_crl_chain_this_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Long Root"}'
+        values: "0x8700"
+      - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Long Root"}'
+        values: "2592000x8700"
+    alert_rule_test:
+      - eval_time: 23d22h
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
+        exp_alerts: []
+      - eval_time: 24d2h
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              issuer: Long Root
+            exp_annotations:
+              description: "The CRL issued by Long Root and republished by ca-1:9140 reaches NextUpdate in 5d 22h 0m 0s. openvox-ca cannot reissue it: get a current one from the issuing CA, through crl_chain.urls or crl_chain.file."
+              summary: "An upstream CRL published by the OpenVox CA is approaching its NextUpdate."
+
+  # A 72-hour CRL: a fifth of its life is 14h24m, less than the 1-day floor, so
+  # the floor sets the boundary, crossed at 48h. The fraction alone would stay
+  # silent until 57h36m.
+  - interval: 5m
+    name: the floor decides where it is larger than the fraction
+    input_series:
+      - series: 'openvoxca_crl_chain_this_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Short Root"}'
+        values: "0x900"
+      - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Short Root"}'
+        values: "259200x900"
+    alert_rule_test:
+      - eval_time: 47h
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
+        exp_alerts: []
+      - eval_time: 50h
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              issuer: Short Root
+            exp_annotations:
+              description: "The CRL issued by Short Root and republished by ca-1:9140 reaches NextUpdate in 22h 0m 0s. openvox-ca cannot reissue it: get a current one from the issuing CA, through crl_chain.urls or crl_chain.file."
+              summary: "An upstream CRL published by the OpenVox CA is approaching its NextUpdate."
+
+  # Where the lifetime cannot be worked out the floor alone applies, at the
+  # same 48h boundary as the case above: a CA too old to export thisUpdate,
+  # and a non-conforming CRL whose thisUpdate is after its nextUpdate, whose
+  # "lifetime" is negative. Without the floor's arm neither would warn at all.
+  - interval: 5m
+    name: the floor alone applies where the lifetime is unknown or not positive
+    input_series:
+      - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Old CA"}'
+        values: "259200x900"
+      - series: 'openvoxca_crl_chain_this_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Backwards Root"}'
+        values: "518400x900"
+      - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Backwards Root"}'
+        values: "259200x900"
+    alert_rule_test:
+      - eval_time: 47h
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
+        exp_alerts: []
+      - eval_time: 50h
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              issuer: Old CA
+            exp_annotations:
+              description: "The CRL issued by Old CA and republished by ca-1:9140 reaches NextUpdate in 22h 0m 0s. openvox-ca cannot reissue it: get a current one from the issuing CA, through crl_chain.urls or crl_chain.file."
+              summary: "An upstream CRL published by the OpenVox CA is approaching its NextUpdate."
+          - exp_labels:
+              severity: warning
+              job: openvox-ca
+              instance: ca-1:9140
+              issuer: Backwards Root
+            exp_annotations:
+              description: "The CRL issued by Backwards Root and republished by ca-1:9140 reaches NextUpdate in 22h 0m 0s. openvox-ca cannot reissue it: get a current one from the issuing CA, through crl_chain.urls or crl_chain.file."
+              summary: "An upstream CRL published by the OpenVox CA is approaching its NextUpdate."

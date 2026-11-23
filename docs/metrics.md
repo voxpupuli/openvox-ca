@@ -173,7 +173,8 @@ data cannot carry a new expiry alert to firing on its own.
 - `openvoxca_crl_number`, `openvoxca_crl_this_update_timestamp_seconds`,
   `openvoxca_crl_next_update_timestamp_seconds`,
   `openvoxca_crl_revoked_certificates`
-- `openvoxca_crl_chain_next_update_timestamp_seconds`
+- `openvoxca_crl_chain_next_update_timestamp_seconds`,
+  `openvoxca_crl_chain_this_update_timestamp_seconds`
 - `openvoxca_supersede_pending`
 - `openvoxca_leaf_certificate_info`,
   `openvoxca_leaf_certificate_not_before_timestamp_seconds`,
@@ -412,12 +413,14 @@ under `crl_chain.urls` it stays at `0`, and a failed merge there counts in
 `openvoxca_crl_update_failures_total` instead.
 `..._last_read_timestamp_seconds` exists only with `crl_chain.file`, and the
 two `..._fetch_*` series only with `crl_chain.urls`, one per entry.
-`..._next_update_timestamp_seconds` follows what is stored, so it appears
-wherever an upstream CRL is published, an imported one included.
+`..._next_update_timestamp_seconds` and `..._this_update_timestamp_seconds`
+follow what is stored, so they appear wherever an upstream CRL is published, an
+imported one included.
 
 | Metric | Description |
 | --- | --- |
-| `openvoxca_crl_chain_next_update_timestamp_seconds` | NextUpdate of each **upstream** CRL in the stored blob — every block this CA did not issue — labelled by `issuer`. Deliberately a separate series from the unlabelled CRL metrics above: an expiring upstream CRL is fixed at the parent CA, not here, so it has its own alert and runbook. |
+| `openvoxca_crl_chain_next_update_timestamp_seconds` | NextUpdate of each **upstream** CRL in the stored blob — every block this CA did not issue — labelled by `issuer`. Deliberately a separate series from the unlabelled CRL metrics above: an expiring upstream CRL is fixed at the parent CA, not here, so it has its own alert and runbook. Where two CRLs share an issuer name, it reports the one that lapses first. |
+| `openvoxca_crl_chain_this_update_timestamp_seconds` | ThisUpdate of the same upstream CRL, under the same `issuer` label, so that `next_update - this_update` is that CRL's lifetime. `OpenVoxCAUpstreamCRLExpiringSoon` warns once less than a fraction of that lifetime remains (a tenth by default, `upstreamCRLExpiryWarningFraction`), rather than at a flat threshold, which would fire permanently on short-lived upstream CRLs. Below a 140-day lifetime this gives less notice than a flat 14 days would, three days on a 30-day CRL at the default, so set the mixin's `upstreamCRLExpiryWarningSeconds` floor if that is too little. An upstream that re-signs only inside a short overlap before NextUpdate, such as Active Directory Certificate Services at its default overlap (a tenth of the publication period, at most 12 hours), leaves under a tenth of its CRL's life at each re-sign, and the warning fires before every one; the [mixin README](../mixin/README.md#configurable-thresholds) gives the remedy. |
 | `openvoxca_crl_chain_last_read_timestamp_seconds` | When `crl_chain.file` was last read successfully, or `0` if it never has been. Exported **only where `crl_chain.file` is configured**, so `absent()` means the feature is off and `== 0` means it is on but the file has never been opened — a wrong path, or a mount that never landed. That case moves no counter and would otherwise look healthy; `OpenVoxCAUpstreamCRLNeverRead` alerts on it. It does **not** detect a `subPath` mount: that reads successfully forever, so this advances exactly as it does on a healthy file. See [the `subPath` note](configuration.md#publishing-an-upstream-crl-chain) for what does. |
 | `openvoxca_crl_chain_refresh_failures_total` | Counter of failed `crl_chain.file` reads — unreadable, unparseable, not ending on a PEM block boundary, or too large. Counted where the file is read, so it moves on every CRL amendment as well as on each refresh pass; the visible symptom is that **revocation fails** until the file is fixed, as well as ancestor CRLs ageing. A failure of the refresh pass for some *other* reason — a lock it could not take, storage it could not read — deliberately moves `openvoxca_crl_update_failures_total` instead, so this counter's runbook stays "check the file". The chain already published is left in place either way. Zero and static without `crl_chain.file`. Resets to `0` on process restart. |
 | `openvoxca_crl_chain_discarded_total` | Counter of discards: one per CRL dropped from `crl_chain.file`, each time the file is evaluated, because no certificate in the stored CA bundle signed it, or because it is a delta CRL or carries an issuing distribution point and so is not its issuer's full list. The file is evaluated on every CRL amendment as well as on each refresh pass, so with a static bad file the value tracks revocation rate rather than the number of bad CRLs — alert on `increase(...) > 0`, not on the value. **Alert on this** — the shipped mixin does. It is the only signal that the published chain is *smaller* than the file says: a discarded CRL has no series of its own to go missing from. With `crl_chain.urls` it counts once per fetch round per entry instead, and the entry also counts as a fetch failure. The remedy is to complete the CA bundle, or, for a delta or IDP-scoped CRL, to point the source at its issuer's full CRL — the `WARN` line says which; a CRL passed over for being *stale* is counted separately, below. Zero and static without `crl_chain.file` or `crl_chain.urls`. Resets to `0` on process restart. |
@@ -426,16 +429,19 @@ wherever an upstream CRL is published, an imported one included.
 | `openvoxca_crl_chain_fetch_last_success_timestamp_seconds` | When each [`crl_chain.urls`](configuration.md#fetching-upstream-crls) entry last yielded a usable, current CRL — verified against the CA bundle, unexpired, and newer than or equal to the one published — labelled by `url`, or `0` if it never has. Exported for **every configured entry from startup**, so `== 0` means never fetched and absence means the entry is not configured. A transfer that succeeded but delivered nothing usable does not advance it, nor does a round refused for making the published upstream chain larger than 4 MiB, nor one whose merge failed on the lock or storage (counted in `openvoxca_crl_update_failures_total` instead). `time() - ...` is the age of what that entry last delivered; the shipped mixin alerts on it (`OpenVoxCAUpstreamCRLFetchStale`, after `crlChainFetchStaleSeconds`, 3h), because the expiry warning can stay quiet for days after fetching stops. Keep that threshold at least twice `crl_chain.refresh_interval_sec`, or a single failed round fires it; a healthy entry fires only once the interval exceeds the threshold plus the rule's 15-minute `for:` (see [the mixin's thresholds](../mixin/README.md#configurable-thresholds)). Resets to `0` on process restart. |
 | `openvoxca_crl_chain_fetch_failures_total` | Counter of fetch rounds in which a `crl_chain.urls` entry did not yield a usable, current CRL, labelled by `url`: a connection, TLS or HTTP failure, a response that is not exactly one CRL, one over 4 MiB as received or a CRL over 4 MiB as PEM, a CRL no certificate in the CA bundle signed, a delta or IDP-scoped CRL, one older than the CRL already published, or an expired one; or, in a round whose CRLs together would make the published upstream chain larger than 4 MiB, every entry that would otherwise have succeeded — so every entry failing at once, each fetching cleanly, points at that cap. A response with a `200` that holds anything else counts. An entry serving this CA's own CRL counts too; a mirror that lags another entry for the same ancestor counts only if it is older than the published CRL. The `WARN` log line names the reason. A failing entry never blocks revocation or shrinks the published chain — only an authoritative round can remove an ancestor, counted by `openvoxca_crl_chain_removed_total` — and a merge that fails for a reason that is not the entry's — a lock, storage — moves `openvoxca_crl_update_failures_total` instead. The mixin's `OpenVoxCAUpstreamCRLFetchFailing` fires on `crlChainFetchFailureThreshold` (2) of these in `crlChainFetchWindow` (3h); under a fault that never clears the job's backoff is capped at `crl_chain.refresh_interval_sec`, so that window must be at least `(threshold + 1) x refresh_interval_sec`. Resets to `0` on process restart. |
 
-The gauge appears whenever the stored blob holds a CRL this CA did not issue —
-which includes a chain brought in by `openvox-ca-ctl import --crl-chain` on a
-deployment that has never set `crl_chain.file`. That is deliberate: an ancestor
-CRL ages the same way whether or not anything is refreshing it, and it is
-precisely the import-only deployment where nothing is. The remedy differs,
-though, and the alert text names `crl_chain.urls` and `crl_chain.file` because
-those are the standing fix. On an import-only deployment, read
-`OpenVoxCAUpstreamCRLExpiringSoon`/`Expired` as "re-import the chain with a
-current one, or configure [`crl_chain`](configuration.md#publishing-an-upstream-crl-chain)
-so it stays current by itself".
+The two per-issuer gauges appear whenever the stored blob holds a CRL this CA
+did not issue — which includes a chain brought in by `openvox-ca-ctl import
+--crl-chain` on a deployment that has never set `crl_chain.file`. That is
+deliberate: an ancestor CRL ages the same way whether or not anything is
+refreshing it, and it is precisely the import-only deployment where nothing is.
+The remedy differs, though, and the alert text names `crl_chain.urls` and
+`crl_chain.file` because those are the standing fix. On an import-only
+deployment, read `OpenVoxCAUpstreamCRLExpiringSoon`/`Expired` as "re-import the
+chain with a current one, or configure
+[`crl_chain`](configuration.md#publishing-an-upstream-crl-chain) so it stays
+current by itself". The warning comes when a tenth of the CRL's life is left,
+three days on a 30-day CRL; if a re-import needs more lead time than that, raise
+the mixin's `upstreamCRLExpiryWarningSeconds` floor.
 
 > **No series tracks the chain's length either, so watch the log.** Keep the
 > imported bundle, so that a chain which loses its ancestors can be re-imported.

@@ -21,6 +21,14 @@
 #     a persistent fault flaps. The crl_chain.urls fetch rules turn on two
 #     more: crlChainFetchWindow must hold (crlChainFetchFailureThreshold + 1)
 #     intervals, and crlChainFetchStaleSeconds at least two.
+#   * OpenVoxCAUpstreamCRLExpiringSoon, whose threshold is a set-operator max
+#     (`> floor or ... + floor`) of a tenth of each CRL's lifetime and the
+#     upstreamCRLExpiryWarningSeconds floor. The cases here pin the boundary, a
+#     re-sign margin that must stay quiet, the default floor's silence where
+#     the lifetime cannot be worked out, and the handover at nextUpdate. The
+#     floor's own arm does nothing at its default of 0, so tests-floor.yaml
+#     pins it, against a rendering with a one-day floor and a fraction of a
+#     fifth.
 #   * OpenVoxCAKubernetesExportFailing and OpenVoxCAKubernetesExportNotRunning,
 #     which between them have to cover a target that fails and a target that is
 #     never attempted. The first cannot see the second — every arm of it needs a
@@ -2149,21 +2157,25 @@ tests:
   # The two upstream expiry alerts turn on time(), so the case has to bracket
   # a boundary rather than assert one side of it: a rule off by the window would
   # still fire eventually, and a case that only checks "fires" passes. The
-  # boundary this one brackets is the fourteen-day warning threshold. The other
-  # boundary -- nextUpdate itself, where the two rules hand over -- is the case
-  # below, and neither of these two reaches it.
-  - interval: 1m
+  # boundary this one brackets is the warning threshold, a tenth of the CRL's
+  # own life: 7h12m for this 72-hour CRL, crossed at 64h48m. The other
+  # boundary -- nextUpdate itself, where the two rules hand over -- is the
+  # handover case further down, and none of the cases before it reaches that.
+  - interval: 5m
     name: an upstream CRL crosses into the expiry window and then expires
     input_series:
+      - series: 'openvoxca_crl_chain_this_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
+        values: "0x900"
       - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
-        values: "1216800x400"
+        values: "259200x900"
     alert_rule_test:
-      # Still more than fourteen days out, so neither rule has anything to say.
-      - eval_time: 1h
+      # 8 hours left, more than a tenth of 72, so neither rule has anything to
+      # say. A flat or larger threshold, a fifth of life say, fires here.
+      - eval_time: 64h
         alertname: OpenVoxCAUpstreamCRLExpiringSoon
         exp_alerts: []
       # Past the boundary, and past the 1h debounce.
-      - eval_time: 4h
+      - eval_time: 66h
         alertname: OpenVoxCAUpstreamCRLExpiringSoon
         exp_alerts:
           - exp_labels:
@@ -2172,12 +2184,41 @@ tests:
               instance: ca-1:9140
               issuer: Upstream Root CA
             exp_annotations:
-              description: "The CRL issued by Upstream Root CA and republished by ca-1:9140 reaches NextUpdate in 13d 22h 0m 0s. openvox-ca cannot reissue it: get a current one from the issuing CA, through crl_chain.urls or crl_chain.file."
+              description: "The CRL issued by Upstream Root CA and republished by ca-1:9140 reaches NextUpdate in 6h 0m 0s. openvox-ca cannot reissue it: get a current one from the issuing CA, through crl_chain.urls or crl_chain.file."
               summary: "An upstream CRL published by the OpenVox CA is approaching its NextUpdate."
       # Expiring-soon is scoped to CRLs that have not yet expired, so it must
       # hand over rather than fire alongside the expired rule.
-      - eval_time: 4h
+      - eval_time: 66h
         alertname: OpenVoxCAUpstreamCRLExpired
+        exp_alerts: []
+
+  # #665's bug, as it would recur with too large a fraction. OpenBao and Vault
+  # with auto_rebuild rebuild a 72-hour CRL 12 hours before it expires, so a
+  # sixth of its life is the least it ever has left. A flat two weeks fired on
+  # it permanently; with a third of its life (24 hours) the condition would
+  # hold for the last 12 hours of every cycle, firing for 11 of them past the
+  # 1h expiryFor. A tenth must stay quiet through all of them.
+  - interval: 5m
+    name: an upstream that rebuilds a 72-hour CRL 12 hours early never warns
+    input_series:
+      # Rebuilt at 60h and 120h: each new CRL is issued then and lives 72h.
+      - series: 'openvoxca_crl_chain_this_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="OpenBao Root"}'
+        values: "0x719 216000x719 432000x719"
+      - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="OpenBao Root"}'
+        values: "259200x719 475200x719 691200x719"
+    alert_rule_test:
+      # At the same point in each CRL's life, 12h05m before its nextUpdate --
+      # just before a rebuild for the first two -- when the least life is
+      # left, which a third of its life (24h) would have been firing on for
+      # nearly 11 hours.
+      - eval_time: 59h55m
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
+        exp_alerts: []
+      - eval_time: 119h55m
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
+        exp_alerts: []
+      - eval_time: 179h55m
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
         exp_alerts: []
 
   - interval: 1m
@@ -2205,17 +2246,42 @@ tests:
         alertname: OpenVoxCAUpstreamCRLExpiringSoon
         exp_alerts: []
 
-  # The handover at nextUpdate itself, which neither case above reaches: one
-  # holds the series far from zero for the whole window and the other starts
-  # already past it, so both only ever evaluate one side. ExpiringSoon is
-  # "> 0" and Expired is "<= 0", so the instant nextUpdate == time() belongs to
-  # exactly one of them -- and an off-by-one in either comparator is a double
-  # page or a silent gap at precisely the moment the pair exists for, with every
-  # other case still green.
+  # At the default floor of 0, a lifetime that cannot be worked out gets no
+  # warning, only the Expired page: a CA too old to export thisUpdate, and a
+  # non-conforming CRL whose thisUpdate is after its nextUpdate. Pinned so
+  # that it stays a documented choice rather than an accident; tests-floor.yaml
+  # shows a set floor taking over for both.
+  - interval: 5m
+    name: at the default floor a lifetime that cannot be worked out gets no warning
+    input_series:
+      - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Old CA"}'
+        values: "21600x100"
+      - series: 'openvoxca_crl_chain_this_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Backwards Root"}'
+        values: "86400x100"
+      - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Backwards Root"}'
+        values: "21600x100"
+    alert_rule_test:
+      # A minute before nextUpdate. The rule's 1h expiryFor means a threshold
+      # under an hour cannot reach firing before nextUpdate whatever it is,
+      # so this pins the default floor down to about that debounce: anything
+      # above 1h01m would be firing here.
+      - eval_time: 5h59m
+        alertname: OpenVoxCAUpstreamCRLExpiringSoon
+        exp_alerts: []
+
+  # The handover at nextUpdate itself, which no case above reaches: each
+  # evaluates only before nextUpdate or only after it, never across it.
+  # ExpiringSoon is "> 0" and Expired is "<= 0", so the instant nextUpdate ==
+  # time() belongs to exactly one of them -- and an off-by-one in either
+  # comparator is a double page or a silent gap at precisely the moment the pair
+  # exists for, with every other case still green.
   - interval: 1m
     name: the upstream expiry alerts hand over at nextUpdate itself
     input_series:
-      # Constant, so nextUpdate - time() falls through zero at exactly 6h.
+      # Constant, so nextUpdate - time() falls through zero at exactly 6h. A
+      # 24-hour CRL, so the warning holds from 3h36m and has fired by 5h.
+      - series: 'openvoxca_crl_chain_this_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
+        values: "-64800x600"
       - series: 'openvoxca_crl_chain_next_update_timestamp_seconds{job="openvox-ca",instance="ca-1:9140",issuer="Upstream Root CA"}'
         values: "21600x600"
     alert_rule_test:
@@ -2236,8 +2302,8 @@ tests:
         exp_alerts: []
       # Exactly at nextUpdate, and this is the assertion the pair turns on:
       # ExpiringSoon requires "> 0", so it must stop here. With ">= 0" it would
-      # still be firing, its condition having held continuously since the start
-      # of the window, and it would page alongside the critical below.
+      # still be firing, its condition having held continuously since 3h36m,
+      # and it would page alongside the critical below.
       - eval_time: 6h
         alertname: OpenVoxCAUpstreamCRLExpiringSoon
         exp_alerts: []

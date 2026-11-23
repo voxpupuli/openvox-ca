@@ -1305,7 +1305,8 @@ the `crl-chain-refresh` job picks the change up within
 > changing yet. What eventually catches it is the consequence:
 > `OpenVoxCAUpstreamCRLExpiringSoon` firing on a CA that *has* `crl_chain.file`
 > configured is the `subPath` signature. By then the ancestors' CRLs are already
-> close to expiry.
+> close to expiry: the warning comes when a tenth of a CRL's life is left, unless
+> you raise the mixin's `upstreamCRLExpiryWarningSeconds` floor.
 >
 > This is the single most likely way to get this feature wrong from a values
 > file, because `subPath` is the reflex for mounting one file without hiding the

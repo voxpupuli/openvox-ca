@@ -128,6 +128,7 @@ type Collector struct {
 	crlNextUpdate *prometheus.Desc
 
 	crlChainNextUpdate      *prometheus.Desc
+	crlChainThisUpdate      *prometheus.Desc
 	crlChainLastRead        *prometheus.Desc
 	crlChainRefreshFailures *prometheus.Desc
 	crlChainDiscarded       *prometheus.Desc
@@ -341,6 +342,13 @@ func NewCollector(c *ca.CA, opts ...Option) *Collector {
 				"from openvoxca_crl_next_update_timestamp_seconds: an expiring upstream CRL is fixed at "+
 				"the parent CA, not here, so it needs its own alert and its own runbook.",
 			[]string{"issuer"}, nil),
+		crlChainThisUpdate: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "crl_chain", "this_update_timestamp_seconds"),
+			"ThisUpdate (issue) time of each upstream CRL published alongside this CA's own, "+
+				"labelled by issuer, in seconds since the Unix epoch. Taken from the same CRL as "+
+				"openvoxca_crl_chain_next_update_timestamp_seconds for that issuer, so the two give "+
+				"its lifetime, which the upstream expiry warning is measured against.",
+			[]string{"issuer"}, nil),
 		crlChainLastRead: prometheus.NewDesc(
 			prometheus.BuildFQName(namespace, "crl_chain", "last_read_timestamp_seconds"),
 			"When crl_chain.file was last read successfully, or 0 if it never has been. "+
@@ -501,6 +509,7 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.crlThisUpdate
 	ch <- c.crlNextUpdate
 	ch <- c.crlChainNextUpdate
+	ch <- c.crlChainThisUpdate
 	ch <- c.crlChainLastRead
 	ch <- c.crlChainRefreshFailures
 	ch <- c.crlChainDiscarded
@@ -715,6 +724,8 @@ func (c *Collector) collectStored(ch chan<- prometheus.Metric, snap *snapshot) {
 	for _, up := range snap.upstreamCRLs {
 		ch <- prometheus.MustNewConstMetric(c.crlChainNextUpdate, prometheus.GaugeValue,
 			timestamp(up.NextUpdate), up.Issuer)
+		ch <- prometheus.MustNewConstMetric(c.crlChainThisUpdate, prometheus.GaugeValue,
+			timestamp(up.ThisUpdate), up.Issuer)
 	}
 
 	stateCounts := map[string]int{stateRequested: 0, stateSigned: 0, stateRevoked: 0}
@@ -757,8 +768,9 @@ type snapshot struct {
 	haveSupersedePending bool
 	supersedePending     int
 
-	// upstreamCRLs are the non-self blocks of the published chain, one series
-	// each. Empty on a CA that issues its own root, which is the common case.
+	// upstreamCRLs are the upstream CRLs of the published chain, one status per
+	// issuer DN, each exported as a nextUpdate and a thisUpdate series. Empty on
+	// a CA that issues its own root, which is the common case.
 	upstreamCRLs []ca.UpstreamCRLStatus
 
 	leaves []leafCert

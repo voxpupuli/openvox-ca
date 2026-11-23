@@ -21,18 +21,56 @@
     crlExpiryWarningSeconds: 3 * 24 * 3600,  // 3 days
 
     // --- Upstream CRL expiry ---
-    // Deliberately not crlExpiryWarningSeconds. That threshold is short because
-    // the CA refreshes its own CRL, so the alert only fires when something is
-    // already wedged and three days is ample. An *upstream* CRL is the exact
-    // opposite: openvox-ca cannot re-sign an ancestor's list, so it can only
-    // publish whatever the parent CA last issued. With crl_chain.file, clearing
-    // this means a human fetching a new CRL from the parent CA — often a
-    // different team — and updating the file. With crl_chain.urls the fetch
-    // does that, so a warning here means the parent CA has stopped re-signing
-    // -- the fix is with whoever runs it -- or fetching has failed for days,
-    // which the fetch alerts below will have reported first. Two weeks is
-    // notice for a fix at another CA, not slack for a self-healing loop.
-    upstreamCRLExpiryWarningSeconds: 14 * 24 * 3600,  // 14 days
+    // Relative to each upstream CRL's own lifetime (nextUpdate - thisUpdate),
+    // not a flat threshold, because upstream lifetimes differ by more than any
+    // one threshold can serve: OpenBao and Vault default to 72 hours, which a
+    // flat two weeks would fire on permanently. OpenVoxCAUpstreamCRLExpiringSoon
+    // fires once less than upstreamCRLExpiryWarningFraction of a CRL's life
+    // remains. That is a trade: below a 140-day lifetime it gives less notice
+    // than a flat two weeks would -- three days on a 30-day CRL -- which is
+    // what the floor below is for.
+    //
+    // Keep the fraction below what each of your upstreams has left when it
+    // re-signs, or the alert fires before every re-sign. OpenBao and Vault
+    // with auto_rebuild rebuild a 72-hour CRL 12 hours before it expires (a
+    // sixth of its life left); a parent that re-signs a 30-day CRL weekly
+    // leaves three quarters. A tenth is quiet on both, and still warns before
+    // nextUpdate on an upstream that has stopped re-signing, provided a tenth
+    // of its life outlasts expiryFor: a CRL living 10 hours or less hands
+    // straight to OpenVoxCAUpstreamCRLExpired unless the floor below is set.
+    //
+    // An upstream that re-signs only inside a short overlap before nextUpdate
+    // leaves less. Active Directory Certificate Services at its default
+    // overlap -- a tenth of the publication period, at most 12 hours -- leaves
+    // at most 1/11 of a CRL's life, under the default tenth, so the alert
+    // fires for hours before each re-sign of a weekly CRL and for days before
+    // each re-sign of a monthly one. No fraction that still gives useful
+    // notice is quiet on a long CRL there: lengthen that CA's CRL overlap
+    // period, or set the fraction below overlap / (publication period +
+    // overlap).
+    //
+    // What a warning here means depends on how the chain is kept current.
+    // With crl_chain.urls a stopped *fetch* is OpenVoxCAUpstreamCRLFetchStale's
+    // to report, much sooner, so this alert is left with the parent CA itself.
+    // With crl_chain.file, or a chain only ever imported, it is still the one
+    // sign that whatever refreshes the file, or whoever re-imports, has
+    // stopped -- a frozen subPath mount included -- and the remedy is a person,
+    // often at another team. A tenth of a 30-day CRL is three days; if that is
+    // too little for them, set the floor below.
+    upstreamCRLExpiryWarningFraction: 0.1,
+
+    // An absolute floor on that warning, for an operator who wants more notice
+    // than the fraction gives -- above all with crl_chain.file or an imported
+    // chain, where a person has to act: the alert fires once less than
+    // max(fraction x lifetime, this) remains. 0, the default, leaves the
+    // fraction alone in charge. It applies to every issuer, so a floor above a
+    // short-lived upstream's re-sign margin brings back the permanent firing
+    // the fraction exists to end. It is also the whole threshold where the
+    // lifetime cannot be worked out: on a CA too old to export
+    // openvoxca_crl_chain_this_update_timestamp_seconds, and for a
+    // non-conforming CRL whose thisUpdate is not before its nextUpdate. At the
+    // default 0 those get no warning, only OpenVoxCAUpstreamCRLExpired.
+    upstreamCRLExpiryWarningSeconds: 0,
 
     // --- Upstream CRL chain health ---
     // Calibrated to the CA's crl_chain.refresh_interval_sec. All four chain
@@ -75,10 +113,10 @@
     // rounds.
     //
     // This is the alert that does not depend on the failure counter moving,
-    // and the only timely one when it does not: the expiry warning above is
-    // measured from nextUpdate, so against a freshly fetched 30-day upstream
-    // CRL it stays silent for up to sixteen days (30 less the 14-day warning)
-    // after fetching stops.
+    // and the only timely one when it does not: the expiry warning above waits
+    // until a tenth of a CRL's life remains, so against a freshly fetched
+    // 30-day upstream CRL it stays silent for up to 27 days after fetching
+    // stops.
     crlChainFetchStaleSeconds: 10800,  // 3 hours; a literal, which cmd/openvox-ca's specs read
 
     // How many failed rounds of one crl_chain.urls entry within

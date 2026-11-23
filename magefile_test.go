@@ -141,6 +141,16 @@ var _ = Describe("repoSlugFromURL", func() {
 	})
 })
 
+// Test.Mixin refuses to run while any mixin/tests*.yaml has no rendering, so a
+// promtool suite cannot sit outside the run with CI green. The shipped files
+// are checked by that refusal itself, in CI's mixin job; this pins the helper.
+var _ = Describe("unwiredMixinSuites", func() {
+	It("reports a tests file no rendering runs", func() {
+		suites := []string{"mixin/tests.yaml", "mixin/tests-floor.yaml", "mixin/tests-orphan.yaml"}
+		Expect(unwiredMixinSuites(suites, mixinRenderings)).To(Equal([]string{"mixin/tests-orphan.yaml"}))
+	})
+})
+
 var _ = Describe("distVariants", func() {
 	It("defines the four release variants with coherent build environments", func() {
 		variants := distVariants()

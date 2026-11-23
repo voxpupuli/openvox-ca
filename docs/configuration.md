@@ -1082,7 +1082,10 @@ No metric distinguishes that from a healthy file:
 `openvoxca_crl_chain_last_read_timestamp_seconds` advances on every read either
 way, because the read genuinely succeeds — it is the content that is frozen.
 What catches it is the consequence — `OpenVoxCAUpstreamCRLExpiringSoon` firing on a CA that
-*has* `crl_chain.file` configured is the `subPath` signature.
+*has* `crl_chain.file` configured is the `subPath` signature. That warning comes
+when a tenth of the CRL's life is left, three days on a 30-day CRL; raise the
+mixin's `upstreamCRLExpiryWarningSeconds` floor if whoever fixes the file needs
+longer.
 `openvoxca_crl_chain_last_read_timestamp_seconds` does detect the different case
 of a file never opened at all: it reads `0`, and `OpenVoxCAUpstreamCRLNeverRead`
 alerts on it.
@@ -1145,22 +1148,28 @@ increase) and is the price of having one write path rather than a second,
 subtler one.
 
 Per-issuer freshness is reported as
-`openvoxca_crl_chain_next_update_timestamp_seconds{issuer}`, deliberately
-separate from `openvoxca_crl_next_update_timestamp_seconds`, which continues to
-mean *this CA's own* CRL. An expiring upstream CRL is fixed at the parent CA,
-not here, so it gets its own alert with its own runbook — see the
-[mixin](https://github.com/voxpupuli/openvox-ca/tree/main/mixin). Four counters cover what would otherwise be one warning per
-cycle in the log, and they are separate because their remedies are:
-`openvoxca_crl_chain_refresh_failures_total` for a file that could not be read or
-parsed (fix the file or its mount); `openvoxca_crl_chain_discarded_total` for a
-CRL dropped because nothing in the bundle signed it (complete the CA bundle) —
+`openvoxca_crl_chain_next_update_timestamp_seconds{issuer}`, with
+`openvoxca_crl_chain_this_update_timestamp_seconds{issuer}` beside it,
+deliberately separate from `openvoxca_crl_next_update_timestamp_seconds`, which
+continues to mean *this CA's own* CRL. An expiring upstream CRL is fixed at the
+parent CA, not here, so it gets its own alert with its own runbook — see the
+[mixin](https://github.com/voxpupuli/openvox-ca/tree/main/mixin). That alert
+warns once less than a tenth of the CRL's own lifetime remains, so the notice
+scales with each CRL's lifetime: about seven hours for a 72-hour CRL, three days
+for a 30-day one. Keep the mixin's `upstreamCRLExpiryWarningFraction` below what
+each upstream has left when it re-signs, or the warning fires before every
+re-sign. Four counters cover what would otherwise be one warning per cycle in
+the log, and they are separate because their remedies are:
+`openvoxca_crl_chain_refresh_failures_total` for a file that could not be read
+or parsed (fix the file or its mount); `openvoxca_crl_chain_discarded_total` for
+a CRL dropped because nothing in the bundle signed it (complete the CA bundle) —
 the one case where the published chain silently *shrinks*;
 `openvoxca_crl_chain_regressed_total` for a CRL older than the one already
 published (fix whatever refreshes the file); and
-`openvoxca_crl_chain_removed_total` for an ancestor that has disappeared from the
-file altogether (restore it, or accept the removal) — or whose certificate has
-left the CA bundle, so its published CRL can no longer be attributed to anyone
-(re-import the bundle). A fifth series,
+`openvoxca_crl_chain_removed_total` for an ancestor that has disappeared from
+the file altogether (restore it, or accept the removal) — or whose certificate
+has left the CA bundle, so its published CRL can no longer be attributed to
+anyone (re-import the bundle). A fifth series,
 `openvoxca_crl_chain_last_read_timestamp_seconds`, reads `0` where the file is
 configured but has never been opened.
 

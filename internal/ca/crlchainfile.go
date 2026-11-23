@@ -709,12 +709,16 @@ func sameCRLSet(a, b []*x509.RevocationList) bool {
 type UpstreamCRLStatus struct {
 	// Issuer is the CRL issuer's distinguished name, used as a metric label.
 	Issuer string
+	// ThisUpdate is when the CRL was issued. It comes from the same CRL as
+	// NextUpdate, so the two together give that CRL's lifetime, which the
+	// upstream expiry warning is relative to.
+	ThisUpdate time.Time
 	// NextUpdate is when the CRL expires.
 	NextUpdate time.Time
 }
 
 // UpstreamCRLStatuses reports the non-self CRLs in blob, for the per-issuer
-// freshness metric.
+// freshness metrics.
 //
 // Deliberately separate from the existing unlabelled
 // openvoxca_crl_next_update_timestamp_seconds, which keeps meaning exactly what
@@ -742,6 +746,11 @@ type UpstreamCRLStatus struct {
 // which is the honest answer: nothing about that CRL says when it goes stale,
 // and treating it as fresh would be the worse guess.
 //
+// ThisUpdate always travels with the NextUpdate it was issued beside. Taking
+// the nearest NextUpdate from one CRL and the latest ThisUpdate from another
+// would describe a lifetime no CRL has, and shrink or stretch the window the
+// expiry warning measures against.
+//
 // blob is the stored CRL the caller has already read. Taking it as a parameter
 // rather than re-reading keeps the collector's "parse the CRL once" rule true:
 // it holds the bytes and has already decoded block 0, so a second read and a
@@ -764,6 +773,7 @@ func (c *CA) UpstreamCRLStatuses(blob []byte) ([]UpstreamCRLStatus, error) {
 				continue
 			}
 			if out[i].NextUpdate.IsZero() || crl.NextUpdate.Before(out[i].NextUpdate) {
+				out[i].ThisUpdate = crl.ThisUpdate
 				out[i].NextUpdate = crl.NextUpdate
 			}
 			continue
@@ -771,6 +781,7 @@ func (c *CA) UpstreamCRLStatuses(blob []byte) ([]UpstreamCRLStatus, error) {
 		seen[issuer] = len(out)
 		out = append(out, UpstreamCRLStatus{
 			Issuer:     issuer,
+			ThisUpdate: crl.ThisUpdate,
 			NextUpdate: crl.NextUpdate,
 		})
 	}

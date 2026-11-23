@@ -9308,6 +9308,7 @@ var publishedMixinConfigKeys = []string{
 	"signerUnresponsiveFor",
 	"supersedeFor",
 	"supersedeWindow",
+	"upstreamCRLExpiryWarningFraction",
 	"upstreamCRLExpiryWarningSeconds",
 }
 
@@ -9363,10 +9364,49 @@ func mixinNames() (alerts, configKeys []string, err error) {
 	return alerts, configKeys, nil
 }
 
+// mixinRendering is one way Test.Mixin renders the mixin: the file it writes
+// under .test-output, a jsonnet object merged over the mixin (empty for the
+// defaults), and the mixin/ tests file that runs against it.
+type mixinRendering struct{ rendered, override, tests string }
+
+// mixinRenderings are the renderings Test.Mixin checks. Each tests file names
+// its rendering in its rule_files, so the two have to agree; the path is
+// relative to that file, hence the ../ there. The second rendering exists
+// because some rule terms change nothing at the default configuration:
+// upstreamCRLExpiryWarningSeconds is a floor that defaults to 0, so only a
+// non-zero one can show the floor arm of OpenVoxCAUpstreamCRLExpiringSoon
+// doing anything. It also moves upstreamCRLExpiryWarningFraction off its
+// default, so the cases there show the rule reads that key too.
+var mixinRenderings = []mixinRendering{
+	{"mixin-alerts.yaml", "", "tests.yaml"},
+	{"mixin-alerts-floor.yaml",
+		"{ _config+:: { upstreamCRLExpiryWarningSeconds: 86400, upstreamCRLExpiryWarningFraction: 0.2 } }",
+		"tests-floor.yaml"},
+}
+
+// unwiredMixinSuites returns the suites, paths to mixin tests files, that no
+// rendering runs.
+func unwiredMixinSuites(suites []string, renderings []mixinRendering) []string {
+	var unwired []string
+	for _, suite := range suites {
+		wired := false
+		for _, r := range renderings {
+			wired = wired || filepath.Base(suite) == r.tests
+		}
+		if !wired {
+			unwired = append(unwired, suite)
+		}
+	}
+	return unwired
+}
+
 // Mixin renders the Jsonnet monitoring mixin and checks the alerting rules it
 // produces: `promtool check rules` for syntax, then `promtool test rules` for
 // the behaviour of the ones whose expressions are not simple thresholds (see
-// mixin/tests.yaml).
+// mixin/tests.yaml). It renders twice, the second time with a one-day
+// upstreamCRLExpiryWarningSeconds and a fraction of a fifth, and runs
+// mixin/tests-floor.yaml against that: the floor defaults to 0, where its arm
+// of OpenVoxCAUpstreamCRLExpiringSoon changes nothing a test could see.
 //
 // The mixin ships rules but no Go code, so nothing else in the suite would
 // notice a malformed selector substitution, or an expression that parses fine
@@ -9385,21 +9425,36 @@ func (Test) Mixin() error {
 	if err := os.MkdirAll(".test-output", 0755); err != nil {
 		return err
 	}
-	// mixin/tests.yaml names this path in its rule_files, so the two have to
-	// agree; it is relative to that file, hence the ../ there.
-	rendered := filepath.Join(".test-output", "mixin-alerts.yaml")
-
-	out, err := sh.Output("jsonnet", "-S", "-J", "mixin",
-		"-e", "std.manifestYamlDoc((import 'mixin/mixin.libsonnet').prometheusAlerts)")
+	// A tests file no rendering names would never run, and CI would stay
+	// green, so every mixin/tests*.yaml must be one of mixinRenderings.
+	suites, err := filepath.Glob(filepath.Join("mixin", "tests*.yaml"))
 	if err != nil {
-		return fmt.Errorf("rendering the mixin: %w", err)
-	}
-	if err := os.WriteFile(rendered, []byte(out), 0600); err != nil {
-		return fmt.Errorf("writing %s: %w", rendered, err)
-	}
-
-	if err := sh.RunV("promtool", "check", "rules", rendered); err != nil {
 		return err
+	}
+	if unwired := unwiredMixinSuites(suites, mixinRenderings); len(unwired) > 0 {
+		return fmt.Errorf("%s not run: add a rendering for each to mixinRenderings",
+			strings.Join(unwired, ", "))
+	}
+	for _, r := range mixinRenderings {
+		mixin := "(import 'mixin/mixin.libsonnet')"
+		if r.override != "" {
+			mixin += " + " + r.override
+		}
+		rendered := filepath.Join(".test-output", r.rendered)
+		out, err := sh.Output("jsonnet", "-S", "-J", "mixin",
+			"-e", "std.manifestYamlDoc(("+mixin+").prometheusAlerts)")
+		if err != nil {
+			return fmt.Errorf("rendering the mixin: %w", err)
+		}
+		if err := os.WriteFile(rendered, []byte(out), 0600); err != nil {
+			return fmt.Errorf("writing %s: %w", rendered, err)
+		}
+		if err := sh.RunV("promtool", "check", "rules", rendered); err != nil {
+			return err
+		}
+		if err := sh.RunV("promtool", "test", "rules", filepath.Join("mixin", r.tests)); err != nil {
+			return err
+		}
 	}
 	alerts, configKeys, err := mixinNames()
 	if err != nil {
@@ -9408,7 +9463,7 @@ func (Test) Mixin() error {
 	if err := verifyMixinPublishedNames(alerts, configKeys); err != nil {
 		return err
 	}
-	return sh.RunV("promtool", "test", "rules", filepath.Join("mixin", "tests.yaml"))
+	return nil
 }
 
 // IntegCompose builds the binaries locally then runs the multi-host compose

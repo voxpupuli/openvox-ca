@@ -362,7 +362,9 @@ Some limits worth knowing before you rely on re-import as a refresh mechanism.
 > whatever was imported stays until something replaces it, and it must be replaced
 > before its own `nextUpdate` lapses.
 > `openvoxca_crl_chain_next_update_timestamp_seconds{issuer}` reports each
-> ancestor's deadline and the shipped mixin alerts on it — see
+> ancestor's deadline and the shipped mixin alerts on it, once a tenth of each
+> CRL's life is left (raise its `upstreamCRLExpiryWarningSeconds` floor if a
+> re-import needs more notice than that) — see
 > [the metrics reference](metrics.md#upstream-crl-chain). Configuring the
 > [`crl_chain`](configuration.md#publishing-an-upstream-crl-chain) block
 > (`crl_chain.urls` or `crl_chain.file`) is what keeps them current without an
