@@ -20,6 +20,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -80,8 +81,10 @@ server itself are not visible here, so a port set only on the server's command
 line has to be repeated with --port.
 
 HTTPS is tried first, and plain HTTP only when the server answers in plain HTTP.
-The server's certificate is not verified: the check sends no credentials and
-reads nothing but the status code.`,
+The server's certificate is not verified: the check sends no credentials, and
+reads only the status code and, on a failure, the not_ready reason, which it
+prints quoted. Nothing it reads changes its result, so a peer it cannot
+authenticate can do no more than word the failure message.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -163,7 +166,7 @@ func healthcheckTransport() *http.Transport {
 	return &http.Transport{
 		Proxy: nil,
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, //nolint:gosec // G402: the check sends nothing and reads only a status code; see the command's help
+			InsecureSkipVerify: true, //nolint:gosec // G402: the check sends nothing, and reads only a status code and a quoted reason that cannot change its result; see the command's help
 			MinVersion:         tls.VersionTLS12,
 		},
 		DisableKeepAlives: true,
@@ -171,9 +174,13 @@ func healthcheckTransport() *http.Transport {
 }
 
 // checkHealth requests path from the server at addr and returns the URL it
-// used. Any answer but 200 is an error naming the status code. Only the code:
-// the reason phrase after it is the server's own text, which Go's client does
-// not sanitise and which reaches a terminal unescaped from here.
+// used. Any answer but 200 is an error naming the status code, and the
+// not_ready reason when the body carries one -- a pod held for its upstream
+// CRL chain then says so in `docker inspect` rather than reading like a CA
+// that never initialised. Never the reason phrase after the code: that is the
+// server's own text, which Go's client does not sanitise and which reaches a
+// terminal unescaped from here. The body's reason is the server's too, so it
+// is quoted.
 func checkHealth(ctx context.Context, addr, path string) (string, error) {
 	tr := healthcheckTransport()
 	defer tr.CloseIdleConnections()
@@ -199,8 +206,14 @@ func checkHealth(ctx context.Context, addr, path string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode != http.StatusOK {
+		var answer struct {
+			Reason string `json:"reason"`
+		}
+		if json.Unmarshal(body, &answer) == nil && answer.Reason != "" {
+			return "", fmt.Errorf("%s answered HTTP %d (reason %q)", url, resp.StatusCode, answer.Reason)
+		}
 		return "", fmt.Errorf("%s answered HTTP %d", url, resp.StatusCode)
 	}
 	return url, nil

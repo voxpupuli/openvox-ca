@@ -90,7 +90,7 @@ flight — see its row below.
 | Lock name | Serialises | Taken by |
 | --- | --- | --- |
 | `bootstrap` | First-run CA generation; seeding supporting state (CRL/inventory/serial) for a mounted cert+key; creating a CA key with no certificate yet (`csr --create-key`); importing a CA certificate, with or without its key; whole-store migration | `CA.Init`, `CA.seedSupportingState`, `CA.LoadOrCreateCAKey`, `ImportCACertificate`, `ImportCAWithOptions` (and `ImportCA`, which calls it), `storage.MigrateService` (which reuses the name deliberately so a migration and a bootstrapping server exclude each other) |
-| `crl` | Every CRL read-modify-write (read entries → re-sign → write), **and** the pending-supersession list's read-modify-write, which has to be mutual with the revocations it schedules | `Revoke`, `RevokeSerial`, `ReissueCRL`, `RefreshCRLIfDue`, `CleanupExpiredCerts`, `RefreshCRLChainFile` (the `crl_chain_file` job, on every replica on a timer), `ImportCAWithOptions` (and `ImportCA`, which calls it), `ImportCACertificate`, `ReconcileSuperseded`, the revoke step inside `Clean` and `GenerateWithOptions`, and the retire step inside `Renew`, `AutoRenew`, `RenewStored`, `ReconcileManaged` — "retire" because only those four can defer it to the list; `Clean` and `GenerateWithOptions` always revoke inline. `ReconcileManaged` also revokes inline on one arm — a store write that fails *after* signing retires the certificate it just issued immediately, since nothing ever saw that key and no overlap is owed to anybody |
+| `crl` | Every CRL read-modify-write (read entries → re-sign → write), **and** the pending-supersession list's read-modify-write, which has to be mutual with the revocations it schedules | `Revoke`, `RevokeSerial`, `ReissueCRL`, `RefreshCRLIfDue`, `CleanupExpiredCerts`, `RefreshCRLChainFile` (the `crl_chain.file` job, on every replica on a timer), `MergeFetchedUpstreamCRLs` (the `crl_chain.urls` job, on every replica on a timer; its network I/O happens before, outside the lock), `ImportCAWithOptions` (and `ImportCA`, which calls it), `ImportCACertificate`, `ReconcileSuperseded`, the revoke step inside `Clean` and `GenerateWithOptions`, and the retire step inside `Renew`, `AutoRenew`, `RenewStored`, `ReconcileManaged` — "retire" because only those four can defer it to the list; `Clean` and `GenerateWithOptions` always revoke inline. `ReconcileManaged` also revokes inline on one arm — a store write that fails *after* signing retires the certificate it just issued immediately, since nothing ever saw that key and no overlap is owed to anybody |
 | `subject:<name>` | The whole lifecycle of one subject: duplicate check or evict/save CSR/sign/delete CSR/renew/import/clean/revoke/generate/reconcile | `SaveRequest`, `Sign`, `SignWithTTL`, `DeleteRequest`, `Renew`, `AutoRenew`, `RenewStored`, `Clean`, `ImportCertificate`, `Revoke`, `Generate`/`GenerateWithOptions`, `ReconcileManaged` |
 | `hmac-key` | Generating and persisting the inventory HMAC key when none is usable — a cold start, or a stored blob of the wrong length | `StorageService.EnsureHMACKey`, reached from `CA.Init` → `InitHMAC`, from `MigrateService` → `RebuildInventoryHMAC`, and from the offline `openvox-ca rebuild-inventory-hmac` → `RebuildInventoryHMAC` (only where it has to mint a key, i.e. a stored blob of the wrong length). Deliberately **not** `bootstrap`: the migration already holds that name across the rebuild, and `WithLock` is not reentrant |
 | `sql-schema-migrate` | One schema-migration run, so two replicas starting at once do not migrate concurrently (SQL backends only) | `SQLBackend.EnsureReady` |
@@ -274,17 +274,18 @@ other replicas see nothing new. Priority is the default and yielding is opt-in,
 so a foreground operation added later is protected without anyone remembering
 to mark it.
 
-The four background jobs that write the CRL take it through
-`WithLockYielding`: `CleanupExpiredCerts`, `ReconcileSuperseded`,
-`RefreshCRLIfDue` and `RefreshCRLChainFile`. Every other acquisition of `crl`
-is foreground. What decides which side a job is on is whether anyone is
-waiting on it. Work an operator or a correctness path is waiting on keeps
-`WithLock`: `Revoke`, `RevokeSerial`, `ReissueCRL`, and `ReconcileManaged`'s
-rollback and the retirements it revokes inline, though that job runs on a
-timer. Scheduled work whose timing is already approximate yields: expiry
-pruning, the CRL refresh and the chain refresh, and the delayed-supersession
-sweep, whose revocations are owed after a window anyway and which #347 names as
-a sweep.
+The five background jobs that write the CRL take it through `WithLockYielding`:
+`CleanupExpiredCerts`, `ReconcileSuperseded`, `RefreshCRLIfDue`,
+`RefreshCRLChainFile` and `MergeFetchedUpstreamCRLs`, the `crl_chain.urls`
+merge. Every other acquisition of `crl` is foreground. What decides which side a
+job is on is whether anyone is waiting on it. Work an operator or a correctness
+path is waiting on keeps `WithLock`: `Revoke`, `RevokeSerial`, `ReissueCRL`, and
+`ReconcileManaged`'s rollback and the retirements it revokes inline, though that
+job runs on a timer. Scheduled work whose timing is already approximate yields:
+expiry pruning, the CRL refresh, the chain refresh and the `crl_chain.urls`
+merge (whose fetch runs before it takes the lock, never under it), and the
+delayed-supersession sweep, whose revocations are owed after a window anyway and
+which #347 names as a sweep.
 
 Recording a supersession is neither. `recordSuperseded`, the retire step of
 `Renew`, `AutoRenew`, `RenewStored` and `ReconcileManaged` while the window is
@@ -873,7 +874,8 @@ path — still provides no cross-replica guarantee anyway.
     table claim coverage it does not have.
 13. **Background work on the CRL lock yields, in bounded steps.** Scheduled
     work on `crl` whose timing is already approximate — expiry pruning, the
-    CRL refresh, the chain refresh, the delayed-supersession sweep — takes it
+    CRL refresh, the chain refresh, the `crl_chain.urls` merge, the
+    delayed-supersession sweep — takes it
     through `WithLockYielding`, through `withCRLLockYielding` in the CA if a
     failure to take it should move `crl_update_failures`. Each hold is bounded by
     `sweepStepBudget`; a sweep takes its steps through `CA.sweepStep`. Do not

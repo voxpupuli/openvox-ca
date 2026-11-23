@@ -19,13 +19,13 @@ package api
 
 import (
 	"crypto/x509"
-	"encoding/asn1"
 	"errors"
 	"fmt"
 	"math/big"
 	"sync/atomic"
 	"time"
 
+	"github.com/voxpupuli/openvox-ca/internal/ca"
 	"github.com/voxpupuli/openvox-ca/internal/config"
 )
 
@@ -112,13 +112,13 @@ func NewClientCRLSet(crls []*x509.RevocationList, anchors []*x509.Certificate) *
 		if signer == nil {
 			continue
 		}
-		if reason, partial := coversPartially(crl); partial {
+		if reason, partial := ca.PartialScope(crl); partial {
 			// Admitted on the signature alone, a partial-scope CRL would satisfy
 			// `require` while listing only some of what its issuer has revoked.
 			// A delta CRL names only the changes since a base it does not carry;
 			// an issuing-distribution-point CRL may cover only one reason code or
 			// only CA certificates. Either is a valid CRL its issuer meant for a
-			// client that also fetches the rest, and this CA fetches nothing --
+			// client that also fetches the rest, and client_ca fetches nothing --
 			// it is handed a file. Refusing beats silently covering less than the
 			// operator believes.
 			// Recorded rather than logged here: the api package does not know
@@ -141,32 +141,6 @@ func NewClientCRLSet(crls []*x509.RevocationList, anchors []*x509.Certificate) *
 		set.bySignerKey[key] = append(set.bySignerKey[key], crl)
 	}
 	return set
-}
-
-// OID registry for the two extensions that narrow a CRL's scope (RFC 5280
-// s5.2.3 and s5.2.5).
-var (
-	oidDeltaCRLIndicator      = asn1.ObjectIdentifier{2, 5, 29, 27}
-	oidIssuingDistributionPnt = asn1.ObjectIdentifier{2, 5, 29, 28}
-)
-
-// coversPartially reports whether a CRL declares itself narrower than its
-// issuer's full revocation list, and which extension says so.
-//
-// Presence is the whole test. An issuing distribution point can in principle
-// describe a scope equal to the full list, but parsing it to find out means
-// implementing a decision this CA has no way to act on: if the IDP names a
-// distribution point, the complete picture lives at a URL nobody here fetches.
-func coversPartially(crl *x509.RevocationList) (string, bool) {
-	for _, ext := range crl.Extensions {
-		switch {
-		case ext.Id.Equal(oidDeltaCRLIndicator):
-			return "delta CRL", true
-		case ext.Id.Equal(oidIssuingDistributionPnt):
-			return "issuing distribution point", true
-		}
-	}
-	return "", false
 }
 
 // forRevocationLookup is forIssuer plus the partial-scope CRLs, for deciding

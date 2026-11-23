@@ -25,32 +25,39 @@ alerting rules for the openvox-ca exporter. It alerts on:
   This covers **this CA's own CRL only** — block 0 of the stored blob, which the
   background refresher keeps fresh regardless. Ancestor CRLs are covered
   separately, by the upstream-CRL rules below;
-- **Upstream CRLs** in a published chain nearing or past their `NextUpdate`, and
-  the five ways that chain goes wrong, each with its own remedy: a
-  [`crl_chain_file`](../docs/configuration.md#publishing-an-upstream-crl-chain)
-  that cannot be refreshed (fix the file or its mount); a CRL discarded from it
-  because no certificate in the CA bundle signed it (complete the bundle); a CRL
-  older than the one already published (fix whatever writes the file); an
-  ancestor whose published CRL has been dropped, which is honoured and
-  unrecoverable — either the file stopped listing it (check the file was meant
-  to lose it) or its certificate has left the CA bundle (re-import the bundle),
-  and the log line says which; and a file that has never been opened at all
-  (wrong path, or a mount that never landed). They are five rules rather than
-  one because a responder sent to the wrong one of those remedies finds nothing
-  wrong. The per-issuer gauge appears
-  only where the stored blob holds a CRL this CA did not issue — including a
-  chain brought in by `import --crl-chain`, with no `crl_chain_file` in sight.
-  The counters are always exported and read zero without one, while
-  `openvoxca_crl_chain_last_read_timestamp_seconds` is exported only where
-  `crl_chain_file` is set, which is what makes the never-opened case alertable
+- **Upstream CRLs** in a published chain nearing or past their `NextUpdate`,
+  and the five ways that chain goes wrong, each with its own remedy: a
+  [`crl_chain.file`](../docs/configuration.md#publishing-an-upstream-crl-chain)
+  that cannot be refreshed (fix the file or its mount); a CRL discarded from it,
+  or from a `crl_chain.urls` entry, because no certificate in the CA bundle
+  signed it (complete the bundle, or point the entry at the right CA) or because
+  it is a delta or IDP-scoped CRL (point the source at the full CRL); a CRL
+  older than the one already published (fix whatever writes the file, or the
+  upstream behind the URL; on a CA with several replicas and mirror entries, a
+  short burst just after the upstream republishes is a lagging mirror,
+  re-counted by the fetch job's retries until it catches up, and needs nothing
+  unless it persists); an ancestor whose published CRL has been dropped, which
+  is honoured and unrecoverable — the file stopped listing it, or an
+  authoritative `crl_chain.urls` round no longer served it (check the file or
+  the list was meant to lose it), or its certificate has left the CA bundle
+  (re-import the bundle), and the log line says which; and a file that has never
+  been opened at all (wrong path, or a mount that never landed). They are five
+  rules rather than one because a responder sent to the wrong one of those
+  remedies finds nothing wrong. The per-issuer gauge appears only where the
+  stored blob holds a CRL this CA did not issue — including a chain brought in
+  by `import --crl-chain`, with no `crl_chain.file` in sight. The four
+  unlabelled counters are always exported and read zero without one, while the
+  per-URL fetch series exist only for configured `crl_chain.urls` entries and
+  `openvoxca_crl_chain_last_read_timestamp_seconds` only where `crl_chain.file`
+  is set, which is what makes the never-fetched and never-opened cases alertable
   without firing across the whole fleet. None of it is fixable here — this CA
   cannot re-sign another CA's list — so every remedy points at the parent CA, at
-  the file, or at the CA bundle.
+  the file or the URL list, or at the CA bundle.
 
   One case has no rule and cannot have one: a `subPath` mount reads successfully
   forever, so it is indistinguishable from a healthy file on every series. It
   surfaces as `OpenVoxCAUpstreamCRLExpiringSoon` on a CA that has
-  `crl_chain_file` set.
+  `crl_chain.file` set.
 
   **`OpenVoxCAUpstreamCRLRemoved` is a one-shot notification, not a standing
   one.** The counter it watches increments once, at the evaluation where the
@@ -61,14 +68,29 @@ alerting rules for the openvox-ca exporter. It alerts on:
   restart zeroes the counter too. Treat a firing of this rule as an incident to
   track by hand: nothing will re-raise it, and no gauge reports the shortfall.
   The other four upstream rules are standing conditions and do re-fire.
+
+  With [`crl_chain.urls`](../docs/configuration.md#fetching-upstream-crls),
+  three more rules name the failing URL: `OpenVoxCAUpstreamCRLFetchFailing`
+  when an entry yields nothing usable on `crlChainFetchFailureThreshold` rounds
+  in `crlChainFetchWindow` — a 200 carrying an error page, the wrong issuer's
+  CRL, a stale mirror's or an expired one counts, not only a transport
+  failure, and so does every entry at once when the CRLs they serve together
+  would make the published chain larger than 4 MiB —
+  `OpenVoxCAUpstreamCRLNeverFetched` when one has not succeeded since
+  startup, and `OpenVoxCAUpstreamCRLFetchStale` when one has gone
+  `crlChainFetchStaleSeconds` without a usable CRL. The last fires on age
+  alone, so it catches a fetch that has stopped counting anything; it is the
+  timely signal, because the expiry warning is measured from `nextUpdate` and,
+  against a long-lived upstream CRL, stays quiet for days after fetching stops.
 - **leaf certificates** nearing/at expiry — excluding revoked ones — and
   certificate **requests that stay pending** too long;
 - **CRL update failures** — the CA failing to amend its CRL (a revocation it
   could not record, or a CRL it could not re-sign, write or read), which can
   leave revoked or superseded certificates still valid. Some counts are not
   faults: on filesystem and SQLite a revocation that merely queued too long for
-  its subject's lock, and a CRL refresh, `crl_chain_file` refresh or cleanup
-  step that stood aside for foreground CRL work for its whole step budget
+  its subject's lock, and a CRL refresh, `crl_chain.file` refresh,
+  `crl_chain.urls` merge or cleanup step that stood aside for foreground CRL
+  work for its whole step budget
   (logged with `behind a priority caller`), are counted here too, so the alert
   tells them apart by log line — see [metrics](../docs/metrics.md). It fires on two failures within three hours,
   not one: a backend restart that catches a single amendment stays silent,
@@ -76,6 +98,11 @@ alerting rules for the openvox-ca exporter. It alerts on:
   every hourly refresh pass and warns by the second, 15 minutes after it. A
   CRL that reads but cannot be signed or written counts only when the CA
   tries to amend it, because the refresh pass writes only when the CRL is due.
+  With `crl_chain.file` or `crl_chain.urls` set, that job's own pass counts
+  into the same counter — once per interval, since a failed `crl_chain.urls`
+  merge waits the full interval too, except on a fresh store still held unready
+  — so a restart that overlaps it and the CRL refresh can count two; see
+  `crlUpdateThreshold` below.
   A best-effort revocation the CA does not retry, failing once, is reported by
   a rule that fires on one: `OpenVoxCASupersedeFailing`, below, for a
   certificate a renewal or managed-certificate reissue replaced with immediate
@@ -263,8 +290,11 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `caExpiryCriticalSeconds` | 7 days | CA certificate expiry critical threshold. |
 | `crlExpiryWarningSeconds` | 3 days | CRL `NextUpdate` warning threshold. |
 | `upstreamCRLExpiryWarningSeconds` | 14 days | Warning threshold for an upstream CRL in a published chain. Longer than `crlExpiryWarningSeconds` because the remedy is at another CA. |
-| `crlChainWindow` | `2h` | Window over which chain-refresh failures, discards, regressions and removals are counted. Twice the CA's default `crl_chain_refresh_interval_sec`, so that two increments are always in range: at exactly one interval a single unchanging fault fires, resolves and re-fires forever, because the older sample ages out before the next increment lands. Keep it at twice the interval if you change that setting. |
-| `crlChainFor` | `15m` | `for:` debounce for the five upstream-chain alerts. |
+| `crlChainWindow` | `2h` | Window over which chain-refresh failures, discards, regressions and removals are counted (fetch failures have their own, below). Twice the CA's default `crl_chain.refresh_interval_sec`, so that two increments are always in range: at exactly one interval a single unchanging fault fires, resolves and re-fires forever, because the older sample ages out before the next increment lands. Keep it at twice the interval if you change that setting. |
+| `crlChainFor` | `15m` | `for:` debounce for the upstream-chain and upstream-fetch alerts. |
+| `crlChainFetchStaleSeconds` | 3 hours | How long a `crl_chain.urls` entry may go without a usable, current CRL before `OpenVoxCAUpstreamCRLFetchStale` fires. A healthy entry is never older than about one interval, so it fires only once `crl_chain.refresh_interval_sec` exceeds this plus `crlChainFor`; the margin above one interval is what lets a failed round stay quiet. **Keep it at least twice the interval**, and raise it with that setting, which the mixin cannot see: at the default, an interval above about 97 minutes lets one failed round fire it, and one above about 3h15m fires between healthy rounds. Three times the CA's default `crl_chain.refresh_interval_sec`. |
+| `crlChainFetchFailureThreshold` | `2` | Failed rounds of one `crl_chain.urls` entry within `crlChainFetchWindow` before `OpenVoxCAUpstreamCRLFetchFailing` fires. Two, so one blip that the 30-second retry recovers from stays quiet. The retries count as rounds — after 30 seconds, then a minute, then two — so an outage of an upstream that lasts more than about 30 seconds and overlaps a round reaches two at once, and once fired the alert holds until the window has passed the older failure: about three hours at the defaults, after the upstream has recovered. |
+| `crlChainFetchWindow` | `3h` | Window for `OpenVoxCAUpstreamCRLFetchFailing`. A persistent fault's backoff is capped at `crl_chain.refresh_interval_sec`, so it steps once per interval, and `increase()` sees only the steps after its first sample: **keep it at least `(crlChainFetchFailureThreshold + 1) x refresh_interval_sec`**, and raise it with that setting, which the mixin cannot see. At `threshold x interval` or less a fault that never clears flaps; the extra interval is margin for retries that land a little more than an interval apart. A fault that starts after a clean round still fires at any interval, because the backoff restarts at 30 seconds, but the alert cannot hold: at this default, an interval of 90 minutes or more flaps, and one of three hours or more resolves while the fault persists. `(2 + 1) x 1h` at the defaults. |
 | `clientCRLRefusalWindow` | `1h` | Window over which client-CRL refusals are counted. Event-driven, so unlike the gauge it is not coupled to `client_crl_refresh_interval_sec`. |
 | `clientCRLUnusableFor` | `10m` | Shared `for:` debounce for `OpenVoxCAClientCRLUnusable`, `OpenVoxCAClientCRLRefusals` and `OpenVoxCAClientCRLStale`. Raising it to stop the gauge flapping across a refresh pass also delays the event-driven refusals page, which is the immediate one. For the *gauge* rule the detection latency is `client_crl_refresh_interval_sec` **plus** this, since the gauge is only recomputed on the refresh pass; the refusals rule is event-driven and not subject to that. |
 | `clientCRLStaleSeconds` | `3h` | How long an entry may go without its `crl_file` being applied before `OpenVoxCAClientCRLStale` fires. Three refresh passes at the 1h default, so a single transient read error does not page — which means it assumes that default: **raise it alongside any increase to `client_crl_refresh_interval_sec`**, or the rule fires permanently on a healthy CA. |
@@ -277,7 +307,7 @@ jsonnet -J vendor -m . mixin.jsonnet
 | `signerUnresponsiveFor` | `5m` | `for:` dwell for `OpenVoxCASignerUnresponsive`. The frontend asks the signer once per scrape and waits five seconds, so one slow answer costs one scrape; this keeps that from paging. |
 | `openBaoUnauthenticatedFor` | `5m` | `for:` dwell for `OpenVoxCAOpenBaoUnauthenticated`. The signer retries a failed login every five seconds, whether the login was its own or one a request prompted, so this is about sixty attempts. |
 | `crlUpdateWindow` | `3h` | Window over which CRL-update failures are counted (the metric is a restart-resetting counter). The CRL refresh job takes the CRL lock and reads the stored CRL on every pass, so a CRL that stays unreadable, or whose lock cannot be taken, fails at least once per `crl_refresh_interval_sec` (1h by default); one that reads but cannot be written counts only when the CA tries to amend it. Keep the window at least `crlUpdateThreshold` + 1 intervals: at exactly the threshold a persistent fault flaps, and below it the alert never fires. Raise it alongside that setting. |
-| `crlUpdateThreshold` | `2` | Failures within `crlUpdateWindow` before the CRL-update-failure alert fires. Above one so that a backend restart costing a single amendment stays silent. With `crl_chain_file` set, the upstream chain refresh counts into the same counter on its own hourly pass, so a restart that overlaps both passes counts two and fires; set this to `3`, and `crlUpdateWindow` to `4h`, if you want those silent. |
+| `crlUpdateThreshold` | `2` | Failures within `crlUpdateWindow` before the CRL-update-failure alert fires. Above one so that a backend restart costing a single amendment stays silent. With `crl_chain.file` or `crl_chain.urls` set, that job counts into the same counter once per `crl_chain.refresh_interval_sec` — the file's refresh pass, or a fetch round whose merge failed, which waits the full interval rather than retrying sooner — so a restart that overlaps both it and the CRL refresh counts two and fires; set this to `3`, and `crlUpdateWindow` to `4h`, if you want those silent. Those numbers assume the hourly default: at a shorter interval that job counts more often (at 900 seconds, a storage outage longer than about 15 minutes reaches two from it alone), so raise the threshold to match. The one exception is a fresh store held unready for `crl_chain.urls`, whose failed merges keep the backoff a failed entry gets (30 seconds, doubling up to the interval): a restart there can count several. |
 | `crlUpdateFor` | `15m` | `for:` debounce for the CRL-update-failure alert. Once the threshold is crossed `increase()` stays above it until the window passes the older failures, so this delays the alert rather than filtering a transient. |
 | `crlSyncWindow` | `10m` | Window over which CRL-reload failures are counted (the metric is a restart-resetting counter). Keep it at least `crlSyncThreshold` + 1 times `crl_sync_interval_sec` (60s by default), and raise it alongside that setting, or the alert can never fire. |
 | `crlSyncThreshold` | `3` | Failed reloads within `crlSyncWindow` before the CRL-reload-failure alert fires. A backend restart costs one; a replica holding a rotated CA certificate fails every pass. |

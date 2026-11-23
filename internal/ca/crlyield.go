@@ -27,7 +27,8 @@ import (
 // A revocation always wins over a background sweep (#347). This file is how.
 //
 // The background jobs that write the CRL — CleanupExpiredCerts,
-// ReconcileSuperseded, RefreshCRLIfDue and RefreshCRLChainFile — take the CRL
+// ReconcileSuperseded, RefreshCRLIfDue, RefreshCRLChainFile and
+// MergeFetchedUpstreamCRLs — take the CRL
 // lock through StorageService.WithLockYielding, so none of them queues for it
 // while a revocation in this process is waiting for or holding it. Every other
 // acquisition of the CRL lock but one goes through plain WithLock and so has
@@ -37,8 +38,9 @@ import (
 // correctness path is waiting on keeps WithLock: Revoke, RevokeSerial,
 // ReissueCRL, and ReconcileManaged's rollback and the retirements it revokes
 // inline, though that job runs on a timer. Scheduled work whose timing is
-// already approximate yields — expiry pruning, the CRL refresh and the chain
-// refresh, and the delayed-supersession sweep, whose revocations are owed after
+// already approximate yields — expiry pruning, the CRL refresh, the chain
+// refresh and the crl_chain.urls merge, and the delayed-supersession sweep,
+// whose revocations are owed after
 // a window anyway and which #347 names as a sweep. Recording a supersession is
 // neither: a client waits on it, but it revokes nothing, so recordSuperseded
 // takes the lock through WithLockNeutral.

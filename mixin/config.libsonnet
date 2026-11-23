@@ -24,19 +24,23 @@
     // Deliberately not crlExpiryWarningSeconds. That threshold is short because
     // the CA refreshes its own CRL, so the alert only fires when something is
     // already wedged and three days is ample. An *upstream* CRL is the exact
-    // opposite: openvox-ca cannot re-sign an ancestor's list, so clearing this
-    // means a human fetching a new CRL from the parent CA — often a different
-    // team — and updating crl_chain_file. Two weeks is notice for that, not
-    // slack for a self-healing loop.
+    // opposite: openvox-ca cannot re-sign an ancestor's list, so it can only
+    // publish whatever the parent CA last issued. With crl_chain.file, clearing
+    // this means a human fetching a new CRL from the parent CA — often a
+    // different team — and updating the file. With crl_chain.urls the fetch
+    // does that, so a warning here means the parent CA has stopped re-signing
+    // -- the fix is with whoever runs it -- or fetching has failed for days,
+    // which the fetch alerts below will have reported first. Two weeks is
+    // notice for a fix at another CA, not slack for a self-healing loop.
     upstreamCRLExpiryWarningSeconds: 14 * 24 * 3600,  // 14 days
 
     // --- Upstream CRL chain health ---
-    // Calibrated to the CA's crl_chain_refresh_interval_sec. All four chain
+    // Calibrated to the CA's crl_chain.refresh_interval_sec. All four chain
     // counters increment per *evaluation*, and the file is evaluated on every
     // CRL amendment as well as on each refresh pass, so on a busy CA they track
     // revocation rate. What the window is sized against is the floor they
     // share: a quiet CA evaluates the file once per refresh pass, so raise this
-    // alongside any increase to crl_chain_refresh_interval_sec.
+    // alongside any increase to crl_chain.refresh_interval_sec.
     //
     // Twice the interval, not equal to it. At exactly one interval a persistent
     // fault flaps: consecutive increments sit one window apart, so the last
@@ -52,6 +56,62 @@
     // the per-CRL loops are reached.
     crlChainWindow: '2h',
     crlChainFor: '15m',
+
+    // --- Upstream CRL fetching (crl_chain.urls) ---
+    // How long a crl_chain.urls entry may go without a usable, current CRL
+    // before OpenVoxCAUpstreamCRLFetchStale fires.
+    //
+    // Sized against the CA's crl_chain.refresh_interval_sec (default 1h). A
+    // healthy entry is never older than about one interval, and the rule's for:
+    // adds crlChainFor before it fires, so it fires only once the interval
+    // exceeds this plus crlChainFor; what the margin above one interval buys is
+    // a failed round. Three intervals means a single failed round, and the
+    // backed-off retries after it, stay quiet, while an entry that has
+    // delivered nothing usable for three intervals does not. Keep it at least
+    // twice refresh_interval_sec, and raise it with that setting: the mixin
+    // cannot see the CA's configuration. At the default here, an interval above
+    // about 97 minutes lets one failed round fire it (two intervals of age,
+    // held for crlChainFor), and one above about 3h15m fires it between healthy
+    // rounds.
+    //
+    // This is the alert that does not depend on the failure counter moving,
+    // and the only timely one when it does not: the expiry warning above is
+    // measured from nextUpdate, so against a freshly fetched 30-day upstream
+    // CRL it stays silent for up to sixteen days (30 less the 14-day warning)
+    // after fetching stops.
+    crlChainFetchStaleSeconds: 10800,  // 3 hours; a literal, which cmd/openvox-ca's specs read
+
+    // How many failed rounds of one crl_chain.urls entry within
+    // crlChainFetchWindow fire OpenVoxCAUpstreamCRLFetchFailing. Two, not one:
+    // a single blip on an outbound fetch fails one round, the retry 30 seconds
+    // later succeeds, and increase(...) > 0 would have held that one failure
+    // for the whole window -- the shape #596 moved the CRL-update alert away
+    // from. The retries count as rounds, so an outage of more than about 30
+    // seconds that overlaps a round reaches two at once; once fired, the alert
+    // holds until the window has passed the older failure, about three hours
+    // at the defaults.
+    crlChainFetchFailureThreshold: 2,
+
+    // The window OpenVoxCAUpstreamCRLFetchFailing counts failed rounds over.
+    // Its own, not crlChainWindow, because it is sized against a threshold.
+    //
+    // Under a persistent fault the fetch job's backoff is capped at the CA's
+    // crl_chain.refresh_interval_sec (default 1h), so a failing entry counts at
+    // least once per interval. increase() over a range sees the steps *after*
+    // its first sample, so to see crlChainFetchFailureThreshold of them it must
+    // span one more interval than that: crlChainFetchWindow >=
+    // (crlChainFetchFailureThreshold + 1) x refresh_interval_sec. At the
+    // defaults that is (2 + 1) x 1h = 3h. At threshold x interval or less, a
+    // fault that never clears flaps -- mixin/tests.yaml drives exactly that
+    // case, at 2h -- and the extra interval is margin for retries that land a
+    // little more than an interval apart. Raise it if you raise either the
+    // threshold or the interval: the mixin cannot see the CA's configuration.
+    // A fault that starts after a clean round still fires at any interval --
+    // the backoff restarts at 30 seconds, so the first retries land within
+    // minutes -- but the alert cannot hold. At the default here, an interval
+    // above an hour has used up the margin, one of 90 minutes or more flaps,
+    // and one of three hours or more resolves while the fault persists.
+    crlChainFetchWindow: '3h',
 
     // --- Leaf certificate expiry ---
     // Agents normally auto-renew; a leaf nearing expiry indicates a node that
@@ -118,14 +178,20 @@
     // It fires on crlUpdateThreshold failures in the window, not on the first.
     // A backend restart costs one failed amendment, and the next pass succeeds;
     // increase(...) > 0 held that one failure for the whole window (#596).
-    // Two is enough margin because a restart only counts here when it breaks
-    // an amendment or a pass in flight, which with an hourly pass is rare,
-    // unlike the syncs below, which fail on nearly every restart. One case
-    // narrows it: with crl_chain_file set, the upstream chain refresh takes
-    // the same lock, reads the same CRL and counts its failures here too, on
-    // its own hourly ticker started alongside this one. A restart that
-    // overlaps both passes then counts two and fires. A deployment with a
-    // chain file that wants those silent sets crlUpdateThreshold to 3 and
+    // Two is enough margin because a restart only counts here when it breaks an
+    // amendment or a pass in flight, which with an hourly pass is rare, unlike
+    // the syncs below, which fail on nearly every restart. One case narrows it:
+    // with crl_chain.file or crl_chain.urls set, that job takes the same lock,
+    // reads the same CRL and counts its failures here too, on its own ticker,
+    // every crl_chain.refresh_interval_sec (1h by default), started alongside
+    // this one -- a crl_chain.urls round whose merge failed waits the full
+    // interval rather than retrying sooner, except on a fresh store still held
+    // unready, where every retry of the backoff (30 seconds, doubling to the
+    // interval) counts. A restart that overlaps both passes then counts two and
+    // fires. Below an hour that job counts more often: at 900 seconds a storage
+    // outage longer than about 15 minutes reaches two from it alone, so raise
+    // crlUpdateThreshold to match a shorter interval. A deployment with an
+    // upstream chain that wants those silent sets crlUpdateThreshold to 3 and
     // crlUpdateWindow to 4h; it still warns within about two and a quarter
     // hours of a CRL that stays unreadable, since each tick then counts twice.
     // Amendments have no cycle of their own, but the CRL refresh job takes the

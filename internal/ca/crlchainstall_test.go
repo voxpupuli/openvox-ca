@@ -32,7 +32,7 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/storage"
 )
 
-// A crl_chain_file whose read never returns must not hold the cluster CRL lock.
+// A crl_chain.file whose read never returns must not hold the cluster CRL lock.
 //
 // Both call sites reach this read under lockNameCRL and c.mu, and that lock
 // serialises revocation across every replica -- so one replica stuck inside
@@ -44,7 +44,7 @@ import (
 // stand-in for the real cause -- a wedged CSI driver, an NFS volume whose
 // server has gone, a sidecar that stopped writing -- because os.Open on it
 // blocks until a writer appears, which is exactly a read that never returns.
-var _ = Describe("crl_chain_file: a read that never returns", func() {
+var _ = Describe("crl_chain.file: a read that never returns", func() {
 	It("gives up rather than holding the CRL lock, and leaves it usable", func() {
 		ctx := context.Background()
 		dir := GinkgoT().TempDir()

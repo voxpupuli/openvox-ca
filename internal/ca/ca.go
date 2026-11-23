@@ -408,17 +408,20 @@ type CA struct {
 	inventoryVerifyReadErrors atomic.Uint64
 
 	// crlUpdateFailures counts failures to amend the CRL: a CRL that could not
-	// be re-signed, written or read, on any of the five paths that write one
-	// (revoke by subject, revoke by serial, cleanup, reissue, refresh) — the
-	// read half centrally, in readStoredCRL, which is what makes this cover all
-	// five — plus, on the revoke paths only, a bad serial or a failed inventory
-	// read while resolving
-	// the subject's serial. That last one is how a revocation which merely
-	// queued past LockTimeout lands here on the single-node backends, where the
-	// spent deadline is not spotted until the read; one refused at a lock
-	// acquisition fails earlier and is not counted — every backend's cross-node
-	// acquisition, and on the single-node ones a wait for another process on the
-	// same host. See docs/metrics.md.
+	// be re-signed, written or read, on any of the eight paths that write one
+	// (revoke by subject, revoke by serial, cleanup, reissue, the background
+	// refresh, the superseded sweep, the crl_chain.file refresh and the
+	// crl_chain.urls merge) — the read half centrally, in readStoredCRL, which
+	// every path that re-signs reaches, and which is what makes this cover all
+	// eight — plus, on the merge and the crl_chain.file paths, a CA bundle that
+	// cannot be read or a published chain that cannot be decoded, and on the
+	// revoke paths only, a bad serial or a failed inventory read while
+	// resolving the subject's serial. That last one is how a revocation which
+	// merely queued past LockTimeout lands here on the single-node backends,
+	// where the spent deadline is not spotted until the read; one refused at a
+	// lock acquisition fails earlier and is not counted — every backend's
+	// cross-node acquisition, and on the single-node ones a wait for another
+	// process on the same host. See docs/metrics.md.
 	// Some callers treat these as fatal and return the error; others — notably
 	// the best-effort revoke of a superseded certificate on renewal — swallow
 	// it so the primary operation still succeeds. Either way a rising count
@@ -473,27 +476,39 @@ type CA struct {
 	duplicateRefusals struct{ requested, signed, revoked atomic.Uint64 }
 
 	// Four counters, because their remedies differ: crlChainFailures points at
-	// the file itself, crlChainDiscarded at the CA bundle, crlChainRegressed at
-	// whatever writes the file, and crlChainRemoved at either the file or the
-	// bundle, being the one with two causes. (The file's *mount* is a fifth
-	// question, and it is crlChainLastRead below, a gauge rather than a counter,
-	// because "never opened" is a state and not an event.)
+	// the file itself, crlChainDiscarded at the CA bundle (or at a source
+	// serving a delta or IDP-scoped CRL where a full one belongs),
+	// crlChainRegressed at whatever writes the file or the upstream behind a
+	// URL, and crlChainRemoved at the configured source or the bundle, being
+	// the one with more than one cause. (The file's *mount* is a fifth
+	// question, and it is crlChainLastRead below, a gauge rather than a
+	// counter, because "never opened" is a state and not an event.)
 	//
-	// crlChainRemoved is the one with two causes, because it is named for an
+	// crlChainRemoved is the one with several causes, because it is named for an
 	// outcome rather than a fault: an ancestor's CRL stops being published
-	// either because the file stopped listing it, or because the ancestor's
+	// because the file stopped listing it, because an authoritative
+	// crl_chain.urls round no longer served it, or because the ancestor's
 	// certificate left the CA bundle and nothing signs its CRL any more. The
-	// second points at the bundle, like crlChainDiscarded, so an incomplete
+	// last points at the bundle, like crlChainDiscarded, so an incomplete
 	// bundle can move both at once -- discarded for the file's copy, removed for
 	// the published one. The log line names which fired.
 	//
-	// Three of the four are per *evaluation*, not per pass: crl_chain_file is
+	// The crl_chain.urls cause needs an authoritative round -- complete, every
+	// entry fetched over https:// or file:///, none serving this CA's own CRL,
+	// each naming a different ancestor -- and points at the URL list. See
+	// planUpstreamMerge in crlchainfetch.go.
+	//
+	// Three of the four are per *evaluation*, not per pass: crl_chain.file is
 	// evaluated on every CRL amendment as well as on each refresh pass, so on a
 	// busy CA they track revocation rate rather than the number of bad CRLs in
 	// the file. crlChainFailures counts the whole file once per evaluation.
 	// crlChainDiscarded and crlChainRegressed count once per CRL per evaluation.
 	// All three describe what the file currently *holds*, which is a standing
-	// condition worth re-counting for as long as it stands.
+	// condition worth re-counting for as long as it stands. With crl_chain.urls
+	// in place of the file, crlChainDiscarded and crlChainRegressed count once
+	// per entry per fetch round instead (crlChainFailures, being about the file,
+	// does not move), and the rounds after a failed one come sooner than the
+	// interval, on the fetch job's backoff.
 	//
 	// crlChainRemoved is the exception, because it reports a transition rather
 	// than a standing condition: an ancestor that is published and is about to
@@ -510,30 +525,39 @@ type CA struct {
 	// per-CRL loops are reached.
 	//
 	// What an alert window can be sized against is the floor they share: a quiet
-	// CA evaluates the file once per crl_chain_refresh_interval_sec. See
+	// CA evaluates the file once per crl_chain.refresh_interval_sec. See
 	// mixin/config.libsonnet, which says the same thing.
 	//
 	// crlChainFailures counts refresh passes that could not publish the upstream
 	// chain at all -- unreadable, unparseable, truncated or oversized. The
 	// published chain is left alone and the next pass retries.
 	//
-	// crlChainDiscarded counts CRLs dropped from crl_chain_file because nothing
-	// in the CA bundle signed them. This is the case where the chain quietly
-	// *shrinks*: the file is authoritative, so a CRL the operator put there and
-	// this CA would not accept simply stops being published.
+	// crlChainDiscarded counts upstream CRLs dropped because nothing in the CA
+	// bundle signed them, or because they are a delta CRL or carry an issuing
+	// distribution point and so are not their issuer's full list. With
+	// crl_chain.file this is the case where the chain quietly *shrinks*: the
+	// file is authoritative, so a CRL the operator put there and this CA would
+	// not accept simply stops being published. With crl_chain.urls it cannot
+	// shrink anything: an entry that yields such a CRL makes the round partial,
+	// and a partial round only updates.
 	//
-	// crlChainRegressed counts CRLs in crl_chain_file that were older than the
-	// one already published for the same ancestor, and so were not used -- see
-	// monotonicUpstream. It is deliberately not folded into crlChainDiscarded:
-	// the two have opposite remedies. A discard means the CA bundle is missing
-	// an ancestor, so the operator checks the bundle; a regression means the
-	// file itself is stale, rolled back or replayed, so the operator checks
-	// whatever writes it. One counter would have sent a paged responder to
-	// verify a bundle that was already complete.
+	// crlChainRegressed counts upstream CRLs -- from crl_chain.file or a
+	// crl_chain.urls entry -- that were older than the one already published for
+	// the same ancestor, and so were not used -- see monotonicUpstream and
+	// planUpstreamMerge. It is deliberately not folded into crlChainDiscarded:
+	// the two have opposite remedies. An unsigned discard means the CA bundle is
+	// missing an ancestor, so the operator checks the bundle; a regression means
+	// the source itself is stale, rolled back or replayed, so the operator checks
+	// whatever writes the file, or the upstream behind the URL. One counter
+	// would have sent a paged responder to verify a bundle that was already
+	// complete. A partial-scope discard is the exception within the counter:
+	// its remedy is the source too, pointed at the issuer's full CRL rather than
+	// a delta or scoped one. The log line says which of the two it was.
 	//
 	// crlChainRemoved counts ancestors whose published CRL has been dropped from
-	// the chain: either the file stopped listing them, or their certificate left
-	// the CA bundle so nothing signs that CRL any more. Honoured rather than
+	// the chain: the file stopped listing them, an authoritative crl_chain.urls
+	// round stopped serving them, or their certificate left the CA bundle so
+	// nothing signs that CRL any more. Honoured rather than
 	// refused, unrecoverable here, and a `cat` glob that matched one file fewer
 	// produces the first just as readily as a deliberate removal does. It
 	// overlaps crlChainDiscarded rather than being distinct from it: an
@@ -549,10 +573,10 @@ type CA struct {
 	crlChainRemoved   atomic.Uint64
 
 	// crlChainLastRead is the Unix time of the last successful read of
-	// crl_chain_file, or zero if it has never been read.
+	// crl_chain.file, or zero if it has never been read.
 	//
 	// It exists for the case the counters cannot reach: an absent file is
-	// deliberately not a failure -- it makes no statement -- so a crl_chain_file
+	// deliberately not a failure -- it makes no statement -- so a crl_chain.file
 	// pointing at a path that never mounted leaves every counter at zero and
 	// every series flat and healthy while the ancestors age out. This series
 	// stays at zero, which is the signal.
@@ -562,7 +586,7 @@ type CA struct {
 	// forever, so the stamp advances every cycle exactly as it does on a healthy
 	// file; the two are indistinguishable here. What catches a frozen mount is
 	// the upstream CRL's own nextUpdate marching towards expiry --
-	// OpenVoxCAUpstreamCRLExpiringSoon firing on a CA that has crl_chain_file
+	// OpenVoxCAUpstreamCRLExpiringSoon firing on a CA that has crl_chain.file
 	// configured *is* the subPath signature.
 	crlChainLastRead atomic.Int64
 
@@ -571,6 +595,19 @@ type CA struct {
 	// issues its own root. Every CRL in the file is signature-verified against
 	// the stored CA bundle before it is published — see upstreamCRLs.
 	CRLChainFile string
+
+	// crlChainURLs are the crl_chain.urls entries, set through
+	// SetCRLChainURLs, which also creates upstreamFetch. Unexported, unlike
+	// CRLChainFile beside it, so that the setter is the only way in: the two
+	// must be set together. Both are written once while the CA is configured
+	// and only read afterwards, so neither needs a lock; the per-entry values
+	// inside are atomics.
+	crlChainURLs  []string
+	upstreamFetch map[string]*upstreamFetchStatus
+
+	// upstreamHeld holds readiness until a crl_chain.urls round stores an
+	// upstream CRL, when HoldReadinessForUpstreamChain found none stored.
+	upstreamHeld atomic.Bool
 
 	// signingShed counts OCSP responses refused because the CA-key signing
 	// bound was full for longer than ocspSigningWait. Only the OCSP path can
@@ -688,7 +725,7 @@ func (c *CA) SerialIndexSize() int {
 	return len(c.serialIndex)
 }
 
-// CRLChainFailures returns how many reads of crl_chain_file failed --
+// CRLChainFailures returns how many reads of crl_chain.file failed --
 // unreadable, unparseable, not ending on a PEM block boundary, or holding more
 // CRLs than the entry bound allows.
 //
@@ -701,29 +738,34 @@ func (c *CA) SerialIndexSize() int {
 // Surfaced as openvoxca_crl_chain_refresh_failures_total.
 func (c *CA) CRLChainFailures() uint64 { return c.crlChainFailures.Load() }
 
-// CRLChainDiscarded returns how many CRLs have been dropped from
-// crl_chain_file because no certificate in the CA bundle signed them. Surfaced
-// as openvoxca_crl_chain_discarded_total; a rising value means the published
-// chain is smaller than the operator's file says it should be.
+// CRLChainDiscarded returns how many upstream CRLs, from crl_chain.file or a
+// crl_chain.urls entry, have been dropped because no certificate in the CA
+// bundle signed them, or because they are a delta CRL or carry an issuing
+// distribution point and so are not their issuer's full list. Surfaced as
+// openvoxca_crl_chain_discarded_total; with the file a rising value means the
+// published chain is smaller than the file says it should be, and with URLs
+// that an entry is pointed at a CA the bundle does not hold, or at a partial
+// CRL where the issuer's full one belongs. The log line says which.
 func (c *CA) CRLChainDiscarded() uint64 { return c.crlChainDiscarded.Load() }
 
-// CRLChainRegressed returns how many CRLs in crl_chain_file have been passed
-// over because the published chain already carried a newer one from the same
-// ancestor. Surfaced as openvoxca_crl_chain_regressed_total; a rising value means
-// the file is stale, rolled back or replayed, and points at whatever writes it
-// rather than at the CA bundle.
+// CRLChainRegressed returns how many upstream CRLs, from crl_chain.file or a
+// crl_chain.urls entry, have been passed over because the published chain
+// already carried a newer one from the same ancestor. Surfaced as
+// openvoxca_crl_chain_regressed_total; a rising value means the source is
+// stale, rolled back or replayed, and points at whatever writes the file or the
+// upstream behind the URL, rather than at the CA bundle.
 func (c *CA) CRLChainRegressed() uint64 { return c.crlChainRegressed.Load() }
 
 // CRLChainRemoved returns how many ancestors have had their published CRL
-// dropped from the chain, whether because crl_chain_file stopped listing them or
-// because their certificate left the CA bundle. Surfaced as
-// openvoxca_crl_chain_removed_total; the removal is honoured because the file is
-// authoritative, but it cannot be undone here, so a rising value wants checking
-// against whether the operator meant it -- and the log line says which of the
-// two causes fired, because the remedies differ.
+// dropped from the chain: because crl_chain.file stopped listing them, because
+// an authoritative crl_chain.urls round no longer served them, or because their
+// certificate left the CA bundle. Surfaced as openvoxca_crl_chain_removed_total;
+// the removal is honoured, but it cannot be undone here, so a rising value wants
+// checking against whether the operator meant it -- and the log line says which
+// cause fired, because the remedies differ.
 func (c *CA) CRLChainRemoved() uint64 { return c.crlChainRemoved.Load() }
 
-// CRLChainLastRead returns when crl_chain_file was last read successfully, or
+// CRLChainLastRead returns when crl_chain.file was last read successfully, or
 // the zero time if it never has been. See the field comment for why a feature
 // whose whole value is "the file is re-read" needs to say whether it is.
 func (c *CA) CRLChainLastRead() time.Time {

@@ -110,6 +110,9 @@ func loadServerConfig(configFile string) (*serverConfig, error) {
 	if err := checkRateLimitIPv6PrefixLength(cfg.RateLimitIPv6PrefixLength); err != nil {
 		return nil, err
 	}
+	if err := cfg.CRLChain.Validate(); err != nil {
+		return nil, err
+	}
 	// Refused rather than ignored, for the reason the backdate's own check
 	// gives: a negative value is a typo, and falling back to the default
 	// silently is how the operator never hears about it. The asymmetry with
@@ -303,21 +306,41 @@ func (c *serverConfig) inventoryVerifyInterval() time.Duration {
 	return defaultInventoryVerifyInterval
 }
 
-// defaultCRLChainRefreshInterval is how often crl_chain_file is re-read when
-// the operator has not configured an interval.
+// defaultCRLChainRefreshInterval is how often crl_chain.file is re-read, or
+// crl_chain.urls fetched, when the operator has not configured an interval.
 //
-// An hour, because the file names ancestor CRLs this CA cannot re-sign: the
-// operator refreshes it by whatever mechanism already delivers it, and this job
-// only notices. The cost of noticing late is that agents doing full-chain
-// revocation checking keep verifying against an ancestor CRL the operator has
-// already replaced; the cost of noticing often is a file read.
+// An hour. For the file, the operator refreshes it by whatever mechanism
+// already delivers it and this job only notices: the cost of noticing late is
+// that agents keep verifying against an ancestor CRL the operator has already
+// replaced, and the cost of noticing often is a file read. For URLs the
+// interval is what bounds how long an upstream revocation takes to reach
+// agents -- an upstream publishes a new CRL as soon as it revokes -- and the
+// cost of fetching often is one small GET per entry per replica.
 const defaultCRLChainRefreshInterval = time.Hour
 
-// crlChainRefreshInterval resolves how often crl_chain_file is re-read, falling
-// back to defaultCRLChainRefreshInterval when unset.
+// defaultCRLChainFetchTimeout bounds each crl_chain.urls fetch when the
+// operator has not configured a timeout. Long enough for a slow upstream to
+// answer with a few megabytes, short enough that a round of entries which
+// never answer still finishes well inside the default refresh interval.
+const defaultCRLChainFetchTimeout = 30 * time.Second
+
+// crlChainFetchTimeout resolves crl_chain.fetch_timeout_sec, falling back to
+// defaultCRLChainFetchTimeout when unset. Validate has already refused a value
+// outside 0..MaxCRLChainFetchTimeoutSec.
+func (c *serverConfig) crlChainFetchTimeout() time.Duration {
+	if c.CRLChain.FetchTimeoutSec > 0 {
+		return time.Duration(c.CRLChain.FetchTimeoutSec) * time.Second
+	}
+	return defaultCRLChainFetchTimeout
+}
+
+// crlChainRefreshInterval resolves how often crl_chain.file is re-read or
+// crl_chain.urls fetched, falling back to defaultCRLChainRefreshInterval when
+// unset. Validate has already refused a value outside
+// 0..MaxCRLChainRefreshIntervalSec.
 func (c *serverConfig) crlChainRefreshInterval() time.Duration {
-	if c.CRLChainRefreshIntervalSec > 0 {
-		return time.Duration(c.CRLChainRefreshIntervalSec) * time.Second
+	if c.CRLChain.RefreshIntervalSec > 0 {
+		return time.Duration(c.CRLChain.RefreshIntervalSec) * time.Second
 	}
 	return defaultCRLChainRefreshInterval
 }
@@ -500,9 +523,17 @@ func applyServerEnv(cfg *serverConfig) error {
 		cfg.TLSKey = v
 	}
 	if v := os.Getenv("OPENVOX_CA_CRL_CHAIN_FILE"); v != "" {
-		cfg.CRLChainFile = v
+		cfg.CRLChain.File = v
 	}
-	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", &cfg.CRLChainRefreshIntervalSec, config.Positive))
+	// Ungated, so a negative or out-of-range value reaches
+	// CRLChainConfig.Validate from the environment as it does from the file.
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC", &cfg.CRLChain.RefreshIntervalSec, nil))
+	if v := os.Getenv("OPENVOX_CA_CRL_CHAIN_URLS"); v != "" {
+		cfg.CRLChain.URLs = splitAndTrim(v, ",")
+	}
+	// Ungated, so a negative value reaches CRLChainConfig.Validate from the
+	// environment just as it does from the file.
+	errs = append(errs, config.EnvInt("OPENVOX_CA_CRL_CHAIN_FETCH_TIMEOUT_SEC", &cfg.CRLChain.FetchTimeoutSec, nil))
 	if v := os.Getenv("OPENVOX_CA_PUPPET_SERVER"); v != "" {
 		cfg.PuppetServer = v
 	}

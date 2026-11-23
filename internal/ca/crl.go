@@ -107,7 +107,7 @@ func (c *CA) signCRLLocked(ctx context.Context, prev *storedCRL, revoked []x509.
 	// there is nothing upstream and this is byte-for-byte what it was.
 	newCRLPEM, err := c.crlChainLocked(ctx, parsedCRL, prevBlob)
 	if err != nil {
-		// A fault in the operator's crl_chain_file is counted by
+		// A fault in the operator's crl_chain.file is counted by
 		// crlChainFailures and not here, the same exemption RefreshCRLChainFile
 		// makes. This path reaches the file too -- crlChainLocked calls
 		// upstreamCRLs, which marks an unreadable, over-limit or regressing
@@ -241,10 +241,12 @@ func newEmptyCRL(cert *x509.Certificate, key crypto.Signer, validity time.Durati
 // fleet-wide with every series flat.
 //
 // crlUpdateFailures is the right counter by its own definition -- "a CRL that
-// could not be re-signed, written or read, on any of the five paths that write
-// one" -- and docs/metrics.md says so. Detecting the arm by whether fn ran,
-// rather than by matching on the error, keeps this independent of how the
-// storage layer words its wrapping.
+// could not be re-signed, written or read, on any of the eight paths that
+// write one" -- and docs/metrics.md says so. Six of those writers take the CRL
+// lock through here; the superseded sweep and the crl_chain.file refresh take
+// it directly. Detecting the arm by whether fn ran, rather than by matching on
+// the error, keeps this independent of how the storage layer words its
+// wrapping.
 func (c *CA) withCRLLockCounted(ctx context.Context, fn func() error) error {
 	ran := false
 	err := c.Storage.WithLock(ctx, lockNameCRL, func() error {
@@ -304,11 +306,12 @@ type storedCRL struct {
 // Every caller goes on to re-sign and write, so a failure here is a failure to
 // update the CRL and is counted as one. Counting it centrally rather than at
 // each call site is what makes crl_update_failures cover every path that writes
-// a CRL, as docs/metrics.md promises and the mixin's alert assumes. (Four call
-// sites here, five write paths there: the two revoke entry points share one.)
-// Three of them
-// previously returned the error uncounted, so a replica that tripped this
-// without revoking anything logged every tick while the counter stayed flat.
+// a CRL, as docs/metrics.md promises and the mixin's alert assumes: revocation
+// (whose two entry points share a call site), cleanup, reissue (which the
+// crl_chain.file refresh also reaches), refresh, the superseded sweep and the
+// crl_chain.urls merge. Three of them previously returned the error uncounted,
+// so a replica that tripped this without revoking anything logged every tick
+// while the counter stayed flat.
 func (c *CA) readStoredCRL(ctx context.Context) (*storedCRL, error) {
 	stored, err := c.parseStoredCRL(ctx)
 	if err != nil {

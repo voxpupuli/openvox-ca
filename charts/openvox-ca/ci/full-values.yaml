@@ -56,7 +56,8 @@ config:
   #
   # Each file gets a volume to itself: a subPath mount never receives updates,
   # which would freeze the CRLs while every metric went on reporting health.
-  crl_chain_file: /run/secrets/upstream-crls/upstream-crls.pem
+  crl_chain:
+    file: /run/secrets/upstream-crls/upstream-crls.pem
   client_revocation_policy: require
   client_crl_refresh_interval_sec: 900
   client_ca:

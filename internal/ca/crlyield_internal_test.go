@@ -661,7 +661,7 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 
 	// The chain refresh takes the lock through a closure of its own rather
 	// than withCRLLockYielding, so it needs the same exemption pinned apart.
-	It("does not count a crl_chain_file refresh whose wait a shutdown ended", func() {
+	It("does not count a crl_chain.file refresh whose wait a shutdown ended", func() {
 		myCA.sweep = sweepTuning{stepBudget: 10 * time.Second, stepPause: 10 * time.Millisecond}
 		path := filepath.Join(dir, "chain.pem")
 		Expect(os.WriteFile(path, nil, 0o600)).To(Succeed())
@@ -1296,8 +1296,9 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 				"the job took the CRL lock ahead of a revocation already waiting for it: %v", events)
 			effect()
 		},
-		// The two sweeps' effects are asserted; the two refresh jobs have none
-		// to show here, since neither CRL is due, so their nil error is it.
+		// The two sweeps' effects are asserted; the two refresh jobs and the
+		// merge have none to show here, since nothing is due or fetched, so
+		// their nil error is it.
 		Entry("CleanupExpiredCerts", func() { seedExpired("old.test", 0xEE20) },
 			func() error { _, err := myCA.CleanupExpiredCerts(ctx, 0); return err },
 			func() { Expect(inInventory("old.test")).To(BeFalse(), "the job never pruned") }),
@@ -1318,6 +1319,10 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 			Expect(os.WriteFile(path, nil, 0o600)).To(Succeed())
 			myCA.CRLChainFile = path
 		}, func() error { _, err := myCA.RefreshCRLChainFile(ctx); return err }, func() {}),
+		// The crl_chain.urls merge: a round with no entries still reads the
+		// stored chain and judges it under the lock, which is all this asks.
+		Entry("MergeFetchedUpstreamCRLs", func() {},
+			func() error { _, err := myCA.MergeFetchedUpstreamCRLs(ctx, nil); return err }, func() {}),
 	)
 
 	// A long pass reports at info level so it can be told from a wedged one,
@@ -1442,7 +1447,7 @@ var _ = Describe("Background sweeps on the CRL lock (#347)", func() {
 		Expect(sweepStepPause).To(BeNumerically(">", storage.RedisLockPollMaxBackoff))
 	})
 
-	It("lets the crl_chain_file read time out inside the refresh job's step", func() {
+	It("lets the crl_chain.file read time out inside the refresh job's step", func() {
 		Expect(crlChainReadTimeout).To(BeNumerically("<", sweepStepBudget))
 	})
 })
@@ -1617,11 +1622,12 @@ var _ = Describe("No CRL-lock holder extends its own hold (#347)", func() {
 			}
 		}
 		Expect(got).To(Equal(map[string]bool{
-			"withCRLLockYielding":     true,
-			"cleanupExpiredStep":      true,
-			"reconcileSupersededStep": true,
-			"RefreshCRLIfDue":         true,
-			"RefreshCRLChainFile":     true,
+			"withCRLLockYielding":      true,
+			"cleanupExpiredStep":       true,
+			"reconcileSupersededStep":  true,
+			"RefreshCRLIfDue":          true,
+			"RefreshCRLChainFile":      true,
+			"MergeFetchedUpstreamCRLs": true,
 		}), "a function took the CRL lock by yielding that is not one of the background jobs, or one of them stopped")
 	})
 

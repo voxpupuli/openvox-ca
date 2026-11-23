@@ -24,7 +24,17 @@ import (
 
 type healthResponse struct {
 	Status string `json:"status"`
+	// Reason says why a not_ready answer is not ready, when the cause is one
+	// an operator acts on rather than initialisation still running.
+	Reason string `json:"reason,omitempty"`
 }
+
+// reasonUpstreamCRLChain is the not_ready reason while readiness waits for a
+// crl_chain.urls round, so a probe failure names the upstream fetch rather
+// than reading like a CA that never initialised. The healthcheck subcommand
+// (the image's HEALTHCHECK) prints it; a kubelet probe event carries only the
+// status code, so there it is for whoever reads the endpoint by hand.
+const reasonUpstreamCRLChain = "waiting_for_upstream_crl_chain"
 
 // handleLive is the liveness probe: returns 200 as long as the server is running.
 func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
@@ -32,20 +42,46 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
 }
 
-// handleReady is the readiness probe: returns 200 when the CA is initialized
+// handleReady is the readiness probe: returns 200 when the CA is initialised
 // and ready to serve requests, 503 otherwise.
+//
+// Ready is startup plus one condition: with crl_chain.urls set and no
+// upstream CRL stored, readiness waits for a fetch round to store one -- see
+// CA.HoldReadinessForUpstreamChain. Serving before then would hand agents
+// on certificate_revocation = chain a chain they reject.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if !s.CA.IsReady() {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(healthResponse{Status: "not_ready"})
-		return
+	switch {
+	case !s.CA.IsReady():
+		writeNotReady(w, "")
+	case s.CA.UpstreamChainHeld():
+		writeNotReady(w, reasonUpstreamCRLChain)
+	default:
+		writeOK(w)
 	}
-	json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
 }
 
 // handleStartup is the startup probe: returns 200 once the CA has finished
-// initializing, 503 while initialization is still in progress.
+// initialising, 503 while initialisation is still in progress.
+//
+// Deliberately not the readiness check. A pod held unready for its upstream
+// CRLs must stay running and keep fetching: a startup probe that failed with
+// it would have the kubelet restart the container in a loop, and every
+// restart would start the wait again.
 func (s *Server) handleStartup(w http.ResponseWriter, r *http.Request) {
-	s.handleReady(w, r)
+	if !s.CA.IsReady() {
+		writeNotReady(w, "")
+		return
+	}
+	writeOK(w)
+}
+
+func writeOK(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
+}
+
+func writeNotReady(w http.ResponseWriter, reason string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	json.NewEncoder(w).Encode(healthResponse{Status: "not_ready", Reason: reason})
 }

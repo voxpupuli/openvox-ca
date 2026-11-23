@@ -25,7 +25,7 @@ import (
 	"github.com/voxpupuli/openvox-ca/internal/ca"
 )
 
-// runCRLChainRefresher re-reads crl_chain_file and rewrites the published CRL
+// runCRLChainRefresher re-reads crl_chain.file and rewrites the published CRL
 // when the upstream CRLs it names have changed.
 //
 // The file is the operator's declarative statement of which ancestor CRLs to

@@ -179,11 +179,17 @@ crl_refresh_before_sec: 0      # re-sign when remaining validity < this; 0 = crl
 # effect here. Read-only, runs on every replica, and is not covered by
 # disable_crl_refresh. See "Revocation across replicas" below.
 crl_sync_interval_sec: 0       # how often to reload; 0 = built-in default (60s)
-# A PEM bundle of upstream CRLs published alongside this CA's own, for agents
-# doing full-chain revocation checking. Verified against the stored CA bundle,
-# and re-read by the crl-chain-refresh background job.
-crl_chain_file: ""
-crl_chain_refresh_interval_sec: 0  # how often to re-read it; 0 = built-in default (1h)
+# Upstream CRLs published alongside this CA's own, for agents doing full-chain
+# revocation checking. Either fetched by openvox-ca from urls (http://,
+# https:// or file:///, one CRL each), or read from a PEM bundle in file that
+# something else keeps current; not both. Every CRL is verified against the
+# stored CA bundle. See "Publishing an upstream CRL chain" below.
+crl_chain:
+  urls: []
+  file: ""
+  refresh_interval_sec: 0  # how often to fetch or re-read; 0 = built-in default (1h); at most 30 days
+  fetch_timeout_sec: 0     # per urls entry; 0 = built-in default (30s); at most 600
+  http_config: {}          # client for http(s) urls; see "Outbound HTTP" below
 # Background OCSP index sync reloads the inventory into the serial index this
 # replica's OCSP responder answers from, so a certificate signed on another
 # replica stops being reported as "unknown". Read-only; runs only while
@@ -353,8 +359,10 @@ A database password needs the same care. Give it in `--sql-dsn-file`,
 | `crl_refresh_interval_sec` | `OPENVOX_CA_CRL_REFRESH_INTERVAL_SEC` |
 | `crl_refresh_before_sec` | `OPENVOX_CA_CRL_REFRESH_BEFORE_SEC` |
 | `crl_sync_interval_sec` | `OPENVOX_CA_CRL_SYNC_INTERVAL_SEC` |
-| `crl_chain_file` | `OPENVOX_CA_CRL_CHAIN_FILE` |
-| `crl_chain_refresh_interval_sec` | `OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC` |
+| `crl_chain.file` | `OPENVOX_CA_CRL_CHAIN_FILE` |
+| `crl_chain.refresh_interval_sec` | `OPENVOX_CA_CRL_CHAIN_REFRESH_INTERVAL_SEC` |
+| `crl_chain.urls` | `OPENVOX_CA_CRL_CHAIN_URLS` (comma-separated) |
+| `crl_chain.fetch_timeout_sec` | `OPENVOX_CA_CRL_CHAIN_FETCH_TIMEOUT_SEC` |
 | `ocsp_index_sync_interval_sec` | `OPENVOX_CA_OCSP_INDEX_SYNC_INTERVAL_SEC` |
 | `inventory_verify_interval_sec` | `OPENVOX_CA_INVENTORY_VERIFY_INTERVAL_SEC` |
 | `enable_expired_cert_cleanup` | `OPENVOX_CA_ENABLE_EXPIRED_CERT_CLEANUP` |
@@ -715,34 +723,250 @@ repaired.
 
 When openvox-ca runs as an intermediate, agents doing full-chain revocation
 checking — Puppet's default `certificate_revocation = chain` — need the
-ancestors' CRLs as well as this CA's own. `crl_chain_file` is how they get
-there:
+ancestors' CRLs as well as this CA's own. openvox-ca publishes them alongside
+its own CRL at `GET /puppet-ca/v1/certificate_revocation_list/ca`, from one of
+two sources in the `crl_chain` block:
+
+- **`crl_chain.urls`**: openvox-ca fetches each ancestor's CRL itself, over
+  HTTP(S) or from a local file, on a timer. Prefer this: no sidecar, no
+  ordering to arrange at startup, and an upstream that is down can never block
+  a revocation or shrink the chain. See [fetching upstream
+  CRLs](#fetching-upstream-crls).
+- **`crl_chain.file`**: a PEM bundle that something else keeps current, which
+  openvox-ca re-reads. See [publishing from a file](#publishing-from-a-file).
+
+Setting both refuses startup. Either way, every CRL is signature-verified
+against a certificate in the stored CA bundle before it is published, so the
+bundle has to hold every ancestor whose CRL you publish. The bundle is also what
+every agent trusts, so read [the bundle note in the operator CLI
+guide](operator-cli.md#offline-subcommands-on-the-server-binary) before adding
+an ancestor to it.
+
+### Fetching upstream CRLs
 
 ```yaml
-crl_chain_file: /etc/openvox-ca/upstream-crls.pem
+crl_chain:
+  urls:
+    - https://openbao-active.openbao.svc:8200/v1/pki-root/issuer/root/crl/pem
+    - http://pki.example.com/sub-ca.crl
+    - file:///etc/openvox-ca/upstream/other-ca.crl
+  refresh_interval_sec: 3600   # the default
+  fetch_timeout_sec: 30        # the default, per entry
+  http_config:                 # for every http(s) entry; see "Outbound HTTP"
+    tls_config:
+      ca_file: /etc/openvox-ca/openbao-ca.pem
+```
+
+Each entry is **one ancestor's CRL**: `http://`, `https://`, or `file:///`
+followed by an absolute path. DER, which is what a CRL distribution point
+serves, and PEM are both accepted, but an entry must hold exactly one CRL. At
+most 64 entries. The same list can be set as `OPENVOX_CA_CRL_CHAIN_URLS`,
+comma-separated.
+
+An entry carrying credentials (`https://user:pass@…`, a token as the username,
+or user information on a `file://` entry) is refused at startup, and the
+refusal does not quote it.
+CRLs are public, and the URL appears in the fetch metrics and in the logs, so
+it must carry nothing secret, query string included. Credentials go in
+[`http_config`](#outbound-http-http_config), read from a file — and since there
+is one `http_config` for the whole list, they are sent to **every** http(s)
+entry, not only the upstream that asks for them. So they are refused at startup
+if any entry is plain `http://`, which would carry them in clear text.
+
+Every replica fetches every entry once at startup and then every
+`refresh_interval_sec`, and merges what it gets into the stored chain under the
+CRL lock: whichever replica gets there first publishes, and the rest find
+nothing to do. After a round in which any entry failed, the next comes sooner:
+after 30 seconds, doubling, up to the interval. A round whose merge itself
+failed — the CRL lock, or storage, rather than an upstream — waits the full
+interval instead, so a backend restart counts once in
+`openvoxca_crl_update_failures_total` rather than several times (see
+[storage-retry alerts](metrics.md#storage-retry-alerts)); a fresh store held
+unready keeps that backoff. The published chain's upstream CRLs are held to
+4 MiB in total as PEM, the form they are published in, as `crl_chain.file` is.
+A single CRL over 4 MiB as PEM fails its own entry, even when it arrives as a
+smaller DER response; a round whose CRLs would together exceed the bound is
+refused as a whole — every entry that would otherwise have succeeded fails,
+one already current included — and the chain is kept as it was. The
+interval is what bounds how
+long an upstream revocation takes to reach agents, so choose it for that rather
+than from the CRLs' lifetime. An upstream publishes a new CRL as soon as it
+revokes something, not on its CRL's schedule.
+
+**Moving from `crl_chain.file` to `urls`, choose the interval again.** With a
+file, `refresh_interval_sec` set only how often the CA re-read it; whatever
+wrote the file fetched on its own schedule. With `urls` the same setting is the
+fetch interval: every replica fetches every entry that often. A value chosen
+for re-reading a file, such as 900 seconds beside an hourly fetcher, therefore
+quadruples the fetches. It also moves `OpenVoxCACRLUpdateFailing` closer: a
+failed merge counts once per round, so a storage outage reaches that alert's
+default threshold of two once it outlasts about one interval.
+
+**The mixin's fetch alerts are sized for the default interval of an hour.**
+The mixin cannot see this setting, so above an hour widen two of its knobs to
+match, or the alerts misbehave: `crlChainFetchWindow` to at least
+(`crlChainFetchFailureThreshold` + 1) × the interval, or
+`OpenVoxCAUpstreamCRLFetchFailing` fires at the start of a fault but cannot
+hold, flapping or resolving while the fault persists; and
+`crlChainFetchStaleSeconds` to at least twice the interval, or
+`OpenVoxCAUpstreamCRLFetchStale` fires on a single failed round (at the default
+3 hours, once the interval passes about 97 minutes), and between healthy rounds
+once the interval passes the threshold plus the rule's 15-minute `for:` (about
+3h15m). See
+[the mixin's thresholds](../mixin/README.md#configurable-thresholds).
+
+**Readiness waits only on a store with no upstream CRL at all.** That is, in
+practice, a fresh store: `/healthz/ready` answers `503` until a fetch round
+stores an upstream CRL, so a new pod stays out of the Service rather than
+handing agents a chain with an ancestor missing, which they reject. On a store
+that already holds one, the server is ready at once and fetches in the
+background — even when every stored upstream CRL has expired, because a pod that
+is already running stays ready in that state, and a restart (a node drain, a
+chart upgrade) must not take a degraded CA out of its Service until the upstream
+recovers. A lapsed chain is what the expiry and fetch alerts report. The hold is
+decided once, at startup, and released by the first round that stores an
+upstream CRL, an expired one that is still the newest available included. A
+stored chain that cannot be *read* at startup counts as empty and is held, with
+a `WARN` line naming the cause; the first round to store a CRL releases it once
+storage answers again. One that reads but cannot be *decoded* — or holds no CRL
+at all, not even this CA's own — is not held, with a `WARN` line saying so:
+every merge fails on it until it is repaired, so no round could release a hold,
+and a pod already running when it broke stays ready too. Those failing merges
+are what report it, through `OpenVoxCACRLUpdateFailing`. `/healthz/startup` does
+not wait, so a held pod keeps running and retrying rather than being restarted.
+Its retries back off, up to `refresh_interval_sec`, so after fixing what blocked
+it — an egress rule, a CA bundle — either wait for the next round or restart the
+pod; it does not notice the fix sooner. Once ready, a failing fetch never makes
+it unready again: a stale chain is better than no CA, and the fetch metrics
+below are what report it.
+
+**Check every URL after switching to `crl_chain.urls`.** On a store that
+already holds a chain — the usual switch from `crl_chain.file` — the pod is
+ready whether or not the new list works, so a typo, a wrong issuer path or a
+TLS failure looks healthy. Confirm that
+`openvoxca_crl_chain_fetch_last_success_timestamp_seconds{url}` is non-zero for
+every entry; `OpenVoxCAUpstreamCRLNeverFetched` fires after 15 minutes if one
+is not.
+
+**A fetch never blocks revocation.** Between rounds, revoking a certificate
+carries the stored ancestor CRLs forward unchanged, so an unreachable upstream
+cannot fail a revocation the way an unreadable `crl_chain.file` does. Nor does
+a round's merge hold one up: it takes the CRL lock only after the fetch, as a
+background job that stands aside for a revocation waiting for the lock (see
+[locking](development/locking.md#revocations-go-before-background-work)).
+
+What each entry's result does:
+
+| The entry yields | What is published for that ancestor | The entry counts as |
+| --- | --- | --- |
+| a CRL newer than the published one | the new CRL | success |
+| the CRL already published | unchanged | success |
+| an older CRL | the published one, unchanged | failure; also `openvoxca_crl_chain_regressed_total` |
+| a CRL no certificate in the CA bundle signed | nothing from this entry | failure; also `openvoxca_crl_chain_discarded_total` |
+| a delta CRL, or one with an issuing distribution point | the published one, unchanged: such a CRL is genuinely signed but is not its issuer's full list, so it cannot stand in for one — which is what keeps an attacker on a plain `http://` entry to withholding, as they cannot substitute a partial list | failure; also `openvoxca_crl_chain_discarded_total` |
+| an expired CRL | the CRL, if it is newer than the published one, since it is still better than what agents hold | failure |
+| this CA's own CRL | nothing: this CA's own is rebuilt from the inventory, and the entry is otherwise ignored, though the round may then not remove an ancestor | failure |
+| no CRL: a connection or TLS failure, an HTTP status other than 200, a body that is not exactly one CRL, more than 4 MiB as received, a CRL over 4 MiB as PEM, or no answer within `fetch_timeout_sec` | unchanged | failure |
+
+So a success is a **usable, current** CRL. A response that arrives with a 200
+and holds anything else — an error page, a CRL the bundle cannot verify, a stale
+mirror's — is a failure for that entry: it is counted by
+`openvoxca_crl_chain_fetch_failures_total{url}` and logged at `WARN` with the
+reason, and `openvoxca_crl_chain_fetch_last_success_timestamp_seconds{url}`
+advances only on success. Those are what to alert on: the expiry warning can
+stay silent for days after fetching stops, depending on the upstream CRL's
+lifetime. See [the metrics reference](metrics.md#upstream-crl-chain).
+
+**Only an authoritative round removes an ancestor.** A round is authoritative
+when all four of these hold:
+
+1. **Complete:** every entry yielded its issuer's full CRL, signed by a
+   certificate in the CA bundle, so the round knows which ancestors the list
+   covers. An entry serving a delta or IDP-scoped CRL names no ancestor, so it
+   leaves the round incomplete. An entry serving this CA's own CRL is ignored
+   here, but see rule 3.
+2. **Authenticated:** every entry was fetched over `https://` or read from a
+   `file:///` path. Nothing ties an entry to the ancestor it is meant to serve,
+   so over plain `http://` an attacker on the path could answer one entry with
+   another ancestor's CRL — public, and so perfectly valid — and have the real
+   ancestor dropped. Once dropped, there is nothing published to compare a
+   later CRL against, and an older one from before a revocation could be
+   published as though the ancestor were new.
+3. **No entry served this CA's own CRL.** Such an entry is a misconfiguration
+   and fails, but is ignored for completeness so that it does not leave every
+   round partial. It still may not let a round remove: this CA's CRL is public,
+   so whoever controls an entry's origin could serve it in place of the
+   ancestor's and have that ancestor dropped, with the consequence rule 2
+   describes.
+4. **Unambiguous:** no two entries named the same ancestor. Two that do may be
+   mirrors, or one may be pointed at the wrong CA; either way the round cannot
+   tell which ancestors the list meant.
+
+These rules defend against an attacker on the path, not against a compromised
+upstream. An authoritative round trusts each `https://` origin and each
+`file:///` path to serve the ancestor its entry is meant for: one that served
+the CRL of another certificate in the CA bundle that no entry serves — genuine,
+and naming an ancestor the round does not otherwise cover — would still
+complete the round without its own ancestor, and have that ancestor dropped.
+Keep the CA bundle to the ancestors the list serves, and watch
+`OpenVoxCAUpstreamCRLRemoved`, which fires on any removal.
+
+A published ancestor that no entry in an authoritative round served is then
+dropped, and counted by `openvoxca_crl_chain_removed_total`: removing an entry
+from the list is how you stop publishing an ancestor. That includes ancestors
+brought in by `openvox-ca-ctl import --crl-chain`, since once `urls` is set the
+list says which ancestors to publish. Any other round only updates: an upstream
+that is down, a URL serving an error page, or a list with an `http://` entry in
+it can never shrink the chain. To retire an ancestor from such a list, remove
+its entry and then make one round authoritative: for one rollout, replace each
+remaining `http://` entry with a `file:///` entry holding a copy of the same CRL
+(downloaded once, by hand), then put the `http://` entries back once a round has
+run — the first runs at startup. Re-importing the chain without the ancestor
+(`openvox-ca-ctl import --crl-chain`) does the same, but only where that command
+works: the filesystem backend, a CA key on disk, and the CA stopped. While a
+rolling update adds or removes an entry, replicas on the old and new lists can
+disagree for a round or two.
+
+Two entries that serve the same ancestor are allowed, as mirrors: the newer CRL
+is used, and the one that lags still succeeds if it is as new as the CRL already
+published, or counts as a regression if it is older. A list with mirrors never
+removes an ancestor, by rule 4. The same URL listed twice is refused at startup.
+
+`file:///` entries are read by openvox-ca itself, never through the HTTP client,
+so no redirect can reach the filesystem. Each is bounded by `fetch_timeout_sec`
+and the same 4 MiB as a response. Unlike `crl_chain.file`, a file that is
+missing, empty or caught mid-write is simply a failed entry: nothing is removed
+and nothing is blocked, so it needs none of the care that
+[ordering the writer](#order-the-writer-before-the-server) and
+[each failure to read the file](#what-each-failure-to-read-the-file-does)
+describe for `crl_chain.file`.
+
+### Publishing from a file
+
+```yaml
+crl_chain:
+  file: /etc/openvox-ca/upstream-crls.pem
 ```
 
 It is a PEM bundle of upstream CRLs, re-read by the `crl-chain-refresh`
-background job (`crl_chain_refresh_interval_sec`, 1 hour by default) and on
-every CRL amendment, and
-published alongside this CA's own CRL at
-`GET /puppet-ca/v1/certificate_revocation_list/ca`. The file is **declarative**:
+background job (`crl_chain.refresh_interval_sec`, 1 hour by default) and on
+every CRL amendment. The file is **declarative**:
 whatever it contains is what gets published, so a CRL removed from it disappears
 from the served chain. Refresh it by whatever mechanism you already have — a
 mounted Secret, a sidecar, a CronJob — and openvox-ca picks the change up.
 Getting the file there in the *first* place carries an ordering requirement,
 which is what the next section is about.
 
-### Order the writer before the server
+#### Order the writer before the server
 
-**Whatever populates `crl_chain_file` must be ordered before the server starts,
+**Whatever populates `crl_chain.file` must be ordered before the server starts,
 not merely started alongside it.**
 
 The refresh job runs a pass immediately rather than waiting out its first tick,
 so a file already in place is picked up at startup. A file that is not there
 *yet* is not an error — an absent file is no statement, as below — so the CA
 starts, publishes its own CRL alone, and does not look again until
-`crl_chain_refresh_interval_sec` elapses. For that whole interval every agent on
+`crl_chain.refresh_interval_sec` elapses. For that whole interval every agent on
 the default `certificate_revocation = chain` rejects the CRL it is served.
 
 This is the ordinary shape of the deployment rather than an unusual one: where
@@ -765,7 +989,10 @@ Nothing rescues that window:
   produces. Nor does the scheduled re-sign of this CA's own CRL, which runs only
   as that CRL nears expiry, and a CA that has just started has just signed one.
 
-So gate the server on the file rather than leaving it to the timer. In
+If the writer would be fetching the CRLs over HTTP, use
+[`crl_chain.urls`](#fetching-upstream-crls) instead, which has no such window:
+the CA holds readiness itself on a store with no upstream CRL. Otherwise, gate
+the server on the file rather than leaving it to the timer. In
 Kubernetes that is a native sidecar: run whatever writes the file as an
 `initContainer` with `restartPolicy: Always`, and give *that container* a
 `startupProbe` which does not succeed until the file is non-empty. A native
@@ -778,14 +1005,15 @@ The published chart has no dedicated support for this: it exposes
 `initContainers`, `extraContainers`, `extraVolumes` and `extraVolumeMounts` as
 generic escape hatches, and the sidecar above is assembled from those rather
 than configured by a value of its own — see [trust and revocation across
-CAs](helm-chart.md#trust-and-revocation-across-cas), which works the sidecar
-above through as chart values.
+CAs](helm-chart.md#trust-and-revocation-across-cas), which describes gating on
+the file in chart terms and recommends `crl_chain.urls` for a writer that would
+fetch over HTTP.
 
 Probe for a **non-empty** file, not merely an existing one: a zero-byte file is
 a deliberate statement here (see the table below), so a probe testing only for
 existence passes on exactly the case that publishes no ancestors at all.
 
-### What each failure to read the file does
+#### What each failure to read the file does
 
 Being declarative cuts both ways, so these distinctions matter more than they
 look:
@@ -798,6 +1026,7 @@ look:
 | **truncated, or not a CRL bundle** | the chain already published, unchanged | Refused, not read as an empty declaration. A file that does not end on a PEM block boundary, or that decodes to no CRL at all — a block cut mid-write, DER, a certificate bundle, an HTML error page — is a read that failed, not the operator asking for an empty chain. Only an empty file means that. Leading and interleaved commentary is fine; see below. |
 | **carrying a CRL older than the one published** | the newer, already-published CRL for that ancestor; everything else from the file | Not a failure and **not** a block on revocation: the published chain is correct, so the older CRL is simply passed over and counted by `openvoxca_crl_chain_regressed_total`. |
 | **present but unreadable** (permissions, or a directory mounted at the path) | the chain already published, unchanged | The refresh fails and is counted, and revocation is blocked as for **unparseable**. A Secret projected `0400` root-owned against an unprivileged container is the usual cause. |
+| **carrying a delta CRL, or one with an issuing distribution point** | everything else from the file | That CRL is discarded, counted in `openvoxca_crl_chain_discarded_total` and logged at `WARN`: it is not its issuer's full list, and published in its place it would un-revoke what it leaves out. The file is authoritative, so if it holds no full CRL for that ancestor, the ancestor drops out of the chain. |
 | **larger than 4 MiB** | the chain already published, unchanged | Refused rather than truncated: a half-read PEM blob would silently drop CRLs. A real chain is a handful of CRLs. |
 | **holding more than 64 CRLs** | the chain already published, unchanged | Refused. The byte bound does not cover this: one ancestor with a long revocation list is legitimately large, while many small CRLs are what cost, since each one's signer is resolved by trial verification against the whole CA bundle while the CRL lock is held. A chain is one CRL per ancestor, so more than a couple of dozen means a directory concatenated by accident or a file appended to instead of replaced. |
 
@@ -853,7 +1082,7 @@ No metric distinguishes that from a healthy file:
 `openvoxca_crl_chain_last_read_timestamp_seconds` advances on every read either
 way, because the read genuinely succeeds — it is the content that is frozen.
 What catches it is the consequence — `OpenVoxCAUpstreamCRLExpiringSoon` firing on a CA that
-*has* `crl_chain_file` configured is the `subPath` signature.
+*has* `crl_chain.file` configured is the `subPath` signature.
 `openvoxca_crl_chain_last_read_timestamp_seconds` does detect the different case
 of a file never opened at all: it reads `0`, and `OpenVoxCAUpstreamCRLNeverRead`
 alerts on it.
@@ -934,6 +1163,77 @@ left the CA bundle, so its published CRL can no longer be attributed to anyone
 (re-import the bundle). A fifth series,
 `openvoxca_crl_chain_last_read_timestamp_seconds`, reads `0` where the file is
 configured but has never been opened.
+
+## Outbound HTTP (`http_config`)
+
+Features that fetch from URLs you configure take an `http_config` block to
+configure the client: today that is
+[`crl_chain.http_config`](#fetching-upstream-crls). Every feature that gains
+one takes the same block, and gets the same client and the same rules. The
+OpenBao key provider predates the block and keeps its own `openbao.*` TLS
+settings; nothing here applies to it.
+
+```yaml
+http_config:
+  tls_config:
+    ca_file: /etc/openvox-ca/upstream-ca.pem   # replaces the system roots
+    # cert_file: /etc/openvox-ca/client.pem    # a client certificate, with key_file
+    # key_file: /etc/openvox-ca/client.key
+    # server_name: pki.example.com
+    # min_version: TLS13                       # TLS12 (default) or TLS13
+  follow_redirects: true                       # at most 5; never https to http
+  enable_http2: true
+  proxy_from_environment: true                 # HTTP_PROXY / HTTPS_PROXY / NO_PROXY
+  # proxy_url: http://proxy.example.com:3128   # instead of the environment
+  # no_proxy: .svc,10.0.0.0/8                  # with proxy_url only
+  # basic_auth:
+  #   username: openvox-ca
+  #   password_file: /etc/openvox-ca/upstream-password
+  # authorization:                             # or this, not both
+  #   type: Bearer
+  #   credentials_file: /etc/openvox-ca/upstream-token
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `tls_config.ca_file` | the system roots | A PEM bundle of the CAs that may sign an upstream's certificate. It **replaces** the system roots rather than adding to them. Read at the start of each fetch round, so a rotated bundle is picked up at the next one. |
+| `tls_config.cert_file`, `tls_config.key_file` | none | A client certificate, for an upstream that asks for one. Both or neither. Re-read on each new connection, so a renewed certificate needs no restart. |
+| `tls_config.server_name` | the URL's host | The name the upstream's certificate is checked against, and the SNI sent. |
+| `tls_config.min_version` | `TLS12` | `TLS12` or `TLS13`. |
+| `follow_redirects` | `true` | Whether to follow a redirect. At most 5 are followed, and **never** one from `https` to `http`, whatever this says. |
+| `enable_http2` | `true` | Whether HTTP/2 may be negotiated. |
+| `proxy_from_environment` | `true`, or `false` when `proxy_url` is set | Take the proxy from `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (or their lower-case forms). Read at the start of each round. |
+| `proxy_url` | none | Send every request through this `http`, `https` or `socks5` proxy. It must not carry credentials. Cannot be combined with `proxy_from_environment: true`. |
+| `no_proxy` | none | Hosts, domains and CIDRs that bypass `proxy_url`, in `NO_PROXY` syntax. Needs `proxy_url`; with the environment, set `NO_PROXY`. |
+| `basic_auth.username`, `basic_auth.password_file` | none | HTTP basic authentication. The password is read from the file on every request. |
+| `authorization.type`, `authorization.credentials_file` | `Bearer` | An `Authorization: <type> <credentials>` header, the credentials read from the file on every request. Not `Basic`; use `basic_auth`. |
+
+Credentials go on every request the block's client makes — for
+`crl_chain.http_config`, to every http(s) entry in the list, which is why
+`crl_chain` refuses them beside a plain `http://` entry. On a redirect they
+follow only to the same host or a subdomain of it, and are dropped anywhere
+else, as net/http does. A credentials file is trimmed of surrounding
+whitespace, so a trailing newline does not matter, but it must hold a single
+line. Every file the block names is read with a time limit, so a mount that has
+hung fails the request, or the round, rather than wedging the fetch job.
+
+The block has no environment variables: it is YAML only.
+
+### Differences from Prometheus
+
+The block is modelled on Prometheus's
+[`<http_config>`](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#http_config),
+and its keys mean the same things there. It is a subset, with these
+differences:
+
+| Prometheus | openvox-ca |
+| --- | --- |
+| `proxy_from_environment` defaults to `false` | Defaults to **`true`** (unless `proxy_url` is set). A block copied from Prometheus therefore starts using `HTTP_PROXY` / `HTTPS_PROXY` where it did not before; on a cluster with an egress proxy or a mesh, set `proxy_from_environment: false` to keep the requests direct. |
+| `follow_redirects` follows up to 10 redirects, `https` to `http` included | At most 5, and never from `https` to `http`. |
+| Inline `basic_auth.password`, `authorization.credentials` and `bearer_token` | Not accepted: credentials come from files only (`password_file`, `credentials_file`). The configuration is often a Kubernetes ConfigMap, which is no place for a secret. |
+| `tls_config.min_version` accepts `TLS10` and `TLS11` | `TLS12` or `TLS13` only. |
+| `bearer_token_file` | Not supported: use `authorization.credentials_file`, which sends the same `Bearer` header. |
+| `oauth2`, `http_headers`, `proxy_connect_header`, `basic_auth.username_file`, inline `tls_config.ca` / `cert` / `key`, `tls_config.insecure_skip_verify`, `tls_config.max_version` | Not supported. |
 
 ## Serving OCSP
 
@@ -1816,12 +2116,13 @@ the certificates can undo. The server refuses to start when a `cert`, `key` or
 | `serving_cert.store.files.cert`, `.key` | the pair the CA issues for its own listener, when it self-provisions into files. Reserved only while `serving_cert` uses a file store. Its `ca` chain file is deliberately **not** reserved, for the same reason two managed entries may share one: every entry writes the same chain from the same source and none reads it back, so a shared chain file is the ordinary shared-host layout. Sharing it with a `managed_certs` entry's own `ca` is allowed; pointing it at that entry's `cert` or `key` is refused at startup, because the chain would overwrite the component's material on every issuance |
 | `ca_key_passphrase_file` | what unlocks the CA key |
 | `sql_dsn_file` | the file holding the database DSN, password included, without which the CA cannot open its store at the next start |
-| `crl_chain_file` | the upstream CRL bundle the CA re-reads and republishes |
+| `crl_chain.file` | the upstream CRL bundle the CA re-reads and republishes |
+| each `file:///` entry in `crl_chain.urls`, as `crl_chain.urls[N]` | an upstream CRL the CA reads and republishes |
 | `logfile` | where the CA writes its log |
 | `puppet_server_file` | the admin allow list |
 | `autosign_config` | the autosign file or executable |
 | `client_ca[].file`, `client_ca[].crl_file` | each foreign trust domain's anchors and CRLs, named after its entry |
-| `etcd_tls_ca_file`, `redis_tls_ca_file`, `sql_tls_ca_file`, `openbao.tls_ca_file` | each backend or key-provider connection's trust anchor. Reserved for a different reason from the rest of this table: a certificate written over one of these is *trusted as an issuer*, so from then on any certificate this CA signs for the backend's hostname is accepted for it. The connection keeps working, which is what makes it worth refusing |
+| `etcd_tls_ca_file`, `redis_tls_ca_file`, `sql_tls_ca_file`, `openbao.tls_ca_file`, `crl_chain.http_config.tls_config.ca_file` | each backend, key-provider or upstream-fetch connection's trust anchor. Reserved for a different reason from the rest of this table: a certificate written over one of these is *trusted as an issuer*, so from then on any certificate this CA signs for that connection's host is accepted for it. The connection keeps working, which is what makes it worth refusing |
 | `sql_dsn` | the SQLite database — the inventory, the signed certificates and the CRL — when `storage_backend: sqlite`. A server-backed dialect names no file, and neither does an in-memory database, so neither is reserved |
 | the `--config` file | the configuration the server was started with, which a store writing over would not break until the next restart |
 
@@ -1835,12 +2136,15 @@ and can reach anything that user can; the list above is the material that cannot
 be replaced if it is overwritten.
 
 What it deliberately does not cover is the *replaceable* credentials: the client
-TLS material a storage backend or key provider presents (`etcd_tls_cert_file`,
-`etcd_tls_key_file`, and the `redis_tls_`, `sql_tls_` and `openbao.tls_`
-equivalents), and `openbao.token_file`, `openbao.approle_role_id_file` and
-`openbao.approle_secret_id_file`.
-Overwriting one of those breaks this CA's connection to its own backend, which
-is loud and fixable by re-copying the file from wherever it was provisioned —
+TLS material a storage backend, key provider or upstream fetch presents (`etcd_tls_cert_file`,
+`etcd_tls_key_file`, and the `redis_tls_`, `sql_tls_`, `openbao.tls_` and
+`crl_chain.http_config.tls_config.` equivalents), `openbao.token_file`,
+`openbao.approle_role_id_file` and `openbao.approle_secret_id_file`, and the
+upstream-fetch credentials `crl_chain.http_config.basic_auth.password_file` and
+`crl_chain.http_config.authorization.credentials_file`.
+Overwriting one of those breaks a connection, which is loud — the upstream
+fetch credentials are re-read on every request and fail per URL, in the fetch
+metrics — and fixable by re-copying the file from wherever it was provisioned —
 a different class from the CA key, which is not reconstructible from anything.
 
 Note where that line falls, because it is not the `*_tls_*` prefix: the
@@ -2498,7 +2802,7 @@ of that issuer, and the first symptom is otherwise an agent-side 403.
 > authorisation middleware, and never served.
 
 Under Kubernetes the anchor and its CRL are a mounted Secret and the entry is
-`config.client_ca`, with the same rule against `subPath` that `crl_chain_file`
+`config.client_ca`, with the same rule against `subPath` that `crl_chain.file`
 carries, and one further consequence: anchors are read only at startup, so
 editing that Secret in place changes nothing until the pods roll. See [trust and
 revocation across CAs](helm-chart.md#trust-and-revocation-across-cas).

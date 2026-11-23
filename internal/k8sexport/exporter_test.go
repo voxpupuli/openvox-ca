@@ -653,7 +653,7 @@ var _ = Describe("Export scopes", func() {
 		// The reason the default is not "self": a target that names no scope
 		// gets the stored blob verbatim. A narrow default would drop every
 		// intermediate from a consumer's trust bundle and every ancestor
-		// block from a CRL blob -- the material crl_chain_file exists to
+		// block from a CRL blob -- the material crl_chain exists to
 		// distribute -- with no configuration choosing it and no error to
 		// catch, since a scoped-down value is not empty.
 		data := exportWith("", "")
