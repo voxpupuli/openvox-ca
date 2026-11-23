@@ -103,8 +103,9 @@ commands and what each of them proves.
 ## One-time repository setup (for the repository owner)
 
 These steps must be performed once by someone with admin access to the upstream
-repository. Until then, release/manual builds will fail at the push step and PR
-validation builds will still work (they don't push).
+repository. Until then, every build that pushes (a release, a push to `main`, a
+same-repo PR, and a manual run with **push** ticked) will fail at the push step;
+fork PR builds still work, since they do not push.
 
 1. **Allow Actions to publish packages.**
    Settings → Actions → General → *Workflow permissions*. The build and merge
