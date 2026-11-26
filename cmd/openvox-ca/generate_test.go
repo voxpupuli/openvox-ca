@@ -689,7 +689,7 @@ var _ = Describe("openvox-ca generate", func() {
 			// on a running server, and a superseded serial may not be
 			// revocable at all.
 			Expect(stderr).To(ContainSubstring("openvox-ca-ctl revoke --certname admin"))
-			Expect(stderr).To(ContainSubstring("restart every replica"))
+			Expect(stderr).To(ContainSubstring("wait for every replica to reload the CRL"))
 			Expect(stderr).To(ContainSubstring("other live serials"))
 
 			// Every configuration key this procedure names must be one the
@@ -698,7 +698,7 @@ var _ = Describe("openvox-ca generate", func() {
 			// once left this string naming a crl_validity key that does not
 			// exist, in the withdrawal instructions for the most privileged
 			// credential the CA issues.
-			Expect(stderr).To(ContainSubstring("crl_validity_days"))
+			Expect(stderr).To(ContainSubstring("crl_sync_interval_sec"))
 			Expect(stderr).To(ContainSubstring("revoke_on_auto_renew"))
 		})
 
@@ -806,9 +806,12 @@ var _ = Describe("openvox-ca generate", func() {
 				"ca_key_algo: ecdsa\nca_key_size: 256\nlogfile: "+logPath+"\n"), 0o644)).To(Succeed())
 			setEnv(configEnvVar, cfgPath)
 
-			_, _, err := runGenerate("--cadir", caDir, "--certname", "admin",
+			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "admin",
 				"--ttl", "8760h", "--pp-cli-auth", "--key-out", keyPath("admin"))
 			Expect(err).NotTo(HaveOccurred())
+			// The terminal says where the record went, so an operator knows
+			// which file to keep.
+			Expect(stderr).To(ContainSubstring("Log file: " + logPath + "\n"))
 
 			logged, err := os.ReadFile(logPath)
 			Expect(err).NotTo(HaveOccurred())
@@ -849,6 +852,7 @@ var _ = Describe("openvox-ca generate", func() {
 			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "web01",
 				"--ttl", "8760h", "--key-out", keyPath("web01"))
 			Expect(err).NotTo(HaveOccurred(), "a logging problem must not stop an operator issuing")
+			Expect(stderr).To(ContainSubstring("Log file: " + logPath + " is not present"))
 			Expect(stderr).To(ContainSubstring("will not be created"))
 			Expect(logPath).NotTo(BeAnExistingFile())
 		})
@@ -865,6 +869,17 @@ var _ = Describe("openvox-ca generate", func() {
 				"--ttl", "8760h", "--pp-cli-auth", "--key-out", keyPath("admin"))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stderr).To(ContainSubstring("the audit record for this mint is terminal-only"))
+		})
+
+		It("does not tell a plain mint it has an audit record", func() {
+			// Only a --pp-cli-auth mint emits certificate.auth_grant_issued, so
+			// naming an audit record for any other mint points an operator at
+			// a record that does not exist.
+			_, stderr, err := runGenerate("--cadir", caDir, "--certname", "web01",
+				"--ttl", "8760h", "--key-out", keyPath("web01"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stderr).To(ContainSubstring("any log record of this mint is terminal-only"))
+			Expect(stderr).NotTo(ContainSubstring("audit record"))
 		})
 
 		It("falls back to stderr when the configured logfile cannot be opened", func() {
@@ -893,7 +908,7 @@ var _ = Describe("openvox-ca generate", func() {
 					"--ttl", "8760h", "--key-out", keyPath("web01"))
 			}, func() {})
 			Expect(err).NotTo(HaveOccurred(), "a logging problem must not stop an operator issuing")
-			Expect(stderr).To(ContainSubstring("could not open"))
+			Expect(stderr).To(ContainSubstring("Log file: could not open " + logPath))
 			Expect(stderr).To(ContainSubstring("logging to stderr instead"))
 
 			// The fallback records are labelled like the logfile's would be:

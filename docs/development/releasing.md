@@ -815,7 +815,9 @@ means a later `git fetch --tags` from the fork pollutes your local tag list.
 ## Known gaps
 
 These are current limitations of the release machinery rather than things you
-can work around at release time. Some are worth closing before 1.0; others are
+can work around at release time. Some are tracked for a later release
+([#256](https://github.com/voxpupuli/openvox-ca/issues/256),
+[#257](https://github.com/voxpupuli/openvox-ca/issues/257)); others are
 accepted trade-offs, recorded here so that the limitation is not a surprise
 rather than because anyone intends to fix them. (Two entries that stood here
 previously — unsigned artefacts, and tag builds restoring Go caches saved on

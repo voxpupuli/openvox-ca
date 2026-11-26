@@ -66,8 +66,8 @@ import (
 // -- Namespaces ----------------------------------------------------------------
 
 type Build mg.Namespace   // build:all  build:fips  build:dist  build:distVariant  build:unit  build:packages
-type Test mg.Namespace    // test:unit  test:magefile  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:puppet  test:puppetfips  test:migration  test:backendsRedis  test:backendsEtcd
-type Dev mg.Namespace     // dev:check  dev:vulncheck  dev:tidy  dev:clean  dev:container
+type Test mg.Namespace    // test:unit  test:magefile  test:mixin  test:integcompose  test:integcomposefips  test:loadcompose  test:bench  test:failureLogHelpers  test:fixtureCommands  test:puppet  test:puppetfips  test:migrationHelpers  test:migration  test:backendsRedis  test:backendsRedisGo  test:backendsPostgres  test:backendsMySQL  test:backendsOpenBao  test:backendsEtcd
+type Dev mg.Namespace     // dev:check  dev:lint  dev:vulncheck  dev:tidy  dev:clean  dev:container
 type Release mg.Namespace // release:prepare
 type Chart mg.Namespace   // chart:version  chart:lint  chart:validate  chart:test  chart:package
 
@@ -151,7 +151,7 @@ func (Build) All() error {
 }
 
 // FIPS compiles openvox-ca with GOEXPERIMENT=boringcrypto for FIPS compliance
-// (Linux/amd64 only). Output: bin/openvox-ca-fips.
+// (Linux/amd64 only). Output: bin/openvox-ca and bin/openvox-ca-ctl.
 func (Build) FIPS() error {
 	fmt.Println("Building FIPS compliant binary...")
 
@@ -161,7 +161,7 @@ func (Build) FIPS() error {
 		fmt.Println("  The build will continue, but it will create a LINUX binary (GOOS=linux).")
 	} else if targetOS == "" && runtime.GOOS == "windows" {
 		fmt.Println("WARNING: You are building on Windows, but FIPS mode requires Linux.")
-		fmt.Println("  Cross-compiling a LINUX binary (bin/openvox-ca-fips). This will not run on Windows.")
+		fmt.Println("  Cross-compiling LINUX binaries (bin/openvox-ca, bin/openvox-ca-ctl). These will not run on Windows.")
 	}
 
 	binDir, err := ensureBinDir()
@@ -6598,14 +6598,13 @@ config:
       store: {secret: {name: a-tls, namespace: openvox}}
 `,
 			wants: []string{
-				// Unique to this NOTE, unlike the existingConfigMap arm's
-				// parenthetical: the export NOTE's reads "(args, envFrom, or a
-				// --config in". So it identifies the NOTE and the route
-				// together, and repeating the header here only meant a
-				// rewording of it failed twice.
+				// Identifies the NOTE and the route together, where the
+				// existingConfigMap arm's parenthetical would not; repeating the
+				// header here only meant a rewording of it failed twice. The
+				// export NOTE names the same routes, so notWants rules it out.
 				"(args, or a --config in",
 			},
-			notWants: []string{"name: \"openvox-ca-managed-certs\"", "(existingConfigMap)"},
+			notWants: []string{"name: \"openvox-ca-managed-certs\"", "(existingConfigMap)", "the export targets"},
 		},
 		{
 			// Every other render case configures exactly one entry, so the
@@ -6921,14 +6920,14 @@ config:
 			wants: []string{"namespace-wide patch on every"},
 		},
 		{
-			// exportTargetNames now returns "unknown" on all four routes, so the
+			// exportTargetNames now returns "unknown" on all three routes, so the
 			// disclosure had to stop naming existingConfigMap as the cause and
 			// offering a remedy — moving targets into kubernetesExport.targets —
 			// that cannot work while the config stays unreadable.
 			name:  "NOTES names the right cause when the config is unreadable another way",
 			notes: true,
 			sets:  []string{tls, "kubernetesExport.enabled=true", "extraArgs[0]=--config=/other.yaml"},
-			wants: []string{"args, envFrom, or a --config in extraArgs", "will not help"},
+			wants: []string{"the export targets (args, or a --config in extraArgs)", "will not help"},
 		},
 		{
 			name:  "NOTES names the cluster-wide scope when that is what was created",
@@ -9948,11 +9947,10 @@ path "transit/sign/test-*" { capabilities = ["update"] }
 // etcd_integration). The suite boots an in-process embedded etcd, so unlike the
 // Redis suite it needs no external service, compose stack, or network pulls.
 // The suite is heavily concurrent by design (cross-replica append races,
-// concurrent decompositions, contended locks), so it runs under the race
-// detector; -race needs cgo, which is on by default everywhere this runs --
-// CGO_ENABLED=1 is set rather than inherited because the standard build is
-// CGO_ENABLED=0, so a developer who has exported it would get a build failure
-// instead of a test run.
+// contended locks), so it runs under the race detector; -race needs cgo, which
+// is on by default everywhere this runs -- CGO_ENABLED=1 is set rather than
+// inherited because the standard build is CGO_ENABLED=0, so a developer who
+// has exported it would get a build failure instead of a test run.
 func (Test) BackendsEtcd() error {
 	fmt.Println("Running etcd-backend integration tests...")
 	return sh.RunWithV(map[string]string{"CGO_ENABLED": "1"},

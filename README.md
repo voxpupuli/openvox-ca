@@ -501,12 +501,15 @@ than authenticated. Denials are logged, with the string to grep for, in
 [authorisation parity](docs/migrating-from-puppet-server.md#authorisation-parity).
 
 `POST /certificate_renewal` accepts only certificates this CA issued and has not
-revoked. In the default single-issuer topology nothing reaches that check that
-the authorisation middleware had not already refused with `403 access denied`
-(TLS requests but does not verify a client certificate — see [HTTPS with
-mTLS](#https-with-mtls)). The gate becomes load-bearing once a second issuer can
-be trusted for client authentication. There is no opt-out: an agent holding a
-certificate from a replaced CA must re-enrol. See [renewal
+revoked. The issuer requirement is a defence in depth that no shipped
+configuration reaches: the authorisation middleware has already refused a
+certificate from another issuer with `403 access denied` (TLS requests but does
+not verify a client certificate — see [HTTPS with mTLS](#https-with-mtls)),
+including one issued by a `client_ca` entry, because renewal stays scoped to
+this CA's own namespace. The revocation requirement is reached: on a replica
+that has not yet reloaded the CRL, the middleware lets a revoked certificate
+through and renewal refuses it, with the same `403`. There is no opt-out: an
+agent holding a certificate from a replaced CA must re-enrol. See [renewal
 eligibility](docs/migrating-from-puppet-server.md#renewal-eligibility).
 
 ## Getting help

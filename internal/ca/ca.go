@@ -263,12 +263,12 @@ type CA struct {
 	// Empty (the zero value) means the mechanism is entirely dormant -- no
 	// goroutine, no storage key, no behaviour change of any kind.
 	//
-	// The server sets this from `managed_certs` at startup, in
-	// attachManagedCerts, before it starts its background jobs -- and whether
-	// it is empty is what decides that the reconcile job runs at all. The CA's
-	// own serving certificate (#326) will be the second instance and brings its
-	// own store. ReconcileManaged reads the slice on every pass and does not
-	// expect it to change underneath it.
+	// The server sets this at startup from `managed_certs`, in
+	// attachManagedCerts, and, when serving_cert is configured, puts the CA's
+	// own serving certificate first (cmd/openvox-ca/main.go), before it starts
+	// its background jobs -- and whether it is empty is what decides that the
+	// reconcile job runs at all. ReconcileManaged reads the slice on every pass
+	// and does not expect it to change underneath it.
 	//
 	// Note that a managed certificate's predecessor is retired according to
 	// SupersedeAfter, whose zero value revokes immediately -- so a CA that
@@ -777,11 +777,13 @@ func (c *CA) CRLChainLastRead() time.Time {
 }
 
 // CRLUpdated returns a channel that receives a value each time the CRL is
-// re-signed (revoke, reissue, background refresh, or expired-cert cleanup).
-// Notifications are coalesced: the channel is buffered to depth 1 and written
-// non-blockingly, so when several CRL updates happen before the consumer reads,
-// only a single pending signal is observed. Intended for a single consumer
-// (e.g. the Kubernetes exporter) that re-reads the current CRL on each wake-up.
+// re-signed (revoke, reissue, background refresh, expired-cert cleanup, a
+// delayed supersession, or an upstream chain change from crl_chain.urls or
+// crl_chain.file). Notifications are coalesced: the channel is buffered to
+// depth 1 and written non-blockingly, so when several CRL updates happen before
+// the consumer reads, only a single pending signal is observed. Intended for a
+// single consumer (e.g. the Kubernetes exporter) that re-reads the current CRL
+// on each wake-up.
 func (c *CA) CRLUpdated() <-chan struct{} {
 	return c.crlNotify
 }

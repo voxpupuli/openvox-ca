@@ -20,7 +20,7 @@ interface. Every backend serves the following logical keys:
 | `inventory` | Append-only log of issued/revoked certificates | sign / revoke / seed |
 | `inventory_hmac` | Inventory integrity head (blob HMAC, or hash chain on the structured backends: SQL, etcd, redis) | sign / revoke |
 | `hmac_key` | Integrity key for `inventory_hmac` | first run |
-| `superseded` | JSON list of certificates a renewal has replaced and that are awaiting delayed revocation: `{serial, subject, revoke_at}` per entry. Absent until the first supersession, which needs `superseded_cert_revoke_after_sec` set. Read-modify-written whole, under the cluster `crl` lock so an append and the sweep's rewrite exclude each other | renew / auto-renew / revoke / supersession sweep |
+| `superseded` | JSON list of certificates a renewal has replaced and that are awaiting delayed revocation: `{serial, subject, revoke_at}` per entry. Absent until the first supersession: a renewal that retires the certificate it replaced records one unless `superseded_cert_revoke_after_sec` is 0 (unset means 24 hours), and a `managed_certs` entry's `revoke_after` sets its own window. Read-modify-written whole, under the cluster `crl` lock so an append and the sweep's rewrite exclude each other | renew / auto-renew / managed reconcile / revoke / supersession sweep |
 | `csr/<subject>` | Pending certificate signing request (PEM), per subject | CSR submission |
 | `cert/<subject>` | Issued certificate (PEM), per subject | sign |
 

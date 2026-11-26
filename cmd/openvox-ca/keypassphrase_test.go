@@ -319,9 +319,9 @@ var _ = Describe("the server's own startup, on a missing key passphrase", func()
 	// table makes visible: with encrypt_ca_key off and a read failing, an
 	// encrypted stored key is invisible here, so this check passes and the
 	// passphrase refusal -- if the read recovers -- is raised by Init past the
-	// fork. Whether to propagate the read error instead is a code change and is
-	// recorded as an open question on #371, not settled here. Either way, a
-	// change to this behaviour should have to change a spec.
+	// fork. Whether to propagate the read error instead was raised in #371's
+	// review and deliberately left as is. Either way, a change to this
+	// behaviour should have to change a spec.
 	DescribeTable("falls back to the setting when the store cannot be read",
 		func(failOn string, encrypt, wantRefusal bool) {
 			dir := GinkgoT().TempDir()

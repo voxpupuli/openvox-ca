@@ -81,7 +81,7 @@ tests:
               summary: "An upstream CRL published by the OpenVox CA is approaching its NextUpdate."
 
   # Where the lifetime cannot be worked out the floor alone applies, at the
-  # same 48h boundary as the case above: a CA too old to export thisUpdate,
+  # same 48h boundary as the case above: an issuer with no thisUpdate series,
   # and a non-conforming CRL whose thisUpdate is after its nextUpdate, whose
   # "lifetime" is negative. Without the floor's arm neither would warn at all.
   - interval: 5m

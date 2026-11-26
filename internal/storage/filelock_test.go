@@ -439,9 +439,9 @@ var _ = Describe("Same-host locking", func() {
 			// records, is the runtime form of a platform without flock(2), and
 			// gets the same answer: warn, report absent, let WithLock fall
 			// through to the mutex. Failing hard instead would break bootstrap,
-			// signing, revocation and CRL refresh on a store that worked before
-			// this tier existed — a whole-CA outage introduced by a lock nobody
-			// asked that filesystem to take.
+			// signing, revocation and CRL refresh on a store that is otherwise
+			// able to run — a whole-CA outage introduced by a lock nobody asked
+			// that filesystem to take.
 			func(errno error) {
 				orig := tryLock
 				tryLock = func(*os.File) (bool, error) { return false, errno }

@@ -53,13 +53,16 @@ Read that as scoped to the lock names, because it is. Two processes contending
 for the *same* name — the same subject, the CRL, bootstrap, a migration — now
 exclude each other. Two processes issuing for **different** subjects hold
 different `subject:<name>` locks and are not serialised against each other at
-all, so the inventory-HMAC corruption in the motivating issue is *not* fully
-closed by this tier: `AppendInventory` is guarded by `inventoryMu` and no
-cluster lock, so its append and integrity rewrite can still interleave and
+all, so the inventory-HMAC corruption in the motivating issue is *not* closed
+by this tier on filesystem: `AppendInventory` is guarded by `inventoryMu` and
+no cluster lock, so its append and integrity rewrite can still interleave and
 leave an HMAC covering a blob that never existed, which fails `InitHMAC` at the
-*next* start. That is [#204](https://github.com/voxpupuli/openvox-ca/issues/204)
-in the known gaps below, and the fix for it inherits cross-process coverage on
-these backends from this tier.
+*next* start. SQLite never had that gap, because its append and chain head
+commit in one transaction. On filesystem it is closed by scope rather than by
+this tier: the store-wide instance lock
+([#275](https://github.com/voxpupuli/openvox-ca/issues/275)) refuses a second
+process; see [#204](https://github.com/voxpupuli/openvox-ca/issues/204) in the
+known gaps below.
 
 What it does not buy is clustering. `flock(2)` is not a sound basis for
 coordination across hosts — over NFS it depends on the server, the mount
@@ -181,10 +184,10 @@ service operators restart and kill. Consequences worth knowing:
     (`EOPNOTSUPP`, `ENOSYS`), or a kernel out of lock records (`ENOLCK`) —
     absent again, not fatal. `EROFS` says nothing about ownership, and a store
     nobody can lock is the runtime form of a platform without `flock(2)`;
-    failing hard there would take down a CA that worked before this tier
-    existed. The three are grouped by what they cost, not by what they mean:
-    the first two are properties of the mount and the third is transient
-    pressure, so read the errno in the log line rather than the message.
+    failing hard there would stop a CA that is otherwise able to run. The
+    three are grouped by what they cost, not by what they mean: the first two
+    are properties of the mount and the third is transient pressure, so read
+    the errno in the log line rather than the message.
 
 Crash recovery is not uniform across the distributed backends. etcd and Redis self-heal
 within the lock TTL (30 s): a crashed holder's lease or key expires and the lock
@@ -302,23 +305,23 @@ started waits for it to end. So no background hold may outlast a fixed budget,
 `sweepStepBudget` (a quarter of `lockTimeout`) in
 [crlyield.go](../../internal/ca/crlyield.go). The two sweeps work in steps of at
 most `sweepStepEntries` entries, through `CA.sweepStep`, and the two refresh
-jobs run as a single step each through it. Each step is its own
-acquisition, complete on its own: what it prunes it also drops from the CRL,
-and what it revokes it also writes back. Stopping between steps loses nothing.
-A step has two budgets, both `sweepStepBudget`. The wait for the lock runs on
-the job's context, so a shutdown ends it. The hold runs on a context detached
-from the job's, so a shutdown cannot cut a step off between a durable write and
-its bookkeeping, and its budget starts when the lock is granted, so a step that
-waited long still has all of it. The detachment happens *before* the lock is
-taken, and the hold's budget is fixed at acquisition. A step that needs two
-phases under the lock splits that budget between them rather than adding to
-it. A pass that a shutdown ends is not a failed pass. Before #347 both sweeps
-held the lock for a `lockTimeout` and then gave their post-prune work a further
-`lockTimeout/2` on a context detached inside the lock. A revocation waiting
-with a `lockTimeout` of its own could lose to that, and the managed-certificate
-rollback, waiting with half of one, lost to it by a wide margin.
-`crlyield_internal_test.go` fails if a CRL-lock closure derives a detached
-context again, by `context.WithoutCancel` or by starting from
+jobs and the `crl_chain.urls` merge run as a single step each through it. Each
+step is its own acquisition, complete on its own: what it prunes it also drops
+from the CRL, and what it revokes it also writes back. Stopping between steps
+loses nothing. A step has two budgets, both `sweepStepBudget`. The wait for the
+lock runs on the job's context, so a shutdown ends it. The hold runs on a
+context detached from the job's, so a shutdown cannot cut a step off between a
+durable write and its bookkeeping, and its budget starts when the lock is
+granted, so a step that waited long still has all of it. The detachment happens
+*before* the lock is taken, and the hold's budget is fixed at acquisition. A
+step that needs two phases under the lock splits that budget between them rather
+than adding to it. A pass that a shutdown ends is not a failed pass. Before #347
+both sweeps held the lock for a `lockTimeout` and then gave their post-prune
+work a further `lockTimeout/2` on a context detached inside the lock. A
+revocation waiting with a `lockTimeout` of its own could lose to that, and the
+managed-certificate rollback, waiting with half of one, lost to it by a wide
+margin. `crlyield_internal_test.go` fails if a CRL-lock closure derives a
+detached context again, by `context.WithoutCancel` or by starting from
 `context.Background` or `context.TODO`. It cannot see a closure that re-times a
 context detached before the lock, which only `CA.sweepStep` may do, once, at
 acquisition.
@@ -738,8 +741,9 @@ path — still provides no cross-replica guarantee anyway.
    filesystem backend, the only remaining blob one, the scan runs under the
    process-local `inventoryMu` only (the doc comment on `ErrDuplicateSerial`
    in [storage.go](../../internal/storage/storage.go) spells this out, and
-   the remaining gap is tracked as
-   [#204](https://github.com/voxpupuli/openvox-ca/issues/204)).
+   the remaining gap is closed by the single-instance rule rather than a lock:
+   see the [#204](https://github.com/voxpupuli/openvox-ca/issues/204) entry
+   under Known gaps).
 7. **New lock names are protocol.** There are three homes, one per layer that
    takes a lock. Define CA-layer names as constants in
    [init.go](../../internal/ca/init.go) (keeping `migrateLockName` in
@@ -1194,8 +1198,9 @@ state when the document was last updated and is not guaranteed exhaustive.
   inventory append, which is guarded by `inventoryMu` and no cluster lock: two
   processes issuing for **different** subjects hold different `subject:<name>`
   locks and can still interleave an `AppendInventory` and its HMAC rewrite.
-  That is the blob-backend gap below, and closing it closes the filesystem case
-  with it.
+  That is the gap the #204 entry below describes; its fix covered etcd and
+  Redis, and on filesystem the store-wide instance lock refuses the second
+  process instead.
 - ~~[#204](https://github.com/voxpupuli/openvox-ca/issues/204) — nothing wraps
   `AppendInventory` in a cluster lock, so on a blob backend its
   duplicate-serial check is not cross-writer and the whole-blob HMAC rewrite
@@ -1412,13 +1417,13 @@ scheduler happens to expose it.
 [lockorder_test.go](../../internal/ca/lockorder_test.go)'s rule-9 spec compares
 the count of `subject:<name>` acquisitions before and after a `Sign`, so
 dropping its `WithLock` fails on the delta rather than on a lock wait. The
-`c.mu` spec's expected-acquisition total counts it too. `SignWithTTL` and
-`ImportCertificate` are the ones now left with no spec at all: for those the
-lock-name table above is the only record, and dropping the lock fails no
-assertion. Either shape is worth copying when closing one of the gaps above —
-park-on-a-held-lock proves the operation *waits*, a before/after count proves it
-*acquires*, and the second is much cheaper when the operation is not otherwise
-concurrent.
+`c.mu` spec's expected-acquisition total counts it too. `SignWithTTL` is pinned
+only by the per-mutation count table below. `ImportCertificate` is the one now
+left with no spec at all: for it the lock-name table above is the only record,
+and dropping the lock fails no assertion. Either shape is worth copying when
+closing one of the gaps above — park-on-a-held-lock proves the operation
+*waits*, a before/after count proves it *acquires*, and the second is much
+cheaper when the operation is not otherwise concurrent.
 
 The nested lock-ordering invariant *is* now automated: for each caller that
 holds both locks — `Revoke`, `Clean`, `Renew` and `AutoRenew` in

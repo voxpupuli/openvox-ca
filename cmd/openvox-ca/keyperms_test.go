@@ -36,7 +36,9 @@ import (
 // The startup decision on key-material permissions, and the reporting that
 // follows it. World access is refused, because a CA private key every local
 // account can read is one to treat as exposed. Group access never refuses: it is
-// the mode the store is created with, so a correct deployment has it. A path
+// not the mode every store creates (the SQLite database is created 0660, the
+// filesystem backend writes key material 0600), but a Kubernetes fsGroup ORs it
+// into the volume at every mount, so a correct deployment can have it. A path
 // whose permissions could not be read refuses on its own terms, since "chmod
 // o-rwx" would be a remedy for a condition nobody established.
 //
@@ -47,9 +49,9 @@ import (
 // assembling the path from the layout.
 //
 // Any spec that touches the key file on disk goes through this. The layout is
-// the store's to define, and #399 moves the CA key out of private/ to the top
+// the store's to define, and #399 moved the CA key out of private/ to the top
 // of the cadir, so a spec that joins "private" and "ca_key.pem" itself asserts
-// against a path that will not hold the key. The loud half of that is a spec
+// against a path that does not hold the key. The loud half of that is a spec
 // that fails; the dangerous half is quiet -- an assertion that the key does
 // *not* exist at a given path, which is how the pre-fork ordering claims here
 // are written, passes trivially once the path is wrong, and the property stops

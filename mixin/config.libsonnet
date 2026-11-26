@@ -66,8 +66,8 @@
     // fraction alone in charge. It applies to every issuer, so a floor above a
     // short-lived upstream's re-sign margin brings back the permanent firing
     // the fraction exists to end. It is also the whole threshold where the
-    // lifetime cannot be worked out: on a CA too old to export
-    // openvoxca_crl_chain_this_update_timestamp_seconds, and for a
+    // lifetime cannot be worked out: for an issuer with no
+    // openvoxca_crl_chain_this_update_timestamp_seconds series, and for a
     // non-conforming CRL whose thisUpdate is not before its nextUpdate. At the
     // default 0 those get no warning, only OpenVoxCAUpstreamCRLExpired.
     upstreamCRLExpiryWarningSeconds: 0,

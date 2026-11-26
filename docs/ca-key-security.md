@@ -463,7 +463,7 @@ It would slot in as a third `--ca-key-provider` value, alongside `file` (default
   via the system p11-kit configuration rather than hardcoding library paths
 - CGo dependency for the PKCS#11 C bindings (build-time opt-in)
 
-This is tracked as a separate feature. Contributions welcome.
+Contributions welcome.
 
 ## Monitoring destructive operations
 

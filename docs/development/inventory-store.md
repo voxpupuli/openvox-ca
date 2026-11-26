@@ -462,7 +462,7 @@ Rules that keep the decomposed structure coherent:
 
 ## Implementation phases
 
-Each phase is a separate commit.
+All seven phases have landed, each as a separate change.
 
 1. **Interface + routing.** Define `InventoryEntry` / `InventoryStore`; fork the
    `StorageService` inventory methods; move the subject-scan into
@@ -477,15 +477,15 @@ Each phase is a separate commit.
    backends: latest-wins lookups, chain tamper detection (modify / insert /
    delete), byte-identical render, and a filesystem ⇄ sqlite migration
    round-trip that verifies integrity on both sides.
-5. **Certificate index** (issue #137, a later extension). Extend the SQL
-   inventory table with the projection/state columns, define `CertIndex`,
-   serve `certificate_statuses` from it, and add the startup repair pass.
-6. **etcd decomposition** (issue #138, a later extension). Implement
-   `InventoryStore` and `CertIndex` on the etcd backend with per-entry keys.
-7. **Redis decomposition** (issue #139, a later extension). The same for the
-   Redis/Valkey backend with per-entry hash fields, resolving the chain's one
-   unavoidable read-compute-write optimistically because Lua cannot compute a
-   keyed hash server-side.
+5. **Certificate index** (issue #137). Extend the SQL inventory table with the
+   projection/state columns, define `CertIndex`, serve `certificate_statuses`
+   from it, and add the startup repair pass.
+6. **etcd decomposition** (issue #138). Implement `InventoryStore` and
+   `CertIndex` on the etcd backend with per-entry keys.
+7. **Redis decomposition** (issue #139). The same for the Redis/Valkey backend
+   with per-entry hash fields, resolving the chain's one unavoidable
+   read-compute-write optimistically because Lua cannot compute a keyed hash
+   server-side.
 
 ## Inventory integrity: threat model and rationale
 

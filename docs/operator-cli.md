@@ -514,11 +514,11 @@ together, or stop the service while you do.
 > administrator credential was created. Mirror those too.
 >
 > `rebuild-inventory-hmac` needs `logfile` for the same reason and a sharper
-> one: its audit record is the only lasting evidence that a CA's integrity
-> baseline was re-asserted, and without the setting mirrored the command says
-> "the audit record for this rebuild is terminal-only" and that evidence dies
-> with the shell. On a flag-configured server — the shipped container `CMD`
-> included — mirror `logfile` before running it.
+> one: its log record of the rebuild is the only lasting evidence that a CA's
+> integrity baseline was re-asserted, and without the setting mirrored the
+> command says "the log record of this rebuild is terminal-only" and that
+> evidence dies with the shell. On a flag-configured server — the shipped
+> container `CMD` included — mirror `logfile` before running it.
 >
 > `promote_cn_to_san` needs no mirroring: it has no flag, so the config file and
 > `OPENVOX_CA_*` are its only sources — the same two this command reads, and it
@@ -925,7 +925,7 @@ a server is running: there `--force` goes ahead and prints a note naming
 
 `--pp-cli-auth` stamps the `pp_cli_auth` extension, which grants the holder the
 entire admin tier: signing any request, signing all of them, generating for any
-name, revoking, cleaning, importing, and replacing the CRL. See
+name, revoking, cleaning, importing, and re-signing the CRL. See
 [authorization tiers](api.md#authorization-tiers).
 
 The command prints a warning naming all of that before it issues, and requires
@@ -937,9 +937,11 @@ get wrong:
 1. `openvox-ca-ctl revoke --certname <name>` — revokes the newest serial.
 2. **Wait for every replica to reload the CRL.** Each holds its own CRL cache,
    so a revocation made elsewhere is not honoured until the process reloads it,
-   which it does within `crl_sync_interval_sec` (60 seconds by default); even
-   afterwards a pre-signed OCSP response already handed out can vouch for the
-   revoked serial for up to another four hours.
+   which it does within `crl_sync_interval_sec` (60 seconds by default). A
+   replica whose `openvoxca_crl_sync_failures_total` keeps rising keeps the CRL
+   it already holds: restart it. Even afterwards a pre-signed OCSP response
+   already handed out can vouch for the revoked serial for up to another four
+   hours.
 3. **Check the inventory for other live serials for that name.** With
    `revoke_on_auto_renew: false`, or after a renewal whose best-effort revoke
    failed, more than one can be valid. Step 1 retires only the newest; retire
@@ -1136,7 +1138,7 @@ it does not.
 $ openvox-ca rebuild-inventory-hmac
 Using config file: /etc/openvox-ca/config.yaml
 Storage backend: filesystem; CA key provider: file; cadir: /srv/openvox-ca
-No logfile configured: the audit record for this rebuild is terminal-only.
+No logfile configured: the log record of this rebuild is terminal-only.
 Backend does not coordinate locks across hosts (atomic inventory append: false), so exactly one
   instance is supported. Rebuilding refuses while a server holds the store, where the
   store offers a lock to hold; reporting never takes it.
@@ -1245,9 +1247,9 @@ Note also that every failure exits 1, so the status distinguishes "something is
 wrong" from "nothing is", not one cause from another.
 
 The whole report goes to stdout, including the resolved-configuration header.
-The verdict — the refusal, or an error — goes to stderr, as does the audit
-record when no `logfile` is configured, so capture both for a support ticket:
-`openvox-ca rebuild-inventory-hmac > integrity.txt 2>&1`.
+The verdict — the refusal, or an error — goes to stderr, as does the log
+record of the rebuild when no `logfile` is configured, so capture both for a
+support ticket: `openvox-ca rebuild-inventory-hmac > integrity.txt 2>&1`.
 
 Four states it treats differently, and **none of them is the ordinary
 mismatch** the transcript above shows — that one is a usable key with a stored

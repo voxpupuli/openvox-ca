@@ -1132,11 +1132,13 @@ This content goes to every agent, so an unverified file would be a way to inject
 arbitrary bytes into every agent's CRL store. Whether the check can succeed for
 a given CRL depends on the stored bundle holding that issuer's certificate:
 importing the *complete* chain, up to and including the root, is what makes the
-root's own CRL publishable. `openvox-ca-ctl import` does not currently enforce
-completeness — a partial chain is accepted, and the CRLs whose issuers are
-missing from it are then discarded on every refresh. That is visible rather than
-silent: `openvoxca_crl_chain_discarded_total` counts it and the shipped mixin
-alerts on it as `OpenVoxCAUpstreamCRLDiscarded`.
+root's own CRL publishable. `openvox-ca-ctl import` and
+`openvox-ca import-ca-cert` both refuse a bundle that stops short of a
+self-signed root, but a bundle placed another way (`ca_cert_file`, an adopted
+cadir) is not checked, and the CRLs whose issuers are missing from it are then
+discarded on every refresh. That is visible rather than silent:
+`openvoxca_crl_chain_discarded_total` counts it and the shipped mixin alerts on
+it as `OpenVoxCAUpstreamCRLDiscarded`.
 
 A CRL this CA issued is ignored if found in the file — its own is always rebuilt
 from the inventory, and a stale copy must not be able to supersede live
@@ -1333,7 +1335,7 @@ sees every connection come from the controller's address. Then:
   submitting a CSR through the proxy, so a fleet enrolling at once is refused
   past the 60th request in a minute.
 - `ocsp_rate_limit` is likewise one budget for every verifier.
-- The cap of 100,000 tracked addresses below cannot be reached, so the refusal
+- The cap of 100,000 tracked addresses above cannot be reached, so the refusal
   it causes does not arise.
 - `rate_limit_ipv6_prefix_length` has no effect, since every request carries
   the proxy's one address.
@@ -1442,16 +1444,16 @@ step reads the whole inventory. On the filesystem backend, the default, each
 step also rewrites the whole inventory file and its integrity value; on SQLite,
 PostgreSQL and MySQL it rebuilds the integrity chain over every surviving row.
 So a first pass over a backlog of N expired certificates in an inventory of I
-rows does about N/100 full passes over I where it used to do one — 1,500 of them
-for 150,000 expired certificates. A step that drops entries from the CRL also
-re-signs it, which re-runs the Kubernetes export for any `kubernetes_export`
-target carrying the CRL and, on etcd, writes a new revision of the CRL until
-compaction. Each step also holds the CA's in-memory lock for its whole length
-(the prune, the CRL re-sign and the deletions after it), at most 15 seconds plus
-any CA signature in flight, and that lock is not only issuance's: OCSP answers,
-cached ones included, wait on it too, once a step for as long as the pass
-lasts. The readiness check (`/healthz/ready`) takes no lock, so a long step
-cannot take a replica out of its Service.
+rows does about N/100 full passes over I — 1,500 of them for 150,000 expired
+certificates. A step that drops entries from the CRL also re-signs it, which
+re-runs the Kubernetes export for any `kubernetes_export` target carrying the
+CRL and, on etcd, writes a new revision of the CRL until compaction. Each step
+also holds the CA's in-memory lock for its whole length (the prune, the CRL
+re-sign and the deletions after it), at most 15 seconds plus any CA signature in
+flight, and that lock is not only issuance's: OCSP answers, cached ones
+included, wait on it too, once a step for as long as the pass lasts. The
+readiness check (`/healthz/ready`) takes no lock, so a long step cannot take a
+replica out of its Service.
 
 The prune has a ceiling of its own. A step's prune gets half of the step's 15
 seconds, about 7.5, to read, verify and rewrite the whole inventory, and no
@@ -1709,10 +1711,10 @@ Some things worth knowing before you rely on it:
   CRL ends the pass — it leaves every entry still due on the list, raises
   `openvoxca_supersede_failures_total`, and the next pass retries them. Each
   step also reads and rewrites the whole pending-supersession list, so a
-  backlog of D due entries costs about D/100 list rewrites where a pass used to
-  write it once; on etcd each rewrite is a new revision until compaction. Each
-  step's CRL re-sign likewise re-runs the Kubernetes export for targets
-  carrying the CRL and, on etcd, adds a revision of the CRL.
+  backlog of D due entries costs about D/100 list rewrites; on etcd each
+  rewrite is a new revision until compaction. Each step's CRL re-sign likewise
+  re-runs the Kubernetes export for targets carrying the CRL and, on etcd, adds
+  a revision of the CRL.
 - **Revoking a subject retires its pending predecessor too.** `revoke --certname`
   and `DELETE /certificate_status` retire the subject's current certificate
   *and* anything of that subject's still inside its window, in the same call —
@@ -3464,7 +3466,7 @@ This is particularly important for **Kubernetes rolling updates**: pods receive 
 | `--tls-cert` / `--tls-key` | The renewed keypair is served to new TLS handshakes; connections in flight keep the certificate they negotiated with |
 | `--puppet-server-file` | The admin allow list is rebuilt from the current file contents, merged with the `--puppet-server` value the process started with, and swapped atomically with respect to in-flight requests |
 
-A `client_ca` entry's `crl_file` is re-read too, but **on its own timer rather than on `SIGHUP`** — every `client_crl_refresh_interval_sec`, by the `client-crl-refresh` job. It needs no signal and is not listed above because nothing an operator does triggers it. The entry's *anchors* are not re-read at all: changing `file` needs a restart, deliberately, since a trust anchor changing under a running server is not a reload but a different trust configuration.
+A `client_ca` entry's `crl_file` is re-read too, but **on its own timer rather than on `SIGHUP`** — every `client_crl_refresh_interval_sec`, by the client CRL reload job. It needs no signal and is not listed above because nothing an operator does triggers it. The entry's *anchors* are not re-read at all: changing `file` needs a restart, deliberately, since a trust anchor changing under a running server is not a reload but a different trust configuration.
 
 `--puppet-server` (config key `puppet_server`) itself is frozen at startup: a CN removed from it stays an admin until the server restarts. Reload only re-reads the *file*.
 

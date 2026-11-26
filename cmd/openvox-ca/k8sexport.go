@@ -77,8 +77,9 @@ func startK8sExport(g *goroutineGroup, c *ca.CA, cfg k8sexport.Config, m *k8sexp
 // runK8sExporter publishes the CA certificate and CRL into the configured
 // Kubernetes Secrets/ConfigMaps. It exports once at startup (reconciling state
 // after restarts, config changes, or a CA import) and then re-exports whenever
-// the CRL is updated (revoke, reissue, background refresh, or expired-cert
-// cleanup), so CRL-bearing objects stay current.
+// the CRL is updated (revoke, delayed supersession, reissue, background
+// refresh, expired-cert cleanup, or a change to the upstream chain from
+// crl_chain.urls or crl_chain.file), so CRL-bearing objects stay current.
 //
 // A cycle in which any target failed is retried after retryInterval, and keeps
 // being retried until one succeeds completely. The CRL-update signal alone is

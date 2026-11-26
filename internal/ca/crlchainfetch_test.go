@@ -148,6 +148,21 @@ var _ = Describe("MergeFetchedUpstreamCRLs", func() {
 		Expect(status(urlSub).Failures).To(BeZero())
 	})
 
+	It("signals CRL consumers when it republishes the chain", func() {
+		// CRLUpdated's documentation and docs/kubernetes-export.md list an
+		// upstream chain change from crl_chain.urls among the re-export
+		// triggers; without the signal an exported CRL blob keeps the old
+		// chain until the next local re-sign.
+		select {
+		case <-myCA.CRLUpdated():
+		default:
+		}
+
+		rewritten, _ := merge(ca.UpstreamFetch{URL: urlRoot, CRL: crlOf(root, rootKey, 3)})
+		Expect(rewritten).To(BeTrue())
+		Eventually(myCA.CRLUpdated()).Should(Receive())
+	})
+
 	It("counts an equal CRL as current: a success, and no rewrite", func() {
 		publish(crlOf(root, rootKey, 3), crlOf(sub, subKey, 5))
 		before := mustGetCRL(ctx, store)

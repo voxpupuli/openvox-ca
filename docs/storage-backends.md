@@ -153,8 +153,9 @@ unsupported thing is attempted on one host. It cannot do more than that:
   put it there.
 - **Where the store cannot be locked at all** — a filesystem without `flock(2)`,
   a read-only mount — the server logs a warning and starts anyway, because
-  refusing over a lock that is unavailable rather than held would take down a CA
-  that worked before. The rule still holds; only the enforcement is missing.
+  refusing over a lock that is unavailable rather than held would stop a CA that
+  is otherwise able to run. The rule still holds; only the enforcement is
+  missing.
 
 So the rule is not "the lock will stop you". It is that these backends support
 one instance, and the lock catches the case it can.
@@ -594,7 +595,7 @@ etcd_tls_key_file:  /etc/openvox-ca/etcd-client-key.pem
   head consistent. The expired-certificate cleanup prunes in steps of at most
   100 entries, each its own hold on the CRL lock with a second's pause
   between them, and a pass keeps stepping until the backlog is gone, so the
-  interval no longer limits how fast a backlog drains. Each step reads the
+  cleanup interval does not limit how fast a backlog drains. Each step reads the
   whole inventory, though, so a first pass over a backlog of N expired
   certificates reads it N/100 times rather than once.
 - **Serial numbers marked ambiguous.** A store whose single-blob inventory
@@ -755,8 +756,8 @@ redis_tls_key_file:  /etc/openvox-ca/redis-client-key.pem
   expired-certificate cleanup prunes in steps of at most 100 entries, each one
   atomic script — the inventory and its integrity head are never observably
   out of step — and its own hold on the CRL lock, with a second's pause between
-  them. A pass keeps stepping until the backlog is gone, so the interval no
-  longer limits how fast a backlog drains, but each step reads the whole
+  them. A pass keeps stepping until the backlog is gone, so the cleanup interval
+  does not limit how fast a backlog drains, but each step reads the whole
   inventory, so a first pass over a backlog of N expired certificates reads it
   N/100 times rather than once, each in a script that blocks the server.
 - **Serial numbers marked ambiguous.** A store whose single-blob inventory
@@ -1092,13 +1093,7 @@ first start after an upgrade that adds a migration fails before it serves.
 Apply that release's schema change yourself first, as the owner. A migration
 that adds a column looks for it before adding it, so the CA then finds it in
 place and only records the migration in `bun_migrations`, which row access
-allows. The release that adds
-[`status_fingerprint_algorithms`](configuration.md#status-fingerprints) adds
-one column:
-
-```sql
-ALTER TABLE puppet_ca_inventory ADD COLUMN fingerprints TEXT;
-```
+allows.
 
 ### How long startup may wait
 
@@ -1291,7 +1286,10 @@ ca_key_file:  /etc/openvox-ca/secrets/ca_key.pem
 - On subsequent starts, the cert and key are loaded from the local paths.
 - `openvox-ca` writes the cert at mode `0644` and the key at mode `0600`
   atomically (temp-file + rename). If you supply pre-existing files, they are
-  read as-is and never overwritten unless the server rotates the CA.
+  read as-is, and overwritten only when you replace the CA through this
+  configuration: `openvox-ca import-ca-cert --force` (the certificate only) or
+  an `openvox-ca-ctl migrate` into it. `openvox-ca-ctl import` writes into its
+  own `--cadir` and never reaches these paths.
 - A supplied `ca_key_file` is checked at startup on **every** backend, like any
   other file holding key material: world access refuses startup, group access is
   reported at `Info`. Where the path is a read-only mount — a Kubernetes Secret
@@ -1402,17 +1400,18 @@ sql_dsn: file:/etc/puppetlabs/puppet/ssl/ca/ca.db
 ```
 
 The migration copies the whole CA — certificate, keys, CRL, serial, the
-inventory (its integrity value is recomputed under the destination's own
-scheme, so tamper detection continues to work there), every pending CSR and
-every signed certificate. The inventory's lines are converted when exactly one end is
-the filesystem backend: into a database they are read in either form and stored
-in the canonical one, and onto the filesystem they are written in OpenVox
-Server's format, so the result can be [shared with OpenVox
+inventory (its integrity value is recomputed under the destination's own scheme,
+so tamper detection continues to work there), the queue of certificates awaiting
+delayed revocation (`superseded.json`), every pending CSR and every signed
+certificate. The inventory's lines are converted when exactly one end is the
+filesystem backend: into a database they are read in either form and stored in
+the canonical one, and onto the filesystem they are written in OpenVox Server's
+format, so the result can be [shared with OpenVox
 Server](#sharing-the-cadir-with-openvox-server). Between two backends of the
-same kind they are copied unchanged. Per-subject generated private keys are **not** copied: they
-always live on the local filesystem under `cadir`, so on a remote backend they
-stay put across a migration. The `ca_cert_file` / `ca_key_file` overrides are
-honoured on both ends.
+same kind they are copied unchanged. Per-subject generated private keys are
+**not** copied: they always live on the local filesystem under `cadir`, so on a
+remote backend they stay put across a migration. The `ca_cert_file` /
+`ca_key_file` overrides are honoured on both ends.
 
 Notes:
 

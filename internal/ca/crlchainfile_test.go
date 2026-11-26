@@ -184,6 +184,24 @@ var _ = Describe("crl_chain.file", func() {
 		Expect(chain[1].Issuer.CommonName).To(Equal("Upstream Root CA"))
 	})
 
+	It("signals CRL consumers when it republishes the chain", func() {
+		// CRLUpdated's documentation and docs/kubernetes-export.md list an
+		// upstream chain change among the re-export triggers; without the
+		// signal an exported CRL blob keeps the old chain until the next local
+		// re-sign.
+		trustUpstream()
+		myCA.CRLChainFile = writeChainFile(upsCRL)
+		select {
+		case <-myCA.CRLUpdated():
+		default:
+		}
+
+		rewritten, err := myCA.RefreshCRLChainFile(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rewritten).To(BeTrue())
+		Eventually(myCA.CRLUpdated()).Should(Receive())
+	})
+
 	// The property the in-lock comparison exists for, and the only one on this
 	// path that a sequential spec cannot reach.
 	//

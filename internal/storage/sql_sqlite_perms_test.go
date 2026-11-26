@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Copyright (C) 2026 Chris Boot
 // Copyright (C) 2026 Vox Pupuli and contributors
 //
@@ -18,7 +20,6 @@
 // Not built on Windows: these specs set syscall.Umask, which does not exist
 // there, and file modes do not carry the meaning they are about. The build
 // system tolerates a Windows target but nothing ships one.
-//go:build !windows
 
 package storage
 
@@ -258,8 +259,8 @@ var _ = Describe("SQLiteFilePermissions", func() {
 		Expect(permOf(dbPath)).To(Equal(os.FileMode(0o644)), "FIFO mode left alone")
 	})
 
-	// A symlinked database is the operator's own choice, and it worked before any
-	// of this existed. The DSN is resolved so the sidecars and the lock directory
+	// A symlinked database is the operator's own choice, and one this code has
+	// to keep working. The DSN is resolved so the sidecars and the lock directory
 	// are derived from the same real path -- which is also where SQLite puts them,
 	// since it canonicalises the filename first.
 	It("accepts a DSN that is a symlink to an existing database", func() {

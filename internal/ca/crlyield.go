@@ -47,15 +47,15 @@ import (
 //
 // Yielding before a step is not enough on its own, because a revocation that
 // arrives after a step has started waits for that step to end. So the sweeps
-// work in steps, each its own acquisition, the two refresh jobs run as a
-// single step each, all through sweepStep, and every step's hold is bounded by
-// one budget, sweepStepBudget, counted from the moment the lock is granted,
-// with nothing inside the lock extending it. That is the shape #347 removed:
-// both sweeps used to hold the lock for a LockTimeout and then grant
-// themselves a further LockTimeout/2 on a detached context, so a slow sweep
-// could outlast every revocation waiting on it. The spec in
-// crlyield_internal_test.go fails if a CRL-lock closure derives a detached
-// context again.
+// work in steps, each its own acquisition, the two refresh jobs and the
+// crl_chain.urls merge run as a single step each, all through sweepStep, and
+// every step's hold is bounded by one budget, sweepStepBudget, counted from the
+// moment the lock is granted, with nothing inside the lock extending it. That
+// is the shape #347 removed: both sweeps used to hold the lock for a
+// LockTimeout and then grant themselves a further LockTimeout/2 on a detached
+// context, so a slow sweep could outlast every revocation waiting on it. The
+// spec in crlyield_internal_test.go fails if a CRL-lock closure derives a
+// detached context again.
 //
 // What this does not cover, stated so nobody reads more into it: a revocation
 // on another replica. The gate sees callers in this process only. There a

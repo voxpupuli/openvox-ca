@@ -11,7 +11,11 @@
 # install is refused when an override would leave that object behind: a port
 # other than listen.port, a cadir outside persistence.mountPath (a directory
 # under it is fine), or a metrics_listen without metrics.enabled or on a port
-# other than metrics.port.
+# other than metrics.port. These refusals, and the TLS and serving_cert ones,
+# apply only where the chart can see the whole configuration: existingConfigMap,
+# args, envFrom and a --config in extraArgs each put settings where it cannot
+# read them, and it then skips the check rather than refuse an install it
+# cannot judge.
 
 # -- Image ---------------------------------------------------------------------
 
@@ -233,7 +237,8 @@ autosign:
 # config.serving_cert is the alternative: the CA issues and renews this
 # certificate itself, which removes the renewal problem described below
 # entirely — no signal, no restart. The two are mutually exclusive and the
-# chart refuses them together at install time.
+# chart refuses them together at install time, where it can see the whole
+# configuration (see the top of this file).
 #
 # Typically a kubernetes.io/tls
 # Secret issued by cert-manager. When set, the Secret is mounted read-only and
@@ -448,7 +453,8 @@ managedCerts:
 # -- Workload ------------------------------------------------------------------
 
 # More than one needs an external storage backend: filesystem and sqlite
-# support exactly one running instance, and the chart refuses more on either.
+# support exactly one running instance, and the chart refuses more on either
+# where it can see the backend, and warns in the install notes where it cannot.
 replicaCount: 1
 
 # Deployment strategy. Empty follows the reason the default exists rather than
@@ -786,9 +792,12 @@ service:
 # HAProxy form; nginx uses nginx.ingress.kubernetes.io/ssl-passthrough.
 #
 # If you deliberately terminate TLS at the ingress, set
-# config.no_tls_required: true and understand that the pod then serves plain
-# HTTP with no client authentication: the admin API answers anything that
-# reaches the pod's port, so restrict it with networkPolicy below.
+# config.no_tls_required: true and remove every TLS source (tls.existingSecret,
+# config.tls_cert/tls_key, config.serving_cert, OPENVOX_CA_TLS_CERT/_KEY):
+# while any of them is set the listener keeps serving HTTPS and the server only
+# warns. Understand that the pod then serves plain HTTP with no client
+# authentication: the admin API answers anything that reaches the pod's port,
+# so restrict it with networkPolicy below.
 ingress:
   enabled: false
   className: ""
@@ -836,7 +845,8 @@ gateway:
 
   # HTTPRoute terminates TLS at the Gateway, so the CA sees no client
   # certificate. Only useful for the anonymous endpoints (CRL distribution,
-  # health, OCSP) or alongside config.no_tls_required. OCSP is served only with
+  # health, OCSP), or alongside config.no_tls_required with every TLS source
+  # removed (see the ingress note above). OCSP is served only with
   # config.enable_ocsp, and through the route every client shares one
   # ocsp_rate_limit budget; see docs/helm-chart.md.
   httpRoute:
@@ -929,7 +939,8 @@ podDisruptionBudget:
 # act on holds the replica count at minReplicas while looking like it
 # autoscales, so the chart refuses that combination at install time. Scaling out
 # also needs an external storage backend: on filesystem or sqlite the chart
-# refuses a maxReplicas above 1.
+# refuses a maxReplicas above 1 where it can see the backend, and warns in the
+# install notes where it cannot.
 autoscaling:
   enabled: false
   minReplicas: 2

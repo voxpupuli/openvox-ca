@@ -29,6 +29,7 @@ Task. Invoke targets with `go run mage.go <Target>` or the `mage` binary:
 | `mage test:backendsRedis` | Redis backend full-stack bash TAP suite (Puppet topology) |
 | `mage test:backendsRedisGo` | Redis backend Go integration suite (build tag `redis_integration`), under `-race` — needs cgo and a C compiler |
 | `mage test:backendsOpenBao` | OpenBao Transit signer integration suite (build tag `openbao_integration`, `test/compose-backends-openbao.yml`) |
+| `mage test:mixin` | Render the Jsonnet monitoring mixin, check its alerting rules with `promtool check rules` and `promtool test rules`, and refuse a published alert name or `_config` key it no longer has (skips without `jsonnet` or `promtool`) |
 | `mage chart:lint` | Run `helm lint --strict` over the Helm chart, once per fixture in `charts/openvox-ca/ci/` |
 | `mage chart:validate` | Lint the Helm chart, check every rendered fixture against the Kubernetes schemas, and strict-decode each rendered `config.yaml` against the server's schema with `go run ./test/chartconfig` (needs `helm` and `kubeconform`; caches the remote schemas under `.test-output/kubeconform-cache/`, which `mage dev:clean` removes) |
 | `mage chart:test` | Assert what the chart renders, and that each precondition refuses what it claims to |
@@ -53,6 +54,8 @@ guard and its specs, and the note above the first `//nolint:gosec` directive in
 [#313](https://github.com/voxpupuli/openvox-ca/issues/313) has the reasoning.
 
 Route all test artifacts (logs, coverage, results) to `.test-output/` (gitignored).
+The one exception is `mage test:unit`'s coverage profile, `coverage.out`, which
+CI reads from the repository root (gitignored by `*.out`).
 
 ## Testing: Ginkgo + Gomega only
 
@@ -60,7 +63,10 @@ Route all test artifacts (logs, coverage, results) to `.test-output/` (gitignore
 with [Gomega](https://onsi.github.io/gomega/) matchers.** This is a hard
 convention — do not add plain `testing.T` test functions (other than the single
 suite bootstrap per package), and do not introduce `testify` or any other
-assertion library.
+assertion library. The one legacy exception is `internal/signer/openbao`, whose
+older plain `testing.T` tests run beside its Ginkgo bootstrap until
+[#713](https://github.com/voxpupuli/openvox-ca/issues/713) converts them; they
+are not a precedent.
 
 ### Suite bootstrap
 
@@ -492,7 +498,8 @@ published names, which existing deployments are bound to just as firmly:
 - HTTP route prefix `/puppet-ca/v1`
 - Environment-variable prefix `OPENVOX_CA_` (and `OPENVOX_CA_CTL_` for the CLI)
 - Prometheus metric namespace `openvoxca_`
-- Storage key prefixes `puppet-ca`, kept so existing stores stay readable
+- Storage key prefixes `puppet-ca`, the default `etcd_key_prefix` and
+  `redis_key_prefix`
 - Config-file location `/etc/openvox-ca`
 
 These are the names; the whole public API that semantic versioning covers from

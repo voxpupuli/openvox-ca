@@ -1,3 +1,5 @@
+//go:build unix
+
 // Copyright (C) 2026 Chris Boot
 // Copyright (C) 2026 Vox Pupuli and contributors
 //
@@ -16,8 +18,6 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 // Unix-only: these judge unix ownership and mode bits, and make a FIFO.
-
-//go:build unix
 
 package ca_test
 

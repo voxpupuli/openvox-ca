@@ -4,8 +4,8 @@
 An HTTPRoute makes the Gateway terminate TLS, so openvox-ca never sees the
 agent's client certificate and every mTLS-authenticated endpoint stops
 authenticating. Use it only for the anonymous endpoints (CRL, OCSP, health), or
-with config.no_tls_required set behind a trusted proxy. For a general-purpose
-Puppet CA route, use gateway.tlsRoute instead.
+with config.no_tls_required set and every TLS source removed, behind a trusted
+proxy. For a general-purpose Puppet CA route, use gateway.tlsRoute instead.
 */}}
 apiVersion: {{ .Values.gateway.httpRoute.apiVersion | quote }}
 kind: HTTPRoute

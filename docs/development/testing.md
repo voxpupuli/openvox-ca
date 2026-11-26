@@ -1,9 +1,9 @@
 # Testing
 
 This describes the test suites and the container/compose topologies they run in.
-For build/lint conventions and the full `mage` target list, see
-[`AGENTS.md`](../../AGENTS.md); for a contributor overview, see
-[`CONTRIBUTING.md`](../../CONTRIBUTING.md).
+For build/lint conventions and the common `mage` targets, see
+[`AGENTS.md`](../../AGENTS.md) (`mage -l` lists every target); for a contributor
+overview, see [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 
 ## Common targets
 
@@ -588,8 +588,9 @@ the code that dumps it happens to call `tail`.
 `internal/api/contract_test.go` checks openvox-ca's `/puppet-ca/v1` responses
 against responses recorded from a real OpenVox Server, kept under
 `internal/api/testdata/contract/`. It runs in `mage test:unit` and reads only
-committed files; nothing in CI starts OpenVox Server. The rule it enforces, and
-the differences it knows about, are in [the API reference](../api.md#differences-from-openvox-server).
+committed files: it never starts OpenVox Server itself (only re-recording does).
+The rule it enforces, and the differences it knows about, are in [the API
+reference](../api.md#differences-from-openvox-server).
 
 Each fixture under `fixtures/` is one route and outcome: the request, the
 response OpenVox Server gave (headers included, for reference), the image and

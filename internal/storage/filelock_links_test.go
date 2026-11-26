@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Copyright (C) 2026 Chris Boot
 // Copyright (C) 2026 Vox Pupuli and contributors
 //
@@ -17,7 +19,6 @@
 
 // Not built on Windows: these specs plant symbolic links, hard links and FIFOs,
 // and no lock file is ever opened there.
-//go:build !windows
 
 package storage
 
