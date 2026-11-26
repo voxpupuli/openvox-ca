@@ -3,7 +3,7 @@ module github.com/voxpupuli/openvox-ca
 go 1.27.4
 
 require (
-	github.com/alicebob/miniredis/v2 v2.40.0
+	github.com/alicebob/miniredis/v2 v2.41.0
 	github.com/caarlos0/env/v11 v11.4.2
 	github.com/go-sql-driver/mysql v1.10.2
 	github.com/google/go-containerregistry v0.22.1
