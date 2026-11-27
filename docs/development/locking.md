@@ -839,7 +839,7 @@ path — still provides no cross-replica guarantee anyway.
     breaking change for a *running* cluster — during a rolling upgrade, nodes
     on either side of it derive different keys and do not exclude one another
     for the length of the rollout, so it needs a full restart rather than a
-    rolling one. From 1.0.0 it also needs a major release, as does renaming a
+    rolling one. From v1.0.0-beta1 it also needs a major release, as does renaming a
     lock, changing which lock guards a mutation, or changing the order in which
     two nest; see [what the version number
     promises](releasing.md#what-the-version-number-promises).
@@ -1502,7 +1502,7 @@ Four things that file pins which nothing else does:
   assigns it, counted, plus a fresh store's `Init` (`hmac-key` and
   `bootstrap`) and `ImportCA` (`bootstrap` and `crl`). Rule 11 makes this
   protocol, so the lock table's "Taken by" column and that spec change
-  together, in a major release from 1.0.0. The mutations it does not drive are
+  together, in a major release from v1.0.0-beta1. The mutations it does not drive are
   listed in the file's header comment.
 
 What the observer does **not** see, stated because a check that never reaches a

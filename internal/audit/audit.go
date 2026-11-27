@@ -20,7 +20,7 @@
 // An audit record is an ordinary log record that carries an `event` attribute.
 // Its message text is for a human and may be reworded in any release; the
 // event value, and the attributes documented beside it, are what an operator
-// matches on, and from 1.0.0 they change only in a major release. The set is
+// matches on, and from v1.0.0-beta1 they change only in a major release. The set is
 // closed: docs/configuration.md#audit-events lists every value, and a value
 // emitted anywhere else is a value that table is missing.
 //

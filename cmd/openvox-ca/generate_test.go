@@ -833,7 +833,7 @@ var _ = Describe("openvox-ca generate", func() {
 			Expect(entry).To(HaveKeyWithValue("role", "generate"))
 			// The audit event, which is what docs/operator-cli.md tells
 			// operators to alert on: the offline mint has no /metrics, so the
-			// record is the only signal. A literal, because from 1.0.0 it is
+			// record is the only signal. A literal, because from v1.0.0-beta1 it is
 			// public API.
 			Expect(entry).To(HaveKeyWithValue("event", "certificate.auth_grant_issued"))
 		})

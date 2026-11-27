@@ -140,7 +140,7 @@ var _ = Describe("OnDestructiveOperation", func() {
 	})
 
 	It("lists exactly the operations the routes report", func() {
-		// The label values are public API from 1.0.0, and the high-rate
+		// The label values are public API from v1.0.0-beta1, and the high-rate
 		// warning's operation attribute spells them the same way so the two
 		// can be joined.
 		Expect(api.DestructiveOperations).To(ConsistOf("revoke", "clean", "bulk-clean"))

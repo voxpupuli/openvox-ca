@@ -57,8 +57,7 @@ $ cosign verify ghcr.io/voxpupuli/openvox-ca@sha256:… \
 | `main` / `main-distroless` / `main-alpine` | Same as `edge`; the head of `main` |
 
 Pin to a specific semver tag (e.g. `1.2.3`) for reproducible deployments;
-`edge` tracks unreleased changes and can break at any time, so before 1.0.0 pin
-it by digest instead.
+`edge` tracks unreleased changes, so pin it by digest instead.
 
 ## Verifying an image
 
