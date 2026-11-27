@@ -479,7 +479,7 @@ var _ = Describe("Renewal keeps the certificate it renews", func() {
 				Expect(recs[0]).To(HaveKeyWithValue("subject", subject))
 				Expect(recs[0]).To(HaveKeyWithValue("grant", "pp_cli_auth=true"))
 				Expect(recs[0]).To(HaveKeyWithValue("renewal", kind))
-				// The audit event, a literal because from 1.0.0 it is public
+				// The audit event, a literal because from v1.0.0-beta1 it is public
 				// API: renaming audit.CertificateAuthGrantIssued fails here.
 				Expect(recs[0]).To(HaveKeyWithValue("event", "certificate.auth_grant_issued"))
 			},

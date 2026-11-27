@@ -4,7 +4,7 @@
 > of OpenVox CA, what the automation does, and how to rehearse the whole thing
 > on a personal fork before touching the upstream repository. It also declares
 > [what the version number promises](#what-the-version-number-promises): the
-> public API that semantic versioning covers from 1.0.0.
+> public API that semantic versioning covers from v1.0.0-beta1.
 
 A release is two actions: **land a change setting the release version, then
 push an annotated `v*` tag** pointing at it. Everything else is automation —
@@ -20,11 +20,15 @@ fails the gate instead of shipping mislabelled artefacts.
 
 ## What the version number promises
 
-From 1.0.0, openvox-ca follows [semantic versioning](https://semver.org/).
+From v1.0.0-beta1, openvox-ca follows [semantic versioning](https://semver.org/).
 Semver measures every release against a declared public API: a change that
 breaks it needs a new major version, a backwards-compatible addition a new
-minor, and a fix that does neither a new patch. Until 1.0.0 is tagged nothing
-is promised, and a breaking change can land in any release.
+minor, and a fix that does neither a new patch. The betas and release
+candidates that lead to 1.0.0 already keep that promise, although semver
+would allow a pre-release to break it: none of them breaks the public API
+declared here, so nothing breaks it before 2.0.0. Until 1.0.0 is tagged they
+carry fixes only, so `main` takes no new features in the meantime.
+v1.0.0-alpha1, the only release before them, promised nothing.
 
 **The rule.** The public API is whatever this documentation tells an operator,
 or a tool an operator runs, to depend on: a setting to set, a path to mount or
@@ -370,7 +374,7 @@ never name an image that does not exist.
    $ git log --oneline --no-merges <previous-tag>..origin/main
    ```
 
-   From 1.0.0, check for the notes [what the version number
+   From v1.0.0-beta1, check for the notes [what the version number
    promises](#what-the-version-number-promises) requires, and write any that
    apply into the release's summary: a release that cannot be rolled out one
    replica at a time, or must reach every replica before a feature is turned

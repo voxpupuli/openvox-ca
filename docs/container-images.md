@@ -30,8 +30,9 @@ $ docker pull ghcr.io/voxpupuli/openvox-ca:latest-alpine   # Alpine
 ```
 
 `latest` names the most recent final release, so it first appears with 1.0.0.
-Until then, pull `edge`. The pre-releases so far predate the configuration
-the examples below rely on, so their own documentation applies to them.
+Until then, pull `edge`, or a pre-release by its full version (`1.0.0-beta1`).
+v1.0.0-alpha1 predates the configuration the examples below rely on, so its
+own documentation applies to it.
 `edge` moves with every merge to `main`, so pin it by digest
 (`ghcr.io/voxpupuli/openvox-ca@sha256:…`, which `docker image inspect --format
 '{{index .RepoDigests 0}}'` prints after a pull) and read the commits on `main`
@@ -56,8 +57,7 @@ $ cosign verify ghcr.io/voxpupuli/openvox-ca@sha256:… \
 | `main` / `main-distroless` / `main-alpine` | Same as `edge`; the head of `main` |
 
 Pin to a specific semver tag (e.g. `1.2.3`) for reproducible deployments;
-`edge` tracks unreleased changes and can break at any time, so before 1.0.0 pin
-it by digest instead.
+`edge` tracks unreleased changes, so pin it by digest instead.
 
 ## Verifying an image
 

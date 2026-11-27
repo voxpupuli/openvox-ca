@@ -1,14 +1,13 @@
 # openvox-ca
 
-> [!WARNING]
-> openvox-ca has not yet reached 1.0.0. Until a 1.0.0 release is tagged,
-> breaking changes may land at any time, without notice and without much in
-> the way of migration instructions. From 1.0.0 onwards, releases will follow
+> [!NOTE]
+> openvox-ca is in beta. From v1.0.0-beta1, releases follow
 > [semantic versioning](https://semver.org/) over the public API
-> [declared here](docs/development/releasing.md#what-the-version-number-promises),
-> with one reservation for security fixes.
-> The project is under heavy development, so do not run your production fleet on
-> it without understanding the consequences.
+> [declared here](docs/development/releasing.md#what-the-version-number-promises):
+> no release before 2.0.0 will break it, except under the one reservation for
+> security fixes. Until 1.0.0 is tagged, releases carry fixes only.
+> v1.0.0-alpha1 predates this promise. As with any beta, test it before you
+> rely on it for your production fleet.
 >
 > If you are trying it out, and especially if you are adopting it early, come
 > and find us in the `#openvox-ca` channel on the
@@ -100,7 +99,7 @@ $ docker pull ghcr.io/voxpupuli/openvox-ca:latest
 ```
 
 `latest` first appears with the 1.0.0 release; until then, pull `edge`. `edge`
-moves with every merge to `main`, and before 1.0.0 a merge can break things, so
+moves with every merge to `main` and carries changes no release has yet, so
 pin the digest you tested rather than the tag, and read what changed on `main`
 before you move it (each image's `org.opencontainers.image.revision` label names
 the commit it was built from):

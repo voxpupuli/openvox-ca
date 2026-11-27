@@ -149,7 +149,7 @@ var _ = Describe("Signer request checks", func() {
 		Expect(buf.String()).To(ContainSubstring(`msg="Refused a signing request"`))
 		Expect(buf.String()).To(ContainSubstring("hash function unknown hash value 0 is not one the CA signs with"))
 		// The audit event is what the operator alerts on, not the message:
-		// a literal, because from 1.0.0 the value is public API, and
+		// a literal, because from v1.0.0-beta1 the value is public API, and
 		// renaming audit.SignerRequestRefused must fail here.
 		Expect(buf.String()).To(ContainSubstring("event=signer.request_refused"),
 			"the refusal is the signer.request_refused audit record")
